@@ -4,11 +4,13 @@ A lightweight, installable PWA for tracking fuel station shift readings, rates, 
 
 ## Features
 
-- **4 pages**: Dashboard, Pumps (shift entry), Config (rates/stations/team), History
-- **Role-based access**: Super Admin, Station Admin, Staff
-- **Multi-station**: Switch between stations from the top bar
-- **Offline-ready**: Service worker caches the app shell for PWA install
-- **Mobile-first**: Clean, rounded UI designed for phone use
+- **4 pages**: Dashboard, Pumps (shift entry), Config (rates/pumps/stations/team), History
+- **Role-based access control**: Super Admin, Station Admin, Staff — enforced in Firestore rules and mirrored in the UI
+- **Full team management**: create, edit and remove users with station assignment
+- **Fast**: ~155 KB of app assets, no webfonts, no framework, cached reads
+- **Accessible**: keyboard navigation, focus trapping, screen-reader labels, 44px touch targets, dark mode
+- **Offline-ready**: persistent Firestore cache + service worker app shell
+- **Refresh anywhere**: floating refresh button plus one in the top bar
 
 ## Firebase Setup
 
@@ -35,24 +37,35 @@ const FIREBASE_CONFIG = {
 
 ### Firestore Security Rules
 
-Copy the contents of `firestore.rules` into your Firebase Console → Firestore → Rules.
+Copy `firestore.rules` into Firebase Console → Firestore Database → Rules → **Publish**.
 
-The rules enforce:
+Rules are the source of truth. `js/auth.js` mirrors them in a `can()` helper that
+only decides what the UI renders — bypassing the UI still hits the server rules.
 
-| Role | Stations | Pumps | Rates | Shifts | Users |
-|------|----------|-------|-------|--------|-------|
-| Super Admin | CRUD | CRUD | CRUD | CRUD | CRUD |
-| Station Admin | Read | CRUD | CRUD | CRU* | — |
-| Staff | Read | Read | Read | Create** | — |
+| Capability | Super Admin | Station Admin | Staff |
+|---|:--:|:--:|:--:|
+| Stations — create / edit / delete | ✅ | ❌ | ❌ |
+| Rates & pumps (assigned stations) | ✅ | ✅ | 👁 read |
+| Shifts — log a reading | ✅ | ✅ | ✅ |
+| Shifts — edit / delete | ✅ | ✅ | ❌ |
+| Users — create | ✅ any role | ✅ staff only | ❌ |
+| Users — edit / remove | ✅ | ✅ own staff only | ❌ |
+| Config page | ✅ | ✅ | ❌ |
 
-\* Station Admin cannot delete shifts in these rules — adjust `firestore.rules` if desired.
-\*\* Staff can create shift records but cannot edit or delete them.
+Guardrails enforced in both the UI and the rules:
+
+- Nobody can edit or delete **their own** account from the Team list (no self-lockout).
+- Super Admin accounts cannot be deleted through the app.
+- A Station Admin cannot grant a role above their own, and cannot assign a
+  station they do not hold themselves — blocking privilege escalation.
+- Removing a user deletes their Firestore profile, which revokes access
+  instantly. Their Firebase Auth credential must be deleted from the Firebase
+  Console, since browsers cannot use the Admin SDK.
 
 ### Bootstrap Account
 
-The **first user** to sign up automatically becomes **Super Admin**. PumpLog records this in Firestore at `app/bootstrap`. Subsequent signups default to **Staff** until a Super Admin promotes them via the Config → Team page.
-
-If a signup creates a Firebase Auth account but gets stuck on the login screen, publish the included `firestore.rules` in Firebase Console → Firestore Database → Rules, then use **Sign In** with the same email/password.
+The **first user to sign up becomes Super Admin**, recorded at `app/bootstrap`.
+Later self-signups become Staff with no station access until an admin assigns them.
 
 ## Deploy to GitHub Pages
 
@@ -78,15 +91,45 @@ npx serve .
 
 Then open http://localhost:8080 in your browser.
 
+## Performance & Accessibility
+
+Changes that keep the app quick on a phone:
+
+- **No webfont CDN.** Uses the system font stack, removing two extra
+  connections and a render-blocking stylesheet.
+- **Right-sized icons.** The PWA icons were 1024x1024 files (1.17 MB total)
+  served as 192px and 512px; they are now correctly sized at ~21 KB.
+- **Cached data layer** (`js/store.js`). Queries are cached for 60s and
+  identical concurrent requests are coalesced, so switching tabs re-renders
+  with no network round-trip.
+- **Batched station reads.** Assigned stations load with one `in` query
+  instead of one read per station.
+- **Persistent Firestore cache** (IndexedDB), so repeat visits paint from disk.
+- **Parallel loading.** Page sections use `Promise.all` rather than awaiting
+  each query in turn.
+- **In-memory filtering** on History, which is instant and needs no composite index.
+- **Skeleton screens** instead of a blank page while data loads.
+
+Accessibility:
+
+- Semantic landmarks, a skip link, and `aria-live` regions for async updates
+- Focus trapping in dialogs, Escape to close, focus restored to the trigger
+- Non-blocking toasts and an accessible confirm dialog replace `alert()`/`confirm()`
+- Visible focus rings, 44px minimum targets, and `prefers-reduced-motion`,
+  `prefers-contrast` and dark-mode support
+- All user-supplied values are HTML-escaped before rendering
+
 ## Data Model (Firestore)
 
 ```
 users/{uid}
   ├── email: string
   ├── role: "superadmin" | "stationadmin" | "staff"
-  ├── stationIds: string[]
-  ├── createdBy: string (uid)
-  └── createdAt: timestamp
+  ├── stationIds: string[]      // empty for Super Admin (implicit access to all)
+  ├── createdBy: string (uid | "system")
+  ├── createdAt: timestamp
+  ├── updatedAt: timestamp      // set when an admin edits the profile
+  └── updatedBy: string (uid)
 
 stations/{id}
   ├── name: string
@@ -119,7 +162,7 @@ stations/{id}/shifts/{id}
 
 ## Tech Stack
 
-- **Plain HTML/CSS/JS** — no bundlers, no frameworks
+- **Plain HTML/CSS/JS** — no bundlers, no frameworks, no webfonts
 - **Firebase Auth + Firestore** — free tier, no server needed
 - **ES Modules** — loaded via `<script type="module">`
 - **Service Worker** — app shell caching for offline install

@@ -1,133 +1,99 @@
-/* PumpLog — Pumps Page (manage nozzles + shift entry) */
+/* PumpLog — Pumps page (nozzle list + shift entry) */
 
+import { getDb, collection, addDoc, serverTimestamp } from './firebase.js';
+import { getCurrentUserData, can, denyReason, formatFirebaseError } from './auth.js';
+import { getPumps, getCurrentRateMap, invalidateStation } from './store.js';
 import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  addDoc,
-  updateDoc,
-  deleteDoc,
-  query,
-  orderBy,
-  where,
-  limit,
-  serverTimestamp,
-} from './firebase.js';
-import { getCurrentUserData, isSuperAdmin, isStationAdmin } from './auth.js';
-import {
-  formatCurrency, formatVolume, formatDateTime, getTodayDate,
-  openModal, closeModal, showGenericModal, emptyState
+  h, formatCurrency, formatVolume, getTodayDate,
+  openModal, closeModal, emptyState, toast, setBusy, showSkeleton,
 } from './components.js';
 
-let db = null;
 let currentStationId = null;
 
-export function initPumps(firestore) {
-  db = firestore;
-}
+export function initPumps() {}
 
-// ── Render ──────────────────────────────────────────────────────────────
 export async function renderPumps(stationId) {
   currentStationId = stationId;
+  const content = document.getElementById('page-content');
+
   if (!stationId) {
-    document.getElementById('page-content').innerHTML = emptyState('⛽', 'Select a station first.');
+    content.innerHTML = emptyState('⛽', 'Select a station to see its pumps.');
     return;
   }
 
-  const userData = getCurrentUserData();
-  const canEdit = isSuperAdmin() || isStationAdmin();
+  showSkeleton(3);
 
   try {
-    const pumpsQ = query(
-      collection(db, 'stations', stationId, 'pumps'),
-      orderBy('name')
-    );
-    const snap = await getDocs(pumpsQ);
-    const pumps = [];
-    snap.forEach(d => pumps.push({ id: d.id, ...d.data() }));
+    const [pumps, rateMap] = await Promise.all([
+      getPumps(stationId),
+      getCurrentRateMap(stationId),
+    ]);
 
-    let html = `
-      <div class="flex items-center justify-between mb-16">
-        <div class="section-title" style="margin-bottom:0;">Pumps / Nozzles</div>
-        ${canEdit ? '<button id="add-pump-btn" class="btn btn-primary btn-small">+ Add Pump</button>' : ''}
-      </div>
-    `;
+    const mayLog = can('shift.create', { stationId });
+    const mayConfigure = can('pump.create', { stationId });
 
     if (pumps.length === 0) {
-      html += emptyState('⛽', 'No pumps yet. Add your first pump!');
-    } else {
-      pumps.forEach(p => {
-        html += `
-          <div class="card-row" data-pump-id="${p.id}" data-pump-name="${p.name}" data-pump-product="${p.product || ''}">
-            <div class="card-row-left">⛽</div>
-            <div class="card-row-body">
-              <div class="card-row-title">${p.name}</div>
-              <div class="card-row-meta">${p.product || 'No product set'}</div>
-            </div>
-            <div class="card-row-right">
-              <div style="font-size:12px;color:var(--text-muted);">Tap to log shift</div>
-            </div>
-          </div>
-        `;
-      });
+      content.innerHTML = `
+        <h2 class="page-title">Pumps</h2>
+        ${emptyState('⛽', mayConfigure
+          ? 'No pumps yet. Add them from Config → Pumps.'
+          : 'No pumps configured yet. Ask your station admin to add them.')}
+      `;
+      return;
     }
 
-    document.getElementById('page-content').innerHTML = html;
+    const rows = pumps.map(p => {
+      const rate = rateMap[p.product];
+      const rateText = rate ? `${formatCurrency(rate.rate)}/L` : 'No rate set';
+      return `
+        <li>
+          <button class="card-row" data-pump-id="${h(p.id)}" ${mayLog ? '' : 'disabled'}
+                  ${mayLog ? '' : `title="${h(denyReason('shift.create'))}"`}>
+            <span class="card-row-left" aria-hidden="true">⛽</span>
+            <span class="card-row-body">
+              <span class="card-row-title">${h(p.name)}</span>
+              <span class="card-row-meta">${h(p.product || 'No product')} · ${h(rateText)}</span>
+            </span>
+            <span class="card-row-right">${mayLog ? 'Log reading →' : 'View only'}</span>
+          </button>
+        </li>
+      `;
+    }).join('');
 
-    // Attach click handlers
-    document.querySelectorAll('.card-row[data-pump-id]').forEach(el => {
-      el.addEventListener('click', () => {
-        openShiftForm(el.dataset.pumpId, el.dataset.pumpName, el.dataset.pumpProduct);
+    content.innerHTML = `
+      <h2 class="page-title">Pumps</h2>
+      <p class="section-hint">${mayLog ? 'Tap a pump to log a shift reading.' : 'You have read-only access.'}</p>
+      <ul class="plain-list">${rows}</ul>
+    `;
+
+    if (mayLog) {
+      content.querySelectorAll('.card-row[data-pump-id]').forEach(btn => {
+        btn.addEventListener('click', () => {
+          const pump = pumps.find(p => p.id === btn.dataset.pumpId);
+          if (pump) openShiftForm(pump, rateMap[pump.product]);
+        });
       });
-    });
-
-    document.getElementById('add-pump-btn')?.addEventListener('click', () => {
-      showAddPumpForm();
-    });
-
+    }
   } catch (err) {
     console.error('Pumps render error:', err);
-    document.getElementById('page-content').innerHTML = emptyState('⚠️', 'Error loading pumps.');
+    content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
 }
 
-// ── Shift Entry Form ────────────────────────────────────────────────────
-async function openShiftForm(pumpId, pumpName, pumpProduct) {
-  // Fetch current rates for this station
-  const ratesQ = query(
-    collection(db, 'stations', currentStationId, 'rates'),
-    orderBy('effectiveDate', 'desc')
-  );
-  const ratesSnap = await getDocs(ratesQ);
-  const rates = [];
-  ratesSnap.forEach(d => rates.push({ id: d.id, ...d.data() }));
+// ── Shift entry ─────────────────────────────────────────────────────────
+function openShiftForm(pump, rate) {
+  if (!can('shift.create', { stationId: currentStationId })) {
+    toast(denyReason('shift.create'), 'error');
+    return;
+  }
 
-  // Group rates by product, latest effective
-  const rateMap = {};
-  rates.forEach(r => {
-    if (!rateMap[r.product] || r.effectiveDate > rateMap[r.product].effectiveDate) {
-      rateMap[r.product] = r;
-    }
-  });
-
-  const today = getTodayDate();
-
-  const bodyHTML = `
-    <form id="shift-form">
-      <input type="hidden" id="shift-pump-id" value="${pumpId}" />
-      <div class="field">
-        <label>Nozzle / Pump</label>
-        <input type="text" value="${pumpName}" disabled style="background:var(--border);" />
-      </div>
-      <div class="field">
-        <label>Product</label>
-        <input type="text" id="shift-product" value="${pumpProduct || ''}" disabled style="background:var(--border);" />
-      </div>
+  document.getElementById('modal-title').textContent = `Log reading — ${pump.name}`;
+  document.getElementById('modal-body').innerHTML = `
+    <form id="shift-form" novalidate>
       <div class="form-row">
         <div class="field">
           <label for="shift-date">Date</label>
-          <input type="date" id="shift-date" value="${today}" required />
+          <input type="date" id="shift-date" value="${getTodayDate()}" max="${getTodayDate()}" required />
         </div>
         <div class="field">
           <label for="shift-label">Shift</label>
@@ -140,142 +106,93 @@ async function openShiftForm(pumpId, pumpName, pumpProduct) {
       </div>
       <div class="form-row">
         <div class="field">
-          <label for="shift-opening">Opening Reading</label>
-          <input type="number" id="shift-opening" step="0.01" min="0" placeholder="0.0" required />
+          <label for="shift-opening">Opening reading</label>
+          <input type="number" id="shift-opening" step="0.01" min="0" inputmode="decimal" placeholder="0.00" required />
         </div>
         <div class="field">
-          <label for="shift-closing">Closing Reading</label>
-          <input type="number" id="shift-closing" step="0.01" min="0" placeholder="0.0" required />
+          <label for="shift-closing">Closing reading</label>
+          <input type="number" id="shift-closing" step="0.01" min="0" inputmode="decimal" placeholder="0.00" required />
         </div>
       </div>
       <div class="field">
-        <label for="shift-rate">Applicable Rate (₹/L)</label>
-        <input type="number" id="shift-rate" step="0.01" min="0" placeholder="Auto from latest rate" />
-        <small style="color:var(--text-muted);font-size:11px;">
-          Latest rate for ${pumpProduct || 'this product'}: ${pumpProduct && rateMap[pumpProduct] ? formatCurrency(rateMap[pumpProduct].rate) : 'N/A'}
-        </small>
+        <label for="shift-rate">Rate (₹/L)</label>
+        <input type="number" id="shift-rate" step="0.01" min="0" inputmode="decimal"
+               value="${rate?.rate ?? ''}" placeholder="Enter rate" required />
+        <small class="hint">${rate
+          ? `Current ${h(pump.product)} rate: ${formatCurrency(rate.rate)}/L`
+          : `No rate configured for ${h(pump.product || 'this product')} — enter one manually.`}</small>
       </div>
 
       <div class="computed-row">
         <span class="label">Volume</span>
-        <span class="value" id="computed-volume">0.0 L</span>
+        <output class="value" id="computed-volume" for="shift-opening shift-closing">0.0 L</output>
       </div>
       <div class="computed-row">
-        <span class="label">Sale Amount</span>
-        <span class="value green" id="computed-sales">₹0.00</span>
+        <span class="label">Sale amount</span>
+        <output class="value green" id="computed-sales" for="shift-opening shift-closing shift-rate">₹0.00</output>
       </div>
 
-      <button type="submit" class="btn btn-primary btn-full mt-16">Save Shift Record</button>
+      <p class="form-error hidden" id="shift-form-error" role="alert"></p>
+      <button type="submit" class="btn btn-primary btn-full mt-16">Save shift record</button>
     </form>
   `;
-
-  document.getElementById('modal-title').textContent = `Log Reading — ${pumpName}`;
-  document.getElementById('modal-body').innerHTML = bodyHTML;
   openModal('generic-modal');
 
-  // Auto-fill rate if we have one
-  const rateField = document.getElementById('shift-rate');
-  if (pumpProduct && rateMap[pumpProduct]) {
-    rateField.value = rateMap[pumpProduct].rate;
-  }
+  const $ = id => document.getElementById(id);
+  const read = id => parseFloat($(id).value) || 0;
 
-  // Live computation
   function compute() {
-    const opening = parseFloat(document.getElementById('shift-opening').value) || 0;
-    const closing = parseFloat(document.getElementById('shift-closing').value) || 0;
-    const rate = parseFloat(document.getElementById('shift-rate').value) || 0;
-    const volume = Math.max(0, closing - opening);
-    const sales = volume * rate;
-
-    document.getElementById('computed-volume').textContent = formatVolume(volume);
-    document.getElementById('computed-sales').textContent = formatCurrency(sales);
+    const volume = Math.max(0, read('shift-closing') - read('shift-opening'));
+    $('computed-volume').textContent = formatVolume(volume);
+    $('computed-sales').textContent = formatCurrency(volume * read('shift-rate'));
   }
+  ['shift-opening', 'shift-closing', 'shift-rate'].forEach(id =>
+    $(id).addEventListener('input', compute));
 
-  ['shift-opening', 'shift-closing', 'shift-rate'].forEach(id => {
-    document.getElementById(id).addEventListener('input', compute);
-  });
-
-  // Submit
-  document.getElementById('shift-form').addEventListener('submit', async (e) => {
+  $('shift-form').addEventListener('submit', async (e) => {
     e.preventDefault();
-    const opening = parseFloat(document.getElementById('shift-opening').value) || 0;
-    const closing = parseFloat(document.getElementById('shift-closing').value) || 0;
-    const volume = Math.max(0, closing - opening);
-    const rate = parseFloat(document.getElementById('shift-rate').value) || 0;
-    const sales = volume * rate;
+    const btn = e.currentTarget.querySelector('button[type="submit"]');
+    const err = $('shift-form-error');
 
-    const data = {
-      pumpId,
-      pumpName,
-      product: pumpProduct || '',
-      date: document.getElementById('shift-date').value,
-      shiftLabel: document.getElementById('shift-label').value,
-      opening,
-      closing,
-      volume,
-      rate,
-      sales,
-      createdBy: getCurrentUserData()?.uid || 'unknown',
-      createdAt: serverTimestamp(),
-    };
+    const opening = read('shift-opening');
+    const closing = read('shift-closing');
+    const rateValue = read('shift-rate');
+    const date = $('shift-date').value;
+
+    const fail = (msg) => { err.textContent = msg; err.classList.remove('hidden'); };
+
+    if (!date) return fail('Choose a date.');
+    if (closing < opening) return fail('Closing reading cannot be lower than the opening reading.');
+    if (closing === opening) return fail('Opening and closing readings are identical — volume would be zero.');
+    if (rateValue <= 0) return fail('Enter a rate greater than zero.');
+
+    err.classList.add('hidden');
+    setBusy(btn, true, 'Saving…');
+
+    const volume = closing - opening;
 
     try {
-      await addDoc(collection(db, 'stations', currentStationId, 'shifts'), data);
+      await addDoc(collection(getDb(), 'stations', currentStationId, 'shifts'), {
+        pumpId: pump.id,
+        pumpName: pump.name,
+        product: pump.product || '',
+        date,
+        shiftLabel: $('shift-label').value,
+        opening, closing, volume,
+        rate: rateValue,
+        sales: volume * rateValue,
+        createdBy: getCurrentUserData()?.uid || 'unknown',
+        createdAt: serverTimestamp(),
+      });
+
+      invalidateStation(currentStationId);
       closeModal('generic-modal');
+      toast(`Shift saved — ${formatVolume(volume)} · ${formatCurrency(volume * rateValue)}`, 'success');
       renderPumps(currentStationId);
-    } catch (err) {
-      console.error('Shift save error:', err);
-      alert('Failed to save shift record.');
+    } catch (e2) {
+      console.error('Shift save error:', e2);
+      fail(formatFirebaseError(e2));
+      setBusy(btn, false);
     }
   });
-}
-
-// ── Add Pump Form ───────────────────────────────────────────────────────
-function showAddPumpForm() {
-  const bodyHTML = `
-    <form id="pump-form">
-      <div class="field">
-        <label for="pump-name">Pump / Nozzle Name</label>
-        <input type="text" id="pump-name" placeholder="e.g. Pump 1, Nozzle A" required />
-      </div>
-      <div class="field">
-        <label for="pump-product">Product</label>
-        <select id="pump-product" required>
-          <option value="">Select product…</option>
-          <option value="MS">MS (Motor Spirit / Petrol)</option>
-          <option value="HSD">HSD (High Speed Diesel)</option>
-          <option value="CNG">CNG</option>
-          <option value="LPG">LPG</option>
-          <option value="Other">Other</option>
-        </select>
-      </div>
-      <div class="form-row" style="grid-template-columns:1fr 1fr;gap:8px;margin-top:16px;">
-        <button type="submit" class="btn btn-primary btn-full">Save</button>
-        <button type="button" class="btn btn-secondary btn-full" id="pump-cancel">Cancel</button>
-      </div>
-    </form>
-  `;
-
-  document.getElementById('modal-title').textContent = 'Add Pump';
-  document.getElementById('modal-body').innerHTML = bodyHTML;
-  openModal('generic-modal');
-
-  document.getElementById('pump-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const name = document.getElementById('pump-name').value.trim();
-    const product = document.getElementById('pump-product').value;
-
-    if (!name || !product) return;
-
-    try {
-      await addDoc(collection(db, 'stations', currentStationId, 'pumps'), { name, product });
-      closeModal('generic-modal');
-      renderPumps(currentStationId);
-    } catch (err) {
-      console.error('Add pump error:', err);
-      alert('Failed to add pump.');
-    }
-  });
-
-  document.getElementById('pump-cancel').addEventListener('click', () => closeModal('generic-modal'));
 }

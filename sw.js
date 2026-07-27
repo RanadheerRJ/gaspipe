@@ -1,76 +1,108 @@
-/* PumpLog Service Worker — caches app shell for offline install */
+/* PumpLog service worker
+ *
+ * Strategy
+ *   - App shell is precached on install.
+ *   - Navigations: network-first with a cache fallback, so a deploy is picked
+ *     up immediately instead of being pinned to a stale index.html.
+ *   - Same-origin assets: stale-while-revalidate — instant paint, silent update.
+ *   - Firebase / Google APIs: always network, never cached.
+ */
 
-const CACHE = 'pumplog-shell-v1';
+const VERSION = 'v3';
+const SHELL_CACHE = `pumplog-shell-${VERSION}`;
+const RUNTIME_CACHE = `pumplog-runtime-${VERSION}`;
+
 const SHELL_FILES = [
-  '/',
-  '/index.html',
-  '/css/style.css',
-  '/manifest.json',
-  '/js/app.js',
-  '/js/auth.js',
-  '/js/firebase.js',
-  '/js/dashboard.js',
-  '/js/pumps.js',
-  '/js/config-page.js',
-  '/js/history.js',
-  '/js/components.js',
-  '/icons/icon-192.png',
-  '/icons/icon-512.png'
+  './',
+  './index.html',
+  './manifest.json',
+  './css/style.css',
+  './js/app.js',
+  './js/auth.js',
+  './js/firebase.js',
+  './js/store.js',
+  './js/components.js',
+  './js/dashboard.js',
+  './js/pumps.js',
+  './js/config-page.js',
+  './js/history.js',
+  './icons/icon-192.png',
+  './icons/icon-512.png',
 ];
 
-self.addEventListener('install', (e) => {
-  e.waitUntil(
-    caches.open(CACHE).then((cache) => {
-      // Don't fail install if individual files 404 — app shell is the main target
-      return cache.addAll(SHELL_FILES).catch(() => {});
-    })
+self.addEventListener('install', (event) => {
+  event.waitUntil(
+    caches.open(SHELL_CACHE)
+      // Individual 404s must not abort the whole install.
+      .then(cache => Promise.allSettled(SHELL_FILES.map(f => cache.add(f))))
+      .then(() => self.skipWaiting())
   );
-  self.skipWaiting();
 });
 
-self.addEventListener('activate', (e) => {
-  e.waitUntil(
-    caches.keys().then((keys) => {
-      return Promise.all(
-        keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))
-      );
-    })
+self.addEventListener('activate', (event) => {
+  event.waitUntil(
+    caches.keys()
+      .then(keys => Promise.all(
+        keys.filter(k => k !== SHELL_CACHE && k !== RUNTIME_CACHE)
+            .map(k => caches.delete(k))
+      ))
+      .then(() => self.clients.claim())
   );
-  self.clients.claim();
 });
 
-self.addEventListener('fetch', (e) => {
-  const { request } = e;
+self.addEventListener('message', (event) => {
+  if (event.data === 'skipWaiting') self.skipWaiting();
+});
+
+function isFirebaseRequest(url) {
+  return /(?:googleapis|gstatic|firebaseio|firebaseapp|google)\.com$/.test(url.hostname);
+}
+
+self.addEventListener('fetch', (event) => {
+  const { request } = event;
+  if (request.method !== 'GET') return;
+
   const url = new URL(request.url);
 
-  // Only handle same-origin requests for the app shell
+  // Auth/Firestore traffic must always hit the network.
+  if (isFirebaseRequest(url)) return;
   if (url.origin !== self.location.origin) return;
 
-  // For navigation requests, serve index.html from cache (SPA)
+  // Navigations: network-first so new deploys land right away.
   if (request.mode === 'navigate') {
-    e.respondWith(
-      caches.match('/index.html').then((cached) => cached || fetch(request))
+    event.respondWith(
+      fetch(request)
+        .then((response) => {
+          const copy = response.clone();
+          caches.open(SHELL_CACHE).then(c => c.put('./index.html', copy)).catch(() => {});
+          return response;
+        })
+        .catch(async () =>
+          (await caches.match('./index.html')) ||
+          (await caches.match('./')) ||
+          new Response('<h1>Offline</h1><p>PumpLog is unavailable right now.</p>', {
+            status: 503,
+            headers: { 'Content-Type': 'text/html; charset=utf-8' },
+          })
+        )
     );
     return;
   }
 
-  // For other static assets, try cache first, fallback to network
-  e.respondWith(
+  // Static assets: serve cache immediately, refresh in the background.
+  event.respondWith(
     caches.match(request).then((cached) => {
-      return cached || fetch(request).then((response) => {
-        // Cache successful responses for future offline use
-        if (response.ok && SHELL_FILES.includes(url.pathname)) {
-          const clone = response.clone();
-          caches.open(CACHE).then((cache) => cache.put(request, clone));
-        }
-        return response;
-      }).catch(() => {
-        // If offline and not cached, return a minimal fallback
-        if (request.destination === 'image') {
-          return new Response('', { status: 200, headers: { 'Content-Type': 'image/svg+xml' } });
-        }
-        return new Response('Offline', { status: 503 });
-      });
+      const network = fetch(request)
+        .then((response) => {
+          if (response.ok && response.type === 'basic') {
+            const copy = response.clone();
+            caches.open(RUNTIME_CACHE).then(c => c.put(request, copy)).catch(() => {});
+          }
+          return response;
+        })
+        .catch(() => cached);
+
+      return cached || network;
     })
   );
 });

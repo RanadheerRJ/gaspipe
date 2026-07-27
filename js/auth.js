@@ -1,8 +1,19 @@
-/* PumpLog — Authentication module */
+/* PumpLog — Authentication + RBAC
+ *
+ * Roles
+ *   superadmin   — full control over stations, rates, pumps, shifts, users
+ *   stationadmin — manages rates/pumps/shifts and staff for assigned stations
+ *   staff        — reads assigned stations, logs shift readings
+ *
+ * `can(action, ctx)` is the single source of truth for the UI. The identical
+ * logic is mirrored in firestore.rules, which is the source of truth on the
+ * server — the UI checks only decide what to render.
+ */
 
 import {
   FIREBASE_CONFIG,
   initMainApp,
+  getDb,
   getAdminApp,
   destroyAdminApp,
   onAuthStateChanged,
@@ -12,22 +23,35 @@ import {
   doc,
   getDoc,
   setDoc,
+  updateDoc,
+  deleteDoc,
   serverTimestamp,
   writeBatch,
-  auth as firebaseAuth,
-  db as firebaseDb,
 } from './firebase.js';
+
+export const ROLES = {
+  superadmin: 'Super Admin',
+  stationadmin: 'Station Admin',
+  staff: 'Staff',
+};
+
+export const ROLE_BADGE = {
+  superadmin: '🔶',
+  stationadmin: '🔷',
+  staff: '⚪',
+};
 
 let currentUser = null;
 let currentUserData = null;
 let currentAuthError = null;
 let authListeners = [];
+let authReady = false;
 
-function notifyAuthListeners() {
+function notify() {
   authListeners.forEach(fn => fn(currentUser, currentUserData, currentAuthError));
 }
 
-// ── Initialize Firebase Auth ────────────────────────────────────────────
+// ── Init ────────────────────────────────────────────────────────────────
 export function initAuth() {
   const { auth, db } = initMainApp(FIREBASE_CONFIG);
 
@@ -36,56 +60,47 @@ export function initAuth() {
     currentAuthError = null;
 
     try {
-      if (user) {
-        currentUserData = await loadOrCreateUserProfile(user, db);
-      } else {
-        currentUserData = null;
-      }
+      currentUserData = user ? await loadOrCreateUserProfile(user, db) : null;
     } catch (err) {
       console.error('Auth/profile setup error:', err);
       currentUserData = null;
       currentAuthError = err;
-      notifyAuthListeners();
-
-      // If Auth succeeded but the Firestore profile could not be loaded/created,
-      // sign out locally so the next Sign In click gets a fresh auth-state cycle.
+      authReady = true;
+      notify();
+      // Auth succeeded but the profile could not be read/created. Sign out so
+      // the next attempt starts from a clean auth-state cycle.
       if (user && auth.currentUser?.uid === user.uid) {
         await signOut(auth).catch(() => {});
       }
       return;
     }
 
-    notifyAuthListeners();
+    authReady = true;
+    notify();
   });
 
   return { auth, db };
 }
 
-// ── Bootstrap / profile setup ───────────────────────────────────────────
+// ── Profile bootstrap ───────────────────────────────────────────────────
 async function loadOrCreateUserProfile(user, db) {
   const userRef = doc(db, 'users', user.uid);
-  const userDoc = await getDoc(userRef);
-
-  if (userDoc.exists()) {
-    return { uid: user.uid, ...userDoc.data() };
-  }
-
-  return checkBootstrapSuperAdmin(user, db, userRef);
+  const snap = await getDoc(userRef);
+  if (snap.exists()) return { uid: user.uid, ...snap.data() };
+  return createBootstrapProfile(user, db, userRef);
 }
 
-async function checkBootstrapSuperAdmin(user, db, userRef) {
-  // Static hosting has no server process, so PumpLog uses a Firestore
-  // bootstrap marker. If app/bootstrap does not exist, this signup becomes
-  // Super Admin and creates the marker in the same batch. Later public signups
-  // become Staff with no station access until an admin assigns them.
+async function createBootstrapProfile(user, db, userRef) {
+  // Static hosting has no server, so the first signup claims Super Admin by
+  // creating app/bootstrap in the same batch. Later signups default to Staff
+  // with no station access until an admin assigns them.
   const bootstrapRef = doc(db, 'app', 'bootstrap');
   const bootstrapSnap = await getDoc(bootstrapRef);
   const isFirst = !bootstrapSnap.exists();
 
-  const role = isFirst ? 'superadmin' : 'staff';
   const data = {
     email: user.email,
-    role,
+    role: isFirst ? 'superadmin' : 'staff',
     stationIds: [],
     createdBy: isFirst ? user.uid : 'system',
     createdAt: serverTimestamp(),
@@ -94,11 +109,7 @@ async function checkBootstrapSuperAdmin(user, db, userRef) {
   if (isFirst) {
     const batch = writeBatch(db);
     batch.set(userRef, data);
-    batch.set(bootstrapRef, {
-      uid: user.uid,
-      email: user.email,
-      createdAt: serverTimestamp(),
-    });
+    batch.set(bootstrapRef, { uid: user.uid, email: user.email, createdAt: serverTimestamp() });
     await batch.commit();
   } else {
     await setDoc(userRef, data);
@@ -107,122 +118,217 @@ async function checkBootstrapSuperAdmin(user, db, userRef) {
   return { ...data, uid: user.uid };
 }
 
-// ── Friendly Firebase errors ────────────────────────────────────────────
+// ── Friendly errors ─────────────────────────────────────────────────────
 export function formatFirebaseError(err) {
   const code = err?.code || '';
   const raw = err?.message || '';
 
-  switch (code) {
-    case 'auth/email-already-in-use':
-      return 'An account with this email already exists. Tap “Already have an account? Sign In” and sign in instead.';
-    case 'auth/invalid-email':
-      return 'Please enter a valid email address.';
-    case 'auth/missing-password':
-      return 'Please enter your password.';
-    case 'auth/weak-password':
-      return 'Password is too weak. Use at least 6 characters.';
-    case 'auth/invalid-credential':
-    case 'auth/wrong-password':
-    case 'auth/user-not-found':
-      return 'Email or password is incorrect. Please check both and try again.';
-    case 'auth/user-disabled':
-      return 'This account has been disabled in Firebase Authentication.';
-    case 'auth/too-many-requests':
-      return 'Too many attempts. Please wait a few minutes and try again.';
-    case 'auth/network-request-failed':
-      return 'Network error. Please check your internet connection and try again.';
-    case 'auth/operation-not-allowed':
-      return 'Email/password sign-in is not enabled. In Firebase Console, enable Authentication → Sign-in method → Email/Password.';
-    case 'permission-denied':
-    case 'firestore/permission-denied':
-      return 'Firebase created or signed in the account, but Firestore blocked PumpLog from loading the user profile. Publish the updated firestore.rules file in Firebase Console → Firestore Database → Rules, then sign in again.';
-    case 'unavailable':
-    case 'firestore/unavailable':
-      return 'Firestore is temporarily unavailable. Please try again in a moment.';
-    case 'failed-precondition':
-    case 'firestore/failed-precondition':
-      return 'Firestore needs an index or setup change for this action. Check the Firebase Console error details.';
+  const map = {
+    'auth/email-already-in-use': 'An account with this email already exists. Use “Sign in” instead.',
+    'auth/invalid-email': 'Please enter a valid email address.',
+    'auth/missing-password': 'Please enter your password.',
+    'auth/weak-password': 'Password is too weak — use at least 6 characters.',
+    'auth/invalid-credential': 'Email or password is incorrect.',
+    'auth/wrong-password': 'Email or password is incorrect.',
+    'auth/user-not-found': 'Email or password is incorrect.',
+    'auth/user-disabled': 'This account has been disabled in Firebase Authentication.',
+    'auth/too-many-requests': 'Too many attempts. Wait a few minutes and try again.',
+    'auth/network-request-failed': 'Network error. Check your connection and try again.',
+    'auth/operation-not-allowed': 'Email/password sign-in is disabled. Enable it in Firebase Console → Authentication → Sign-in method.',
+    'permission-denied': 'Firestore denied this action. Publish the latest firestore.rules in Firebase Console → Firestore → Rules, then retry.',
+    'unavailable': 'Firestore is unreachable right now. Check your connection and retry.',
+    'failed-precondition': 'Firestore needs an index for this query. Open the browser console and follow the “create index” link.',
+    'not-found': 'That record no longer exists — it may have been deleted already.',
+    'already-exists': 'That record already exists.',
+  };
+
+  if (map[code]) return map[code];
+  if (raw.includes('Missing or insufficient permissions')) return map['permission-denied'];
+  if (raw.includes('requires an index')) return map['failed-precondition'];
+  return raw || 'Something went wrong. Please try again.';
+}
+
+// ── Session ─────────────────────────────────────────────────────────────
+export const signIn = (email, password) =>
+  signInWithEmailAndPassword(initMainApp().auth, email, password);
+
+export const signUp = (email, password) =>
+  createUserWithEmailAndPassword(initMainApp().auth, email, password);
+
+export const doSignOut = () => signOut(initMainApp().auth);
+
+// ── State accessors ─────────────────────────────────────────────────────
+export const getCurrentUser = () => currentUser;
+export const getCurrentUserData = () => currentUserData;
+export const getCurrentAuthError = () => currentAuthError;
+export const isAuthReady = () => authReady;
+
+export function onAuthChange(fn) {
+  authListeners.push(fn);
+  if (authReady) fn(currentUser, currentUserData, currentAuthError);
+  return () => { authListeners = authListeners.filter(f => f !== fn); };
+}
+
+export const hasRole = (...roles) => !!currentUserData && roles.includes(currentUserData.role);
+export const isSuperAdmin = () => currentUserData?.role === 'superadmin';
+export const isStationAdmin = () => currentUserData?.role === 'stationadmin';
+export const isStaff = () => currentUserData?.role === 'staff';
+
+export function myStationIds() {
+  return currentUserData?.stationIds || [];
+}
+
+export function canAccessStation(stationId) {
+  if (!currentUserData || !stationId) return false;
+  return isSuperAdmin() || myStationIds().includes(stationId);
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  RBAC — one place that decides who may do what
+// ═══════════════════════════════════════════════════════════════════════
+//
+//  can('rate.update', { stationId })
+//  can('user.delete', { target: userRecord })
+//
+export function can(action, ctx = {}) {
+  const me = currentUserData;
+  if (!me) return false;
+
+  const { stationId, target } = ctx;
+  const superAdmin = me.role === 'superadmin';
+  const stationAdmin = me.role === 'stationadmin';
+  const stationOk = superAdmin || (!!stationId && myStationIds().includes(stationId));
+
+  switch (action) {
+    // ── Stations (Super Admin only) ────────────────────────────────
+    case 'station.create':
+    case 'station.update':
+    case 'station.delete':
+      return superAdmin;
+    case 'station.read':
+      return stationOk;
+
+    // ── Rates & pumps ──────────────────────────────────────────────
+    case 'rate.create':
+    case 'rate.update':
+    case 'rate.delete':
+    case 'pump.create':
+    case 'pump.update':
+    case 'pump.delete':
+      return (superAdmin || stationAdmin) && stationOk;
+
+    // ── Shifts ─────────────────────────────────────────────────────
+    case 'shift.create':
+      return stationOk;
+    case 'shift.update':
+    case 'shift.delete':
+      return (superAdmin || stationAdmin) && stationOk;
+
+    // ── Config page access ─────────────────────────────────────────
+    case 'config.view':
+      return superAdmin || stationAdmin;
+    case 'team.view':
+      return superAdmin || stationAdmin;
+
+    // ── Users ──────────────────────────────────────────────────────
+    case 'user.create':
+      return superAdmin || stationAdmin;
+
+    case 'user.update':
+      if (!target) return false;
+      // Nobody edits their own role/stations from the team list —
+      // prevents an admin locking themselves out by accident.
+      if (target.id === me.uid) return false;
+      if (superAdmin) return true;
+      // Station Admin manages only the staff accounts they created.
+      return stationAdmin && target.role === 'staff' && target.createdBy === me.uid;
+
+    case 'user.delete':
+      if (!target) return false;
+      if (target.id === me.uid) return false;                 // never delete yourself
+      if (target.role === 'superadmin') return false;          // super admins are protected
+      if (superAdmin) return true;
+      return stationAdmin && target.role === 'staff' && target.createdBy === me.uid;
+
+    // Which roles the current user may assign
+    case 'user.assignRole.superadmin':
+      return superAdmin;
+    case 'user.assignRole.stationadmin':
+      return superAdmin;
+    case 'user.assignRole.staff':
+      return superAdmin || stationAdmin;
+
     default:
-      if (raw.includes('Missing or insufficient permissions')) {
-        return 'Firestore permissions are blocking this action. Publish the updated firestore.rules file in Firebase Console → Firestore Database → Rules, then try again.';
-      }
-      return raw || 'Something went wrong. Please try again.';
+      return false;
   }
 }
 
-// ── Sign In ─────────────────────────────────────────────────────────────
-export async function signIn(email, password) {
-  return signInWithEmailAndPassword(firebaseAuth, email, password);
+// Roles the signed-in user is allowed to grant.
+export function assignableRoles() {
+  return Object.keys(ROLES).filter(r => can(`user.assignRole.${r}`));
 }
 
-// ── Sign Up ─────────────────────────────────────────────────────────────
-export async function signUp(email, password) {
-  const cred = await createUserWithEmailAndPassword(firebaseAuth, email, password);
-  // The onAuthStateChanged handler creates/loads the Firestore profile.
-  return cred;
+// Explains *why* an action is unavailable — surfaced as a tooltip in the UI.
+export function denyReason(action, ctx = {}) {
+  const me = currentUserData;
+  if (!me) return 'You are signed out.';
+  const { target } = ctx;
+
+  if (action === 'user.update' || action === 'user.delete') {
+    if (target?.id === me.uid) return 'You cannot modify your own account here.';
+    if (action === 'user.delete' && target?.role === 'superadmin') return 'Super Admin accounts are protected.';
+    if (me.role === 'stationadmin') return 'Station Admins can only manage staff they created.';
+  }
+  if (action.startsWith('station.')) return 'Only a Super Admin can manage stations.';
+  return 'Your role does not allow this action.';
 }
 
-// ── Sign Out ────────────────────────────────────────────────────────────
-export async function doSignOut() {
-  await signOut(firebaseAuth);
-}
-
-// ── Create User via Admin (without signing out current user) ────────────
+// ── Admin user management ───────────────────────────────────────────────
 export async function createUserAsAdmin(email, password, role, stationIds) {
+  if (!can('user.create')) throw new Error('You do not have permission to create users.');
+  if (!can(`user.assignRole.${role}`)) throw new Error(`You cannot assign the ${ROLES[role] || role} role.`);
+
+  const db = getDb();
   const admin = getAdminApp(FIREBASE_CONFIG);
 
   try {
     const cred = await createUserWithEmailAndPassword(admin.auth, email, password);
-
-    // Write user document
-    const userData = {
+    await setDoc(doc(db, 'users', cred.user.uid), {
       email,
       role,
       stationIds: stationIds || [],
       createdBy: currentUser?.uid || 'unknown',
       createdAt: serverTimestamp(),
-    };
-
-    await setDoc(doc(firebaseDb, 'users', cred.user.uid), userData);
+    });
     return cred.user.uid;
   } finally {
-    // Always clean up the isolated app so the current admin remains signed in
-    // and the next attempt starts from a clean auth state.
     await signOut(admin.auth).catch(() => {});
-    await destroyAdminApp().catch(() => {});
+    await destroyAdminApp();
   }
 }
 
-// ── Get current state ───────────────────────────────────────────────────
-export function getCurrentUser() { return currentUser; }
-export function getCurrentUserData() { return currentUserData; }
-export function getCurrentAuthError() { return currentAuthError; }
-
-// ── Listen for auth changes ─────────────────────────────────────────────
-export function onAuthChange(fn) {
-  authListeners.push(fn);
-  // If already logged in or an auth/profile error has happened, fire immediately
-  if ((currentUser && currentUserData) || currentAuthError) {
-    fn(currentUser, currentUserData, currentAuthError);
+export async function updateUserAsAdmin(target, { role, stationIds }) {
+  if (!can('user.update', { target })) {
+    throw new Error(denyReason('user.update', { target }));
   }
-  // Return unsubscribe function
-  return () => {
-    authListeners = authListeners.filter(f => f !== fn);
-  };
+  if (role && role !== target.role && !can(`user.assignRole.${role}`)) {
+    throw new Error(`You cannot assign the ${ROLES[role] || role} role.`);
+  }
+
+  const patch = { updatedAt: serverTimestamp(), updatedBy: currentUser?.uid || 'unknown' };
+  if (role) patch.role = role;
+  if (Array.isArray(stationIds)) patch.stationIds = stationIds;
+
+  await updateDoc(doc(getDb(), 'users', target.id), patch);
 }
 
-export function hasRole(...roles) {
-  return currentUserData && roles.includes(currentUserData.role);
-}
-
-export function isSuperAdmin() {
-  return currentUserData?.role === 'superadmin';
-}
-
-export function isStationAdmin() {
-  return currentUserData?.role === 'stationadmin';
-}
-
-export function isStaff() {
-  return currentUserData?.role === 'staff';
+/* Removes the Firestore profile, which revokes all app access immediately
+ * (every rule requires a profile document). The Firebase Auth credential
+ * itself can only be removed with the Admin SDK or from the Firebase Console,
+ * so the UI states this explicitly. */
+export async function deleteUserAsAdmin(target) {
+  if (!can('user.delete', { target })) {
+    throw new Error(denyReason('user.delete', { target }));
+  }
+  await deleteDoc(doc(getDb(), 'users', target.id));
 }

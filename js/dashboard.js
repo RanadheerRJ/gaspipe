@@ -1,199 +1,103 @@
-/* PumpLog — Dashboard Page */
+/* PumpLog — Dashboard */
 
+import { getStation, getShifts, getCurrentRateMap } from './store.js';
+import { formatFirebaseError } from './auth.js';
 import {
-  collection,
-  doc,
-  getDoc,
-  getDocs,
-  query,
-  where,
-  orderBy,
-  limit,
-} from './firebase.js';
-import { getCurrentUserData } from './auth.js';
-import { formatCurrency, formatVolume, formatDateTime, getGreeting, emptyState } from './components.js';
+  h, formatCurrency, formatVolume, formatDateTime, getGreeting,
+  emptyState, showSkeleton, rangeStart,
+} from './components.js';
 
-let db = null;
-let currentStationId = null;
+export function initDashboard() {}
 
-// ── Init ────────────────────────────────────────────────────────────────
-export function initDashboard(firestore) {
-  db = firestore;
-}
+const RANGE_LABEL = { today: 'Today', week: 'Last 7 days', month: 'Last 30 days', all: 'All time' };
 
-// ── Render ──────────────────────────────────────────────────────────────
-export async function renderDashboard(stationId) {
-  currentStationId = stationId;
+export async function renderDashboard(stationId, range = 'today') {
+  const content = document.getElementById('page-content');
+
   if (!stationId) {
-    document.getElementById('page-content').innerHTML = `
+    content.innerHTML = `
       <div class="welcome-section">
-        <div class="welcome-greeting">${getGreeting()}!</div>
-        <div class="welcome-sub">Select a station to get started</div>
+        <h2 class="welcome-greeting">${getGreeting()}</h2>
+        <p class="welcome-sub">Select a station to get started</p>
       </div>
-      ${emptyState('⛽', 'Tap the station selector above to choose a station.')}
+      ${emptyState('⛽', 'Tap the station name in the top bar to choose a station.')}
     `;
-    // Update station pill
-    document.getElementById('station-name-display').textContent = 'Select Station';
     return;
   }
 
-  const userData = getCurrentUserData();
-  if (!userData || !db) return;
+  showSkeleton(3);
 
   try {
-    // Fetch station data
-    const stationSnap = await getDoc(doc(db, 'stations', stationId));
-    if (!stationSnap.exists()) {
-      document.getElementById('page-content').innerHTML = emptyState('⚠️', 'Station not found.');
+    const from = rangeStart(range);
+    const [station, shifts, rateMap] = await Promise.all([
+      getStation(stationId),
+      getShifts(stationId, { from }),
+      getCurrentRateMap(stationId),
+    ]);
+
+    if (!station) {
+      content.innerHTML = emptyState('⚠️', 'Station not found. It may have been deleted.');
       return;
     }
-    const station = stationSnap.data();
-    document.getElementById('station-name-display').textContent = station.name || 'Unnamed Station';
 
-    // Fetch today's shifts
-    const today = new Date();
-    today.setHours(0, 0, 0, 0);
-    const todayStr = today.toISOString().split('T')[0];
+    let volume = 0, sales = 0;
+    for (const s of shifts) {
+      volume += Number(s.volume) || 0;
+      sales += Number(s.sales) || 0;
+    }
 
-    const shiftsQ = query(
-      collection(db, 'stations', stationId, 'shifts'),
-      where('date', '>=', todayStr),
-      orderBy('date', 'desc'),
-      limit(50)
-    );
-    const shiftSnap = await getDocs(shiftsQ);
-    const todayShifts = [];
-    shiftSnap.forEach(d => todayShifts.push({ id: d.id, ...d.data() }));
+    const label = RANGE_LABEL[range] || 'Today';
+    const rateCards = Object.entries(rateMap).map(([product, r]) => `
+      <article class="stat-card">
+        <div class="stat-card-icon amber" aria-hidden="true">⛽</div>
+        <h3 class="stat-card-label">${h(product)}</h3>
+        <p class="stat-card-value">${formatCurrency(r.rate)}</p>
+        <p class="stat-card-sub">per litre</p>
+      </article>
+    `).join('');
 
-    // Compute totals
-    let totalVolume = 0;
-    let totalSales = 0;
-    todayShifts.forEach(s => {
-      totalVolume += Number(s.volume) || 0;
-      totalSales += Number(s.sales) || 0;
-    });
+    const recent = shifts.slice(0, 6);
+    const activity = recent.length === 0
+      ? emptyState('📝', 'No shift entries in this period.')
+      : `<ul class="card activity-list">${recent.map(s => {
+          const dot = s.shiftLabel === '1' ? 'green' : s.shiftLabel === '2' ? 'blue' : 'amber';
+          return `<li class="activity-item">
+            <span class="activity-dot ${dot}" aria-hidden="true"></span>
+            <span class="activity-text">
+              <strong>${h(s.pumpName || 'Pump')}</strong> · Shift ${h(s.shiftLabel || '?')}
+              <br />${formatVolume(s.volume)} · ${formatCurrency(s.sales)}
+            </span>
+            <span class="activity-time">${h(formatDateTime(s.createdAt) || s.date || '')}</span>
+          </li>`;
+        }).join('')}</ul>`;
 
-    // Fetch current rates
-    const ratesQ = query(
-      collection(db, 'stations', stationId, 'rates'),
-      orderBy('effectiveDate', 'desc')
-    );
-    const ratesSnap = await getDocs(ratesQ);
-    const rates = [];
-    ratesSnap.forEach(d => rates.push({ id: d.id, ...d.data() }));
-
-    // Group rates by product (latest effective)
-    const rateMap = {};
-    rates.forEach(r => {
-      if (!rateMap[r.product] || r.effectiveDate > rateMap[r.product].effectiveDate) {
-        rateMap[r.product] = r;
-      }
-    });
-
-    // Render
-    let html = `
+    content.innerHTML = `
       <div class="welcome-section">
-        <div class="welcome-greeting">${getGreeting()}!</div>
-        <div class="welcome-sub">${station.name}</div>
+        <h2 class="welcome-greeting">${getGreeting()}</h2>
+        <p class="welcome-sub">${h(station.name)} · ${h(label)}</p>
       </div>
 
       <div class="stats-grid">
-        <div class="stat-card" data-action="history-today">
-          <div class="stat-card-icon blue">📊</div>
-          <div class="stat-card-label">Today's Volume</div>
-          <div class="stat-card-value">${formatVolume(totalVolume)}</div>
-        </div>
-        <div class="stat-card" data-action="history-today">
-          <div class="stat-card-icon green">💰</div>
-          <div class="stat-card-label">Today's Sales</div>
-          <div class="stat-card-value">${formatCurrency(totalSales)}</div>
-        </div>
+        <article class="stat-card">
+          <div class="stat-card-icon blue" aria-hidden="true">📊</div>
+          <h3 class="stat-card-label">Volume</h3>
+          <p class="stat-card-value">${formatVolume(volume)}</p>
+          <p class="stat-card-sub">${h(label)}</p>
+        </article>
+        <article class="stat-card">
+          <div class="stat-card-icon green" aria-hidden="true">💰</div>
+          <h3 class="stat-card-label">Sales</h3>
+          <p class="stat-card-value">${formatCurrency(sales)}</p>
+          <p class="stat-card-sub">${shifts.length} entr${shifts.length === 1 ? 'y' : 'ies'}</p>
+        </article>
+        ${rateCards}
+      </div>
+
+      <h3 class="section-title">Recent activity</h3>
+      ${activity}
     `;
-
-    // Rate cards
-    Object.entries(rateMap).forEach(([product, rate]) => {
-      html += `
-        <div class="stat-card" data-action="config-rates">
-          <div class="stat-card-icon amber">⛽</div>
-          <div class="stat-card-label">${product}</div>
-          <div class="stat-card-value">${formatCurrency(rate.rate, '₹')}</div>
-          <div class="stat-card-sub">per liter</div>
-        </div>
-      `;
-    });
-
-    // Balance card
-    html += `
-        <div class="stat-card" data-action="history">
-          <div class="stat-card-icon red">💳</div>
-          <div class="stat-card-label">Balance / to Collect</div>
-          <div class="stat-card-value">${formatCurrency(totalSales)}</div>
-          <div class="stat-card-sub">Today's running total</div>
-        </div>
-      </div> <!-- end stats-grid -->
-    `;
-
-    // Recent activity
-    html += `<div class="section-title">Recent Activity</div>`;
-    const recentQ = query(
-      collection(db, 'stations', stationId, 'shifts'),
-      orderBy('createdAt', 'desc'),
-      limit(5)
-    );
-    const recentSnap = await getDocs(recentQ);
-    const recent = [];
-    recentSnap.forEach(d => recent.push({ id: d.id, ...d.data() }));
-
-    if (recent.length === 0) {
-      html += emptyState('📝', 'No shift entries yet. Tap a pump to get started!');
-    } else {
-      html += `<div class="card">`;
-      recent.forEach(s => {
-        const dotClass = s.shiftLabel === '1' ? 'green' : s.shiftLabel === '2' ? 'blue' : 'amber';
-        html += `
-          <div class="activity-item">
-            <div class="activity-dot ${dotClass}"></div>
-            <div class="activity-text">
-              <strong>${s.pumpName || 'Pump'}</strong> — Shift ${s.shiftLabel || '?'}
-              <br/>${formatVolume(s.volume)} · ${formatCurrency(s.sales)}
-            </div>
-            <div class="activity-time">${formatDateTime(s.createdAt)}</div>
-          </div>
-        `;
-      });
-      html += `</div>`;
-    }
-
-    // Station switcher hint
-    if ((userData.stationIds || []).length > 1) {
-      html += `
-        <div class="section-title mt-16">
-          <span>Your Stations</span>
-          <span class="link" id="show-station-switcher">Switch</span>
-        </div>
-      `;
-    }
-
-    document.getElementById('page-content').innerHTML = html;
-
-    // Attach click handlers for stat cards
-    document.querySelectorAll('.stat-card[data-action]').forEach(el => {
-      el.addEventListener('click', () => {
-        const action = el.dataset.action;
-        if (action === 'history-today' || action === 'history') {
-          document.querySelector('[data-page="history"]')?.click();
-        } else if (action === 'config-rates') {
-          document.querySelector('[data-page="config"]')?.click();
-        }
-      });
-    });
-
-    document.getElementById('show-station-switcher')?.addEventListener('click', () => {
-      document.getElementById('station-selector')?.click();
-    });
-
   } catch (err) {
     console.error('Dashboard render error:', err);
-    document.getElementById('page-content').innerHTML = emptyState('⚠️', 'Error loading dashboard.');
+    content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
 }
