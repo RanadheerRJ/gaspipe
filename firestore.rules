@@ -57,13 +57,18 @@ service cloud.firestore {
     // Staff pump restrictions are enforced here as well as in js/auth.js.
     // Missing/empty pumpIds intentionally means every pump at an assigned
     // station, preserving access for older profiles.
+    function myPumps() {
+      return hasProfile()
+        && me().keys().hasAny(['pumpIds'])
+        && me().pumpIds is list
+        ? me().pumpIds : [];
+    }
+
     function canUsePump(stationId, pumpId) {
       return canManageStation(stationId)
         || (myRole() == 'staff'
             && canAccessStation(stationId)
-            && (!me().keys().hasAny(['pumpIds'])
-                || me().pumpIds.size() == 0
-                || pumpId in me().pumpIds));
+            && (myPumps().size() == 0 || pumpId in myPumps()));
     }
 
     function sessionPath(stationId, pumpId) {
@@ -307,11 +312,28 @@ service cloud.firestore {
           && canAccessStation(stationId)
           && canUsePump(stationId, request.resource.data.pumpId)
           && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.keys().hasAll([
+               'staffUid', 'staffName', 'clockInAt', 'clockOutAt', 'hoursWorked'
+             ])
+          && request.resource.data.staffUid == request.auth.uid
+          && request.resource.data.staffName is string
+          && request.resource.data.clockInAt is timestamp
+          && request.resource.data.clockOutAt is timestamp
+          && request.resource.data.hoursWorked is number
+          && request.resource.data.hoursWorked >= 0
           && request.resource.data.volume is number
           && request.resource.data.volume >= 0
           && request.resource.data.rate is number
           && request.resource.data.rate >= 0
-          && request.resource.data.date is string;
+          && request.resource.data.date is string
+          // A new shift is valid only as the same atomic operation that
+          // closes this user's active session. This prevents direct writes
+          // from bypassing the pump lock.
+          && exists(sessionPath(stationId, request.resource.data.pumpId))
+          && get(sessionPath(stationId, request.resource.data.pumpId)).data.status == 'active'
+          && get(sessionPath(stationId, request.resource.data.pumpId)).data.activeUid == request.auth.uid
+          && getAfter(sessionPath(stationId, request.resource.data.pumpId)).data.status == 'idle'
+          && getAfter(sessionPath(stationId, request.resource.data.pumpId)).data.activeUid == null;
 
         // Corrections are an admin action.
         allow update, delete: if isSignedIn() && canManageStation(stationId);

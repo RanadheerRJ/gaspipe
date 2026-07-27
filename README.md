@@ -235,6 +235,8 @@ stations/{id}/shifts/{id}
   └── createdAt: timestamp
 ```
 
+A shift is created only by the atomic clock-out transaction that also releases
+its pump session; direct client-created shift records are rejected by the rules.
 Records written before clock-in/out do not have the new session fields. The app
 shows `—` for unknown hours/session times and excludes unknown hours from totals;
 it does not backfill historical documents. Firestore retains data indefinitely

@@ -4,7 +4,7 @@ import {
   getStation, getShifts, getCurrentRateMap, getPumps, getPumpSessions,
   watchShifts, watchPumpSessions,
 } from './store.js';
-import { can, canUsePump, filterMyPumps, getCurrentUserData } from './auth.js';
+import { can, canUsePump, filterMyPumps, getCurrentUserData, formatFirebaseError } from './auth.js';
 import { openShiftForm } from './pumps.js';
 import {
   h, formatCurrency, formatVolume, formatDate, formatTime, formatDateTime,
@@ -92,7 +92,7 @@ export async function renderDashboard(stationId, range = 'today') {
     startLiveFeed(stationId, pumps, rateMap, shifts, sessions);
   } catch (err) {
     console.error('Dashboard render error:', err);
-    content.innerHTML = emptyState('⚠️', err?.message || 'Could not load the dashboard.');
+    content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
 }
 
