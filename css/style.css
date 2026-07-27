@@ -1120,3 +1120,5 @@ fieldset.is-disabled { opacity: .55; pointer-events: none; }
   .report-breakdown-wrap { padding-left: 0; padding-right: 0; }
   .report-breakdown { min-width: 0; }
 }
+
+.destructive-label { color: var(--red); font-weight: 600; }
