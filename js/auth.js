@@ -98,6 +98,9 @@ async function createBootstrapProfile(user, db, userRef) {
   const bootstrapSnap = await getDoc(bootstrapRef);
   const isFirst = !bootstrapSnap.exists();
 
+  // Note: `pumpIds` is intentionally omitted here so sign-up keeps working
+  // even before the updated firestore.rules (which allow the new field) are
+  // published. A missing pumpIds means "unrestricted — all pumps".
   const data = {
     email: user.email,
     role: isFirst ? 'superadmin' : 'staff',
@@ -181,6 +184,31 @@ export function myStationIds() {
 export function canAccessStation(stationId) {
   if (!currentUserData || !stationId) return false;
   return isSuperAdmin() || myStationIds().includes(stationId);
+}
+
+// ── Pump assignments (staff only) ─────────────────────────────────────
+// Admins/Managers see and manage every pump. Staff may be restricted to an
+// explicit list of pump ids on their profile; an EMPTY list means
+// "unrestricted" (every pump at their assigned stations), which keeps
+// existing staff accounts working until an admin assigns specific pumps.
+export function myPumpIds() {
+  return currentUserData?.pumpIds || [];
+}
+
+export function hasPumpRestriction() {
+  return isStaff() && myPumpIds().length > 0;
+}
+
+export function canUsePump(pumpId) {
+  if (!pumpId) return false;
+  if (!isStaff()) return true;
+  const assigned = myPumpIds();
+  return assigned.length === 0 || assigned.includes(pumpId);
+}
+
+/** The subset of `pumps` the signed-in user is allowed to see/use. */
+export function filterMyPumps(pumps) {
+  return (pumps || []).filter(p => canUsePump(p.id));
 }
 
 // ═══════════════════════════════════════════════════════════════════════
@@ -279,12 +307,14 @@ export function denyReason(action, ctx = {}) {
     if (action === 'user.delete' && target?.role === 'superadmin') return 'Super Admin accounts are protected.';
     if (me.role === 'stationadmin') return 'Station Admins can only manage staff they created.';
   }
+  if (action.startsWith('rate.')) return 'Rates are controlled by Managers and Admins only.';
+  if (action.startsWith('pump.')) return 'Only Managers and Admins can configure pumps.';
   if (action.startsWith('station.')) return 'Only a Super Admin can manage stations.';
   return 'Your role does not allow this action.';
 }
 
 // ── Admin user management ───────────────────────────────────────────────
-export async function createUserAsAdmin(email, password, role, stationIds) {
+export async function createUserAsAdmin(email, password, role, stationIds, pumpIds = []) {
   if (!can('user.create')) throw new Error('You do not have permission to create users.');
   if (!can(`user.assignRole.${role}`)) throw new Error(`You cannot assign the ${ROLES[role] || role} role.`);
 
@@ -293,13 +323,18 @@ export async function createUserAsAdmin(email, password, role, stationIds) {
 
   try {
     const cred = await createUserWithEmailAndPassword(admin.auth, email, password);
-    await setDoc(doc(db, 'users', cred.user.uid), {
+    const profile = {
       email,
       role,
       stationIds: stationIds || [],
       createdBy: currentUser?.uid || 'unknown',
       createdAt: serverTimestamp(),
-    });
+    };
+    // Only persist an explicit restriction (see updateUserAsAdmin note).
+    if (role === 'staff' && Array.isArray(pumpIds) && pumpIds.length > 0) {
+      profile.pumpIds = pumpIds;
+    }
+    await setDoc(doc(db, 'users', cred.user.uid), profile);
     return cred.user.uid;
   } finally {
     await signOut(admin.auth).catch(() => {});
@@ -307,7 +342,7 @@ export async function createUserAsAdmin(email, password, role, stationIds) {
   }
 }
 
-export async function updateUserAsAdmin(target, { role, stationIds }) {
+export async function updateUserAsAdmin(target, { role, stationIds, pumpIds }) {
   if (!can('user.update', { target })) {
     throw new Error(denyReason('user.update', { target }));
   }
@@ -318,6 +353,12 @@ export async function updateUserAsAdmin(target, { role, stationIds }) {
   const patch = { updatedAt: serverTimestamp(), updatedBy: currentUser?.uid || 'unknown' };
   if (role) patch.role = role;
   if (Array.isArray(stationIds)) patch.stationIds = stationIds;
+  // Write pumpIds only when it carries meaning: a non-empty restriction, or
+  // clearing one that existed. Skipping the field otherwise keeps plain
+  // role/station edits working even before the updated rules are published.
+  if (Array.isArray(pumpIds) && (pumpIds.length > 0 || (target.pumpIds || []).length > 0)) {
+    patch.pumpIds = pumpIds;
+  }
 
   await updateDoc(doc(getDb(), 'users', target.id), patch);
 }

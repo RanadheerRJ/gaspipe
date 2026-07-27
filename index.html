@@ -11,8 +11,8 @@
   <title>PumpLog</title>
 
   <link rel="manifest" href="manifest.json" />
-  <link rel="icon" href="icons/icon-192.png" />
-  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" sizes="180x180" href="icons/apple-touch-icon.png" />
 
   <!-- Warm up the Firebase origins early; no render-blocking font CDN. -->
   <link rel="preconnect" href="https://www.gstatic.com" crossorigin />
@@ -39,7 +39,9 @@
   <div id="auth-screen" class="screen hidden">
     <main class="auth-container">
       <div class="auth-logo">
-        <div class="auth-icon" aria-hidden="true">⛽</div>
+        <div class="auth-icon" aria-hidden="true">
+          <img src="icons/logo-512.png" alt="" width="72" height="72" />
+        </div>
         <h1>PumpLog</h1>
         <p class="auth-tagline">Multi-station fuel tracker</p>
       </div>
@@ -177,6 +179,7 @@
           <dt>Email</dt><dd id="profile-email">—</dd>
           <dt>Role</dt><dd id="profile-role">—</dd>
           <dt>Stations</dt><dd id="profile-stations">—</dd>
+          <dt id="profile-pumps-label">Pumps</dt><dd id="profile-pumps">—</dd>
         </dl>
         <button id="btn-signout" class="btn btn-secondary btn-full">Sign out</button>
       </div>

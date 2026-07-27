@@ -9,7 +9,9 @@
 import {
   getDb,
   collection, doc, getDoc, getDocs, query, where, orderBy, limit, documentId,
+  onSnapshot,
 } from './firebase.js';
+import { getCurrentUserData, can } from './auth.js';
 
 const TTL = 60_000; // 1 minute — station data changes rarely
 const cache = new Map();   // key -> { value, at }
@@ -125,31 +127,84 @@ export async function getCurrentRateMap(stationId) {
 }
 
 // ── Shifts ──────────────────────────────────────────────────────────────
+// Stable secondary sort by creation time, done client-side so no composite
+// index is required.
+function sortShiftRows(rows) {
+  rows.sort((a, b) => {
+    const d = (b.date || '').localeCompare(a.date || '');
+    if (d !== 0) return d;
+    return (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0);
+  });
+  return rows;
+}
+
+/**
+ * True when the signed-in user manages this station and may therefore read
+ * every shift record. Staff read only their own records (enforced by
+ * firestore.rules), and their queries must be scoped to createdBy == uid.
+ */
+const managesStationData = (stationId) => can('shift.update', { stationId });
+
 /**
  * Single-order query (date desc) keeps this on Firestore's built-in index —
  * the old two-field orderBy needed a composite index and silently failed.
+ *
+ * Staff get an equality-only query (createdBy == uid) with the date range
+ * applied in memory, so it needs no composite index and passes the rules.
  */
 export function getShifts(stationId, { from = null, max = 300 } = {}) {
   if (!stationId) return Promise.resolve([]);
 
-  return cached(`station:${stationId}:shifts:${from || 'all'}:${max}`, async () => {
+  const me = getCurrentUserData();
+  const ownOnly = !!me && !managesStationData(stationId);
+
+  return cached(`station:${stationId}:shifts:${ownOnly ? `own:${me.uid}` : 'all'}:${from || 'all'}:${max}`, async () => {
+    const db = getDb();
+
+    if (ownOnly) {
+      const snap = await getDocs(query(
+        collection(db, 'stations', stationId, 'shifts'),
+        where('createdBy', '==', me.uid),
+      ));
+      let rows = snapToArray(snap);
+      if (from) rows = rows.filter(r => (r.date || '') >= from);
+      return sortShiftRows(rows).slice(0, max);
+    }
+
     const constraints = [];
     if (from) constraints.push(where('date', '>=', from));
     constraints.push(orderBy('date', 'desc'), limit(max));
 
     const snap = await getDocs(
-      query(collection(getDb(), 'stations', stationId, 'shifts'), ...constraints)
+      query(collection(db, 'stations', stationId, 'shifts'), ...constraints)
     );
-    const rows = snapToArray(snap);
+    return sortShiftRows(snapToArray(snap));
+  });
+}
 
-    // Stable secondary sort by creation time, done client-side so no composite
-    // index is required.
-    rows.sort((a, b) => {
-      const d = (b.date || '').localeCompare(a.date || '');
-      if (d !== 0) return d;
-      return (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0);
-    });
-    return rows;
+/**
+ * Live subscription to a station's shift records — the dashboard "live feed".
+ * Managers receive the newest records station-wide; staff receive their own
+ * (matching the security rules). Works offline: snapshots fire from the
+ * persistent cache first, then refresh when the server responds.
+ *
+ * @returns {() => void} unsubscribe function
+ */
+export function watchShifts(stationId, { onUpdate, onError, max = 200 } = {}) {
+  const me = getCurrentUserData();
+  if (!stationId || !me) return () => {};
+
+  const base = collection(getDb(), 'stations', stationId, 'shifts');
+  const q = managesStationData(stationId)
+    ? query(base, orderBy('date', 'desc'), limit(60))
+    : query(base, where('createdBy', '==', me.uid));
+
+  return onSnapshot(q, (snap) => {
+    const rows = sortShiftRows(snapToArray(snap)).slice(0, max);
+    onUpdate?.(rows, { fromCache: snap.metadata.fromCache, at: Date.now() });
+  }, (err) => {
+    console.warn('Live feed subscription error:', err);
+    onError?.(err);
   });
 }
 

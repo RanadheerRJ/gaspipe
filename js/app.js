@@ -12,7 +12,7 @@ import {
 import {
   h, openModal, closeModal, closeAllModals, showLoading, toast, setBusy,
 } from './components.js';
-import { initDashboard, renderDashboard } from './dashboard.js';
+import { initDashboard, renderDashboard, stopLiveFeed } from './dashboard.js';
 import { initPumps, renderPumps } from './pumps.js';
 import { initConfig, renderConfig } from './config-page.js';
 import { initHistory, renderHistory } from './history.js';
@@ -75,6 +75,7 @@ onAuthChange(async (user, userData, authError) => {
     closeAllModals();
     showLoading(false);
     resetAuthSubmit();
+    stopLiveFeed();
     currentStationId = null;
     userStations = [];
     currentPage = 'dashboard';
@@ -133,6 +134,9 @@ async function renderCurrentPage() {
   content.setAttribute('aria-busy', 'true');
 
   if (currentPage === 'config' && !can('config.view')) currentPage = 'dashboard';
+
+  // The dashboard's Firestore listener runs only while the dashboard is open.
+  if (currentPage !== 'dashboard') stopLiveFeed();
 
   document.querySelectorAll('.tab').forEach(tab => {
     const active = tab.dataset.page === currentPage;
@@ -322,6 +326,10 @@ function setupUI() {
   $('btn-refresh').addEventListener('click', () => refreshData('user'));
   $('fab-refresh').addEventListener('click', () => refreshData('user'));
 
+  // A page-level write (e.g. a shift saved from the dashboard feed) re-renders
+  // the current page in place, whatever it is.
+  window.addEventListener('pumplog:dataChanged', () => renderCurrentPage());
+
   $('station-selector').addEventListener('click', openStationPicker);
 
   $('btn-profile').addEventListener('click', () => {
@@ -334,6 +342,11 @@ function setupUI() {
       : userStations.length
         ? userStations.map(s => s.name).join(', ')
         : 'None assigned';
+    $('profile-pumps').textContent = userData.role === 'staff'
+      ? (userData.pumpIds?.length
+          ? `${userData.pumpIds.length} assigned pump${userData.pumpIds.length === 1 ? '' : 's'}`
+          : 'All pumps at your stations')
+      : 'All pumps';
     openModal('profile-modal');
   });
 

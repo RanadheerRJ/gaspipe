@@ -8,7 +8,7 @@
  *   - Firebase / Google APIs: always network, never cached.
  */
 
-const VERSION = 'v3';
+const VERSION = 'v5';
 const SHELL_CACHE = `pumplog-shell-${VERSION}`;
 const RUNTIME_CACHE = `pumplog-runtime-${VERSION}`;
 
@@ -28,6 +28,10 @@ const SHELL_FILES = [
   './js/history.js',
   './icons/icon-192.png',
   './icons/icon-512.png',
+  './icons/icon-maskable-192.png',
+  './icons/icon-maskable-512.png',
+  './icons/apple-touch-icon.png',
+  './icons/logo-512.png',
 ];
 
 self.addEventListener('install', (event) => {

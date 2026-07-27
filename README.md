@@ -5,12 +5,26 @@ A lightweight, installable PWA for tracking fuel station shift readings, rates, 
 ## Features
 
 - **4 pages**: Dashboard, Pumps (shift entry), Config (rates/pumps/stations/team), History
+- **Live pump feed**: the dashboard shows real-time Active / Stopped status per pump via Firestore listeners — a reading logged on any device appears everywhere within a second
 - **Role-based access control**: Super Admin, Station Admin, Staff — enforced in Firestore rules and mirrored in the UI
+- **Per-pump staff assignment**: admins/managers assign one or more pumps to each staff account; staff see only their pumps and only their own readings
+- **Rates owned by management**: only Super Admin / Station Admin can create, edit or delete rates; staff log readings against the configured rate (read-only)
 - **Full team management**: create, edit and remove users with station assignment
+- **Installable**: home-screen icon on Android and iOS, splash screen, offline app shell
 - **Fast**: ~155 KB of app assets, no webfonts, no framework, cached reads
 - **Accessible**: keyboard navigation, focus trapping, screen-reader labels, 44px touch targets, dark mode
 - **Offline-ready**: persistent Firestore cache + service worker app shell
 - **Refresh anywhere**: floating refresh button plus one in the top bar
+
+### Home-screen icon
+
+The app ships a proper icon set (`icons/`) built from the PumpLog brand logo —
+the navy/red fuel drop with the worker crew inside: 192/512 px standard icons,
+dedicated maskable icons for Android (logo stays inside the safe zone, so it is
+never cropped by the launcher), and a 180 px `apple-touch-icon` for iOS. “Add to
+Home Screen” therefore shows the PumpLog drop logo instead of a screenshot or
+generic letter tile. `icons/logo-master.png` is the clean 1024-class master the
+set is derived from, and the same logo appears on the sign-in screen.
 
 ## Firebase Setup
 
@@ -39,6 +53,12 @@ const FIREBASE_CONFIG = {
 
 Copy `firestore.rules` into Firebase Console → Firestore Database → Rules → **Publish**.
 
+> **Upgrading?** The rules in this repo now (a) allow the `pumpIds` field on user
+> profiles and (b) restrict staff to reading only their own shift records. If
+> you deployed an older version, **publish the latest `firestore.rules` again** —
+> until you do, team edits that include pump assignments will be rejected and
+> staff history queries will fail closed.
+
 Rules are the source of truth. `js/auth.js` mirrors them in a `can()` helper that
 only decides what the UI renders — bypassing the UI still hits the server rules.
 
@@ -46,11 +66,30 @@ only decides what the UI renders — bypassing the UI still hits the server rule
 |---|:--:|:--:|:--:|
 | Stations — create / edit / delete | ✅ | ❌ | ❌ |
 | Rates & pumps (assigned stations) | ✅ | ✅ | 👁 read |
-| Shifts — log a reading | ✅ | ✅ | ✅ |
+| Shifts — log a reading | ✅ | ✅ | ✅ assigned pumps, configured rate |
+| Shifts — read | ✅ all | ✅ all | 👁 own records only |
 | Shifts — edit / delete | ✅ | ✅ | ❌ |
+| Assign pumps to staff | ✅ | ✅ own stations | ❌ |
 | Users — create | ✅ any role | ✅ staff only | ❌ |
 | Users — edit / remove | ✅ | ✅ own staff only | ❌ |
 | Config page | ✅ | ✅ | ❌ |
+
+### Pump assignment & per-person data
+
+- In **Config → Team → Add/Edit**, admins tick the stations a staff member works
+  at, and can then tick **one or more of that station's pumps**. A single user
+  may hold pumps from several stations.
+- Staff sign in to a scoped view: the Pumps page and the dashboard live feed
+  show only their assigned pumps, and Dashboard/History totals include only
+  readings they logged themselves. Managers keep the station-wide view.
+- Leaving every pump unticked in the editor means **“all pumps at the assigned
+  stations”** — this keeps older staff accounts (created before pump
+  assignments existed) working unchanged until you restrict them.
+- Admins and managers always see and manage every pump — assignments only ever
+  apply to Staff accounts.
+- Rates are fully owned by people with the Station Admin or Super Admin role.
+  The rate field on the shift form is read-only for staff, and readings always
+  save at the configured rate.
 
 Guardrails enforced in both the UI and the rules:
 
@@ -126,6 +165,7 @@ users/{uid}
   ├── email: string
   ├── role: "superadmin" | "stationadmin" | "staff"
   ├── stationIds: string[]      // empty for Super Admin (implicit access to all)
+  ├── pumpIds: string[]         // staff only — empty means "all pumps at assigned stations"
   ├── createdBy: string (uid | "system")
   ├── createdAt: timestamp
   ├── updatedAt: timestamp      // set when an admin edits the profile

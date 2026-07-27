@@ -7,7 +7,12 @@ rules_version = '2';
  * Roles
  *   superadmin   — full control everywhere
  *   stationadmin — rates/pumps/shifts + staff they created, on assigned stations
- *   staff        — read assigned stations, create shift records
+ *   staff        — read assigned stations, log shifts on their assigned pumps,
+ *                  and read ONLY their own shift records
+ *
+ * Rates are exclusively controlled by Super Admin / Station Admin.
+ * Staff may be restricted to specific pumps via the `pumpIds` list on their
+ * profile (empty list = all pumps at their assigned stations).
  */
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -65,10 +70,13 @@ service cloud.firestore {
     function userFieldsOk() {
       return request.resource.data.keys().hasAll(['email', 'role', 'stationIds'])
         && request.resource.data.keys().hasOnly([
-             'email', 'role', 'stationIds', 'createdBy', 'createdAt', 'updatedAt', 'updatedBy'
+             'email', 'role', 'stationIds', 'pumpIds', 'createdBy', 'createdAt', 'updatedAt', 'updatedBy'
            ])
         && request.resource.data.stationIds is list
         && request.resource.data.stationIds.size() <= 50
+        && (!request.resource.data.keys().hasAny(['pumpIds'])
+            || (request.resource.data.pumpIds is list
+                && request.resource.data.pumpIds.size() <= 200))
         && isValidRole(request.resource.data.role);
     }
 
@@ -78,6 +86,8 @@ service cloud.firestore {
         && request.auth.uid == uid
         && request.resource.data.email == request.auth.token.email
         && request.resource.data.stationIds.size() == 0
+        && (!request.resource.data.keys().hasAny(['pumpIds'])
+            || request.resource.data.pumpIds.size() == 0)
         && userFieldsOk();
     }
 
@@ -216,7 +226,14 @@ service cloud.firestore {
 
       // ── Shifts ────────────────────────────────────────────────────
       match /shifts/{shiftId} {
-        allow read: if isSignedIn() && canAccessStation(stationId);
+        // Managers (Super/Station Admin) read every record at the station.
+        // Staff read ONLY their own records, so their list queries must
+        // include where('createdBy', '==', <uid>) — an unscoped query would
+        // match other users' records and be rejected outright.
+        allow read: if isSignedIn()
+          && canAccessStation(stationId)
+          && (canManageStation(stationId)
+              || resource.data.createdBy == request.auth.uid);
 
         // Any user with station access may log a reading, but only as
         // themselves and only with sane numbers.

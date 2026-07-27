@@ -163,6 +163,12 @@ function renderTeamSection(users, me) {
         ? 'No stations assigned'
         : stationIds.map(nameOf).join(', ');
 
+    const pumpText = u.role === 'staff'
+      ? (u.pumpIds?.length
+          ? `${u.pumpIds.length} pump${u.pumpIds.length === 1 ? '' : 's'} assigned`
+          : 'all pumps')
+      : null;
+
     const actions = [];
     if (mayEdit) {
       actions.push({ cls: 'edit-user', id: u.id, icon: '✏️', label: `Edit ${u.email}` });
@@ -177,7 +183,7 @@ function renderTeamSection(users, me) {
 
     return configItem({
       title: `${h(u.email)}${isMe ? ' <span class="tag tag-you">You</span>' : ''}`,
-      meta: `${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)} · ${h(stationText)}`,
+      meta: `${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}`,
       actions,
     });
   }).join('');
@@ -600,6 +606,11 @@ async function showUserForm(user) {
         <div class="checkbox-list" id="station-assign-list">${stationBoxes}</div>
         <small class="hint" id="role-station-hint"></small>
       </fieldset>
+      <fieldset class="field" id="pump-assign-fieldset">
+        <legend>Assign pumps <span class="optional">(staff only, optional)</span></legend>
+        <div class="pump-assign-list" id="pump-assign-list"></div>
+        <small class="hint" id="pump-assign-hint"></small>
+      </fieldset>
       <p class="form-error hidden" id="user-form-error" role="alert"></p>
       <button type="submit" class="btn btn-primary btn-full">${isEdit ? 'Save changes' : 'Create account'}</button>
     </form>
@@ -620,6 +631,79 @@ async function showUserForm(user) {
   roleSelect.addEventListener('change', syncStationPicker);
   syncStationPicker();
 
+  // ── Pump assignment picker ────────────────────────────────────────────
+  // Ticked pumps are the ONLY pumps a staff member sees at login. Leaving
+  // everything unticked means "all pumps at the assigned stations".
+  const pumpFieldset = byId('pump-assign-fieldset');
+  const pumpList = byId('pump-assign-list');
+  const pumpHint = byId('pump-assign-hint');
+  const selectedPumps = new Set(user?.pumpIds || []);
+  const stationPumps = new Map(); // stationId -> pumps[] (loaded on demand)
+
+  const checkedStationIds = () =>
+    Array.from(list.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+
+  async function loadStationPumps(stationId) {
+    if (!stationPumps.has(stationId)) {
+      try { stationPumps.set(stationId, await getPumps(stationId)); }
+      catch { stationPumps.set(stationId, []); }
+    }
+    return stationPumps.get(stationId);
+  }
+
+  async function refreshPumpPicker() {
+    const isStaffRole = roleSelect.value === 'staff';
+    pumpFieldset.classList.toggle('is-disabled', !isStaffRole);
+    if (!isStaffRole) {
+      pumpList.innerHTML = '';
+      pumpHint.textContent = 'Only staff accounts use pump assignments — admins and managers see every pump.';
+      return;
+    }
+
+    const ids = checkedStationIds();
+    if (ids.length === 0) {
+      pumpList.innerHTML = '';
+      pumpHint.textContent = 'Tick a station above to choose which of its pumps this person can use.';
+      return;
+    }
+
+    pumpHint.textContent = 'Loading pumps…';
+    await Promise.all(ids.map(loadStationPumps));
+
+    // Ticked pumps belonging to stations that were just unticked no longer apply.
+    const validIds = new Set(ids.flatMap(id => (stationPumps.get(id) || []).map(p => p.id)));
+    for (const pid of [...selectedPumps]) {
+      if (!validIds.has(pid)) selectedPumps.delete(pid);
+    }
+
+    pumpList.innerHTML = ids.map(id => {
+      const stationName = stations.find(s => s.id === id)?.name || 'Station';
+      const pumps = stationPumps.get(id) || [];
+      const boxes = pumps.map(p => `
+        <div class="checkbox-item">
+          <input type="checkbox" id="pump-${h(p.id)}" value="${h(p.id)}" ${selectedPumps.has(p.id) ? 'checked' : ''} />
+          <label for="pump-${h(p.id)}">${h(p.name)}${p.product ? ` <span class="muted-note">${h(p.product)}</span>` : ''}</label>
+        </div>`).join('');
+      return `<div class="pump-group">
+        <p class="pump-group-title">${h(stationName)}</p>
+        ${boxes || '<p class="muted-note pump-group-empty">No pumps configured for this station yet.</p>'}
+      </div>`;
+    }).join('');
+
+    pumpHint.textContent = 'This staff member will see only the ticked pumps when they log in. Leave all unticked to allow every pump at the assigned stations.';
+    pumpList.querySelectorAll('input[type="checkbox"]').forEach(cb =>
+      cb.addEventListener('change', () => {
+        if (cb.checked) selectedPumps.add(cb.value);
+        else selectedPumps.delete(cb.value);
+      }));
+  }
+
+  list.addEventListener('change', (e) => {
+    if (e.target.matches('input[type="checkbox"]')) refreshPumpPicker();
+  });
+  roleSelect.addEventListener('change', refreshPumpPicker);
+  await refreshPumpPicker();
+
   byId('user-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = e.currentTarget.querySelector('button[type="submit"]');
@@ -628,6 +712,8 @@ async function showUserForm(user) {
     const stationIds = Array.from(
       document.querySelectorAll('#station-assign-list input[type="checkbox"]:checked')
     ).map(cb => cb.value);
+    // Pump assignments apply to staff only; everyone else sees every pump.
+    const pumpIds = role === 'staff' ? [...selectedPumps] : [];
 
     if (role !== 'superadmin' && stationIds.length === 0) {
       return showFieldError(err, 'Assign at least one station, or the account will not see any data.');
@@ -638,7 +724,11 @@ async function showUserForm(user) {
 
     try {
       if (isEdit) {
-        await updateUserAsAdmin(user, { role, stationIds: role === 'superadmin' ? [] : stationIds });
+        await updateUserAsAdmin(user, {
+          role,
+          stationIds: role === 'superadmin' ? [] : stationIds,
+          pumpIds,
+        });
         invalidateUsers();
         closeModal('generic-modal');
         toast(`${user.email} updated.`, 'success');
@@ -648,7 +738,7 @@ async function showUserForm(user) {
         if (!email) return failInline(err, btn, 'Enter an email address.');
         if (password.length < 6) return failInline(err, btn, 'Password must be at least 6 characters.');
 
-        await createUserAsAdmin(email, password, role, role === 'superadmin' ? [] : stationIds);
+        await createUserAsAdmin(email, password, role, role === 'superadmin' ? [] : stationIds, pumpIds);
         invalidateUsers();
         closeModal('generic-modal');
         toast(`Account created for ${email}.`, 'success');
