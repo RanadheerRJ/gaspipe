@@ -1,0 +1,3 @@
+| Date/Timestamp (published) | Branch | Summary of changes |
+|---|---|---|
+| 2026-07-27 | `arena/019fa430-gaspipe` | PumpLog feature set: transactional pump clock-in/out sessions with live locks, Reports with CSV/print export, station-data reset and force-release controls, overnight-safe hours handling, redesigned Dashboard with live clock, active-shift summary, daily-rate refresh/collapse, SVG pump/tank indicators, and Start my day quick action, plus card-based Config accordions and in-app security guidance. Existing Firestore rules were extended for sessions, locked clock-out writes, and reset deletes; manually re-publish `firestore.rules` in Firebase Console because GitHub Pages deployment does not publish rules. |

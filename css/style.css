@@ -1122,3 +1122,99 @@ fieldset.is-disabled { opacity: .55; pointer-events: none; }
 }
 
 .destructive-label { color: var(--red); font-weight: 600; }
+
+/* ===== Dashboard command strip ===== */
+.dashboard-header-strip {
+  display: grid; grid-template-columns: 1fr 1.35fr; gap: 12px; margin-bottom: 16px;
+}
+.dashboard-date-block, .dashboard-user-block {
+  display: flex; align-items: center; gap: 11px; min-height: 86px; padding: 14px 16px;
+  background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow);
+}
+.dashboard-date-block { flex-direction: column; align-items: flex-start; justify-content: center; gap: 1px; }
+.dashboard-date-block strong { font-size: 18px; line-height: 1.25; }
+.dashboard-date-block time { color: var(--primary); font-family: var(--mono); font-size: 13px; font-weight: 700; }
+.dashboard-user-block { align-items: flex-start; }
+.dashboard-user-icon { display: grid; place-items: center; width: 40px; height: 40px; flex: 0 0 40px; border-radius: 12px; background: var(--primary-light); font-size: 19px; }
+.dashboard-user-block > div:last-child { min-width: 0; display: flex; flex-direction: column; }
+.dashboard-user-block strong { color: var(--green); font-size: 17px; line-height: 1.25; }
+.dashboard-user-meta { overflow: hidden; color: var(--text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.eyebrow { color: var(--text-muted); font-size: 10px; font-weight: 800; letter-spacing: .75px; text-transform: uppercase; }
+
+/* ===== Daily rate card ===== */
+.daily-rates-card { margin: 16px 0 18px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.daily-rates-head { display: flex; align-items: center; gap: 8px; padding: 10px 12px 10px 16px; }
+.daily-rates-toggle { display: flex; align-items: center; flex: 1; gap: 10px; min-height: 44px; padding: 0; border: 0; background: transparent; color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.daily-rates-toggle > span:first-child { display: flex; align-items: center; gap: 10px; }
+.daily-rates-toggle strong, .daily-rates-toggle small { display: block; }
+.daily-rates-toggle strong { font-size: 15px; }
+.daily-rates-toggle small { color: var(--text-muted); font-size: 12px; }
+.daily-rates-icon { display: grid; place-items: center; width: 34px; height: 34px; border-radius: 10px; background: var(--amber-bg); color: var(--amber); font-weight: 800; }
+.daily-rates-toggle .chevron { margin-left: auto; color: var(--text-muted); transition: transform .15s; }
+.daily-rates-card:not(.is-collapsed) .daily-rates-toggle .chevron { transform: rotate(180deg); }
+.rate-active-hours { color: var(--green); font-size: 11px; font-weight: 700; white-space: nowrap; }
+.daily-rates-body { display: grid; grid-template-columns: repeat(auto-fit, minmax(145px, 1fr)); gap: 8px; padding: 0 16px 16px; }
+.daily-rate-row { display: grid; grid-template-columns: 1fr auto; gap: 2px 8px; padding: 10px 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.daily-rate-row span { color: var(--text-secondary); font-size: 13px; }
+.daily-rate-row strong { color: var(--text); font-family: var(--mono); font-size: 14px; }
+.daily-rate-row small { grid-column: 1 / -1; color: var(--text-muted); font-size: 11px; }
+
+/* ===== Pump SVG indicators ===== */
+.pump-status-row { min-height: 78px; }
+.pump-visual { display: grid; place-items: center; flex: 0 0 48px; width: 48px; height: 48px; border-radius: 13px; background: var(--surface-2); color: var(--text-muted); }
+.pump-visual svg { width: 42px; height: 42px; overflow: visible; }
+.pump-visual.active { background: var(--green-bg); color: var(--green); }
+.pump-body { fill: currentColor; opacity: .18; stroke: currentColor; stroke-width: 1.5; }
+.pump-line, .pump-nozzle { fill: none; stroke: currentColor; stroke-linecap: round; stroke-width: 2; }
+.pump-light { fill: currentColor; }
+.pump-flow { fill: none; stroke: var(--green); stroke-dasharray: 2 5; stroke-linecap: round; stroke-width: 2.4; animation: pumpFlow 1.2s linear infinite; }
+@keyframes pumpFlow { to { stroke-dashoffset: -14; } }
+.tank-gauge { display: grid; place-items: center; width: 25px; color: var(--blue); }
+.tank-gauge svg { width: 22px; height: 34px; }
+.tank-outline { fill: none; stroke: var(--border-strong); stroke-width: 1.5; }
+.tank-fill { fill: var(--blue); opacity: .72; }
+
+/* ===== Start my day ===== */
+.quick-start-card { margin: 0 0 18px; padding: 16px; border: 1px solid var(--primary); border-radius: var(--radius); background: var(--primary-light); box-shadow: var(--shadow); }
+.quick-start-copy { display: flex; align-items: flex-start; gap: 11px; }
+.quick-start-icon { display: grid; place-items: center; width: 38px; height: 38px; flex: 0 0 38px; border-radius: 11px; background: var(--surface); font-size: 20px; }
+.quick-start-copy h3 { font-size: 17px; }
+.quick-start-copy p { margin-top: 2px; color: var(--text-secondary); font-size: 13px; }
+.quick-start-controls { margin-top: 12px; }
+.quick-station-label { display: block; color: var(--text-secondary); font-size: 12px; font-weight: 700; margin-bottom: 4px; }
+.quick-station-select { width: 100%; min-height: var(--tap); padding: 8px 11px; border: 1px solid var(--border-strong); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; }
+.quick-pump-list { display: grid; gap: 7px; margin-top: 8px; }
+.quick-pump-btn { display: flex; align-items: center; gap: 9px; width: 100%; min-height: 48px; padding: 8px 11px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.quick-pump-btn:hover:not(:disabled) { border-color: var(--primary); }
+.quick-pump-btn > span:nth-child(2) { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.quick-pump-btn strong { font-size: 14px; }
+.quick-pump-btn small { color: var(--text-secondary); font-size: 12px; }
+.quick-pump-btn > span:last-child { color: var(--primary); font-size: 12px; font-weight: 700; white-space: nowrap; }
+.quick-pump-btn:disabled { color: var(--text-muted); cursor: not-allowed; opacity: .72; }
+.quick-pump-btn:disabled > span:last-child { color: var(--amber); }
+
+/* ===== Card-based Config accordion ===== */
+.config-section { margin-bottom: 12px; padding: 0; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.config-accordion-toggle { display: flex; align-items: center; gap: 12px; width: 100%; min-height: 72px; padding: 12px 16px; border: 0; background: var(--surface); color: var(--text); font: inherit; text-align: left; cursor: pointer; }
+.config-accordion-toggle:hover { background: var(--surface-2); }
+.config-topic-icon { display: grid; place-items: center; width: 42px; height: 42px; flex: 0 0 42px; border-radius: 12px; background: var(--primary-light); color: var(--primary); font-size: 20px; font-weight: 800; }
+.config-topic-copy { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.config-topic-copy strong { font-size: 16px; }
+.config-topic-copy small { overflow: hidden; color: var(--text-secondary); font-size: 12px; text-overflow: ellipsis; white-space: nowrap; }
+.config-topic-chevron { color: var(--text-muted); font-size: 20px; transition: transform .15s; }
+.config-section.is-open .config-topic-chevron { transform: rotate(180deg); }
+.config-section-body { padding: 0 16px 16px; }
+.config-section-actions { display: flex; justify-content: flex-end; padding: 2px 0 10px; }
+.config-section-body .config-item { box-shadow: none; }
+.security-grid { display: grid; gap: 8px; }
+.security-card { display: flex; align-items: flex-start; gap: 10px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.security-card-icon { display: grid; place-items: center; width: 30px; height: 30px; flex: 0 0 30px; border-radius: 8px; background: var(--green-bg); }
+.security-card strong { font-size: 14px; }
+.security-card p, .security-note { margin-top: 2px; color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+.security-note { margin: 11px 0 0; }
+
+@media (max-width: 620px) {
+  .dashboard-header-strip { grid-template-columns: 1fr; }
+  .dashboard-date-block, .dashboard-user-block { min-height: 72px; }
+  .rate-active-hours { display: none; }
+}

@@ -14,7 +14,7 @@ import {
   invalidateStation, invalidateStations, invalidateUsers,
 } from './store.js';
 import {
-  h, formatCurrency, formatDate, getTodayDate,
+  h, formatCurrency, formatDate, formatDateTime, getTodayDate,
   openModal, closeModal, emptyState, toast, confirmDialog, setBusy, showSkeleton,
 } from './components.js';
 
@@ -54,6 +54,7 @@ export async function renderConfig(stationId) {
       renderPumpsSection(stationId, pumps, sessions),
       renderStationsSection(stations),
       renderTeamSection(users, me),
+      renderSecuritySection(),
     ].filter(Boolean).join('');
 
     content.innerHTML = `<h2 class="page-title">Settings</h2>${sections}`;
@@ -205,11 +206,37 @@ function renderTeamSection(users, me) {
 }
 
 // ── Markup helpers ──────────────────────────────────────────────────────
+const SECTION_META = {
+  Rates: { icon: '₹', description: 'Set the prices used to calculate each shift.' },
+  Pumps: { icon: '⛽', description: 'Manage pumps, products, and stuck session locks.' },
+  Stations: { icon: '🏪', description: 'Manage stations or safely reset station data.' },
+  Team: { icon: '👥', description: 'Manage staff, roles, stations, and pump assignments.' },
+  Security: { icon: '🔒', description: 'Understand how Firebase and live pump locks protect access.' },
+};
+
 function section(title, actionHTML, bodyHTML) {
-  return `<section class="config-section">
-    <h3>${h(title)}${actionHTML}</h3>
-    ${bodyHTML}
+  const meta = SECTION_META[title] || { icon: '⚙️', description: 'Manage PumpLog settings.' };
+  const key = title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
+  const open = title === 'Rates';
+  return `<section class="config-section ${open ? 'is-open' : ''}" data-config-section="${h(key)}">
+    <button type="button" class="config-accordion-toggle" aria-expanded="${open}" aria-controls="config-body-${h(key)}">
+      <span class="config-topic-icon" aria-hidden="true">${meta.icon}</span>
+      <span class="config-topic-copy"><strong>${h(title)}</strong><small>${h(meta.description)}</small></span>
+      <span class="config-topic-chevron" aria-hidden="true">⌄</span>
+    </button>
+    <div id="config-body-${h(key)}" class="config-section-body" ${open ? '' : 'hidden'}>
+      ${actionHTML ? `<div class="config-section-actions">${actionHTML}</div>` : ''}
+      ${bodyHTML}
+    </div>
   </section>`;
+}
+
+function renderSecuritySection() {
+  return section('Security', '', `<div class="security-grid">
+    <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔐</span><div><strong>Firebase Auth sign-in</strong><p>Each person stays signed in on their device until they choose Sign out. Firebase Auth and Firestore rules remain the authority.</p></div></article>
+    <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔒</span><div><strong>One pump, one active shift</strong><p>A live Firestore transaction locks a pump to one staff member. Clock-out releases it atomically with the saved shift record.</p></div></article>
+    <article class="security-card"><span class="security-card-icon" aria-hidden="true">🛡️</span><div><strong>Role-based access</strong><p>Staff see their assigned pumps and records. Station Admins manage their stations. Super Admins manage every station. UI checks never replace server rules.</p></div></article>
+  </div><p class="security-note">For recovery, managers can force-release an active lock from the Pumps section. This discards the unfinished reading and does not create a shift.</p>`);
 }
 
 function configItem({ title, meta, actions = [] }) {
@@ -233,9 +260,31 @@ const onClick = (id, fn) => byId(id)?.addEventListener('click', fn);
 const onEach = (sel, fn) => document.querySelectorAll(sel).forEach(el =>
   el.addEventListener('click', () => fn(el.dataset.id, el)));
 
+function wireConfigAccordion() {
+  document.querySelectorAll('[data-config-section] .config-accordion-toggle').forEach(toggle => {
+    toggle.addEventListener('click', () => {
+      const sectionEl = toggle.closest('[data-config-section]');
+      const wasOpen = sectionEl.classList.contains('is-open');
+      document.querySelectorAll('[data-config-section]').forEach(sectionEl2 => {
+        sectionEl2.classList.remove('is-open');
+        sectionEl2.querySelector('.config-accordion-toggle')?.setAttribute('aria-expanded', 'false');
+        const body = sectionEl2.querySelector('.config-section-body');
+        if (body) body.hidden = true;
+      });
+      if (!wasOpen) {
+        sectionEl.classList.add('is-open');
+        toggle.setAttribute('aria-expanded', 'true');
+        const body = sectionEl.querySelector('.config-section-body');
+        if (body) body.hidden = false;
+      }
+    });
+  });
+}
+
 // ── Wiring ──────────────────────────────────────────────────────────────
 function wireHandlers(rates, pumps, sessions, stations, users) {
   const sid = currentStationId;
+  wireConfigAccordion();
 
   onClick('add-rate-btn', () => showRateForm(null));
   onEach('.edit-rate', id => showRateForm(rates.find(r => r.id === id)));
