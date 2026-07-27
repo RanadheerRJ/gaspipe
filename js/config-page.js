@@ -17,6 +17,8 @@ import {
   h, formatCurrency, formatDate, formatDateTime, getTodayDate,
   openModal, closeModal, emptyState, toast, confirmDialog, setBusy, showSkeleton,
 } from './components.js';
+import { createStaff, checkUsername, resetStaffPin, prepareLegacyUsers, disableStaff } from './staff-auth.js';
+import { openChangePinForm } from './profile.js';
 
 let currentStationId = null;
 let stationsCache = [];
@@ -80,7 +82,7 @@ function renderProfileSection(me, stations, pumps) {
     <dl class="profile-settings-list"><dt>Role</dt><dd><span class="role-badge">${ROLE_BADGE[me.role] || '⚪'} ${h(ROLES[me.role] || me.role || 'Staff')}</span></dd>
       <dt>Assigned stations</dt><dd>${h(stationText)}</dd><dt>Pump access</dt><dd>${h(pumpText)}</dd></dl>
     <p class="profile-readonly-note">This information is read-only here. Station and pump access changes are managed by an administrator.</p>
-    <button type="button" id="config-signout" class="btn btn-secondary btn-full">Sign out</button>
+    <div class="profile-account-actions"><button type="button" id="config-change-pin" class="btn btn-secondary btn-full">Change PIN</button><button type="button" id="config-signout" class="btn btn-secondary btn-full">Sign out</button></div>
   </div>`);
 }
 
@@ -204,19 +206,22 @@ function renderTeamSection(users, me) {
 
     const actions = [];
     if (mayEdit) {
-      actions.push({ cls: 'edit-user', id: u.id, icon: '✏️', label: `Edit ${u.email}` });
+      actions.push({ cls: 'edit-user', id: u.id, icon: '✏️', label: `Edit ${u.email || u.fullName}` });
+      if (u.role === 'staff') actions.push({ cls: 'reset-pin-user', id: u.id, icon: '🔑', label: `Reset PIN for ${u.email || u.fullName}` });
     } else if (!isMe) {
       actions.push({ cls: '', id: u.id, icon: '✏️', label: 'Edit unavailable', disabled: true, title: denyReason('user.update', { target: u }) });
     }
     if (mayDelete) {
-      actions.push({ cls: 'delete-user', id: u.id, icon: '🗑️', label: `Remove ${u.email}` });
+      actions.push(u.username
+        ? { cls: 'disable-user', id: u.id, icon: '⛔', label: `Disable ${u.fullName || u.username}` }
+        : { cls: 'delete-user', id: u.id, icon: '🗑️', label: `Remove ${u.email || u.fullName}` });
     } else if (!isMe) {
       actions.push({ cls: '', id: u.id, icon: '🗑️', label: 'Remove unavailable', disabled: true, title: denyReason('user.delete', { target: u }) });
     }
 
     return configItem({
-      title: `${h(u.email)}${isMe ? ' <span class="tag tag-you">You</span>' : ''}`,
-      meta: `${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}`,
+      title: `${h(u.fullName || u.email || u.username || 'Unnamed user')}${isMe ? ' <span class="tag tag-you">You</span>' : ''}`,
+      meta: `${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}`,
       actions,
     });
   }).join('');
@@ -256,7 +261,8 @@ function renderSecuritySection() {
     <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔐</span><div><strong>Firebase Auth sign-in</strong><p>Each person stays signed in on their device until they choose Sign out. Firebase Auth and Firestore rules remain the authority.</p></div></article>
     <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔒</span><div><strong>One pump, one active shift</strong><p>A live Firestore transaction locks a pump to one staff member. Clock-out releases it atomically with the saved shift record.</p></div></article>
     <article class="security-card"><span class="security-card-icon" aria-hidden="true">🛡️</span><div><strong>Role-based access</strong><p>Staff see their assigned pumps and records. Station Admins manage their stations. Super Admins manage every station. UI checks never replace server rules.</p></div></article>
-  </div><p class="security-note">For recovery, managers can force-release an active lock from the Pumps section. This discards the unfinished reading and does not create a shift.</p>`);
+  </div><p class="security-note">For recovery, managers can force-release an active lock from the Pumps section. This discards the unfinished reading and does not create a shift.</p>
+  <button type="button" id="prepare-legacy-users" class="btn btn-secondary btn-full mt-16">Prepare existing accounts for username + PIN</button>`);
 }
 
 function configItem({ title, meta, actions = [] }) {
@@ -309,6 +315,8 @@ function wireHandlers(rates, pumps, sessions, stations, users) {
     setBusy(event.currentTarget, true, 'Signing out…');
     await doSignOut();
   });
+  onClick('config-change-pin', () => openChangePinForm());
+  onClick('prepare-legacy-users', () => prepareExistingAccounts());
 
   onClick('add-rate-btn', () => showRateForm(null));
   onEach('.edit-rate', id => showRateForm(rates.find(r => r.id === id)));
@@ -326,6 +334,8 @@ function wireHandlers(rates, pumps, sessions, stations, users) {
 
   onClick('add-team-btn', () => showUserForm(null));
   onEach('.edit-user', id => showUserForm(users.find(u => u.id === id)));
+  onEach('.reset-pin-user', id => resetStaffPinForUser(users.find(u => u.id === id)));
+  onEach('.disable-user', id => disableStaffUser(users.find(u => u.id === id)));
   onEach('.delete-user', id => removeUser(users.find(u => u.id === id)));
 
   void sid;
@@ -740,22 +750,26 @@ async function showUserForm(user) {
 
   const credentialFields = isEdit ? `
     <div class="field">
-      <label>Email</label>
-      <input type="email" value="${h(user.email)}" disabled />
-      <small class="hint">Email changes are managed in Firebase Authentication.</small>
+      <label>${user.role === 'staff' ? 'Full name' : 'Email'}</label>
+      <input type="text" value="${h(user.role === 'staff' ? (user.fullName || user.username || '') : (user.email || ''))}" disabled />
+      <small class="hint">Identity credentials are managed by the secure account flow.</small>
     </div>
   ` : `
-    <div class="field">
-      <label for="new-email">Email</label>
-      <input type="email" id="new-email" placeholder="user@example.com" required
-             autocomplete="off" autocapitalize="off" spellcheck="false" />
-    </div>
-    <div class="field">
-      <label for="new-password">Temporary password</label>
-      <input type="password" id="new-password" placeholder="At least 6 characters"
-             minlength="6" required autocomplete="new-password" />
-    </div>
+    <div id="credential-fields"></div>
   `;
+  const legacyCredentialFields = `
+    <div class="field"><label for="new-email">Email</label>
+      <input type="email" id="new-email" placeholder="admin@example.com" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
+    <div class="field"><label for="new-password">Temporary password</label>
+      <input type="password" id="new-password" placeholder="At least 6 characters" minlength="6" required autocomplete="new-password" /></div>`;
+  const staffCredentialFields = `
+    <div class="field"><label for="new-full-name">Full name</label>
+      <input type="text" id="new-full-name" placeholder="e.g. John Smith" maxlength="80" required autocomplete="name" /></div>
+    <div class="field"><label for="new-username">Username</label>
+      <input type="text" id="new-username" placeholder="john.smith" minlength="4" maxlength="25" pattern="[a-zA-Z0-9_.]+" required autocomplete="username" autocapitalize="off" spellcheck="false" />
+      <small id="username-status" class="hint">4–25 characters: letters, numbers, underscore, or dot.</small></div>
+    <div class="field"><label for="new-phone">Phone number <span class="optional">(optional)</span></label>
+      <input type="tel" id="new-phone" placeholder="+1 555 123 4567" autocomplete="tel" inputmode="tel" /></div>`;
 
   showFormModal(isEdit ? 'Edit team member' : 'Add team member', `
     <form id="user-form" novalidate>
@@ -781,6 +795,41 @@ async function showUserForm(user) {
 
   // Super Admins implicitly see every station, so hide the picker for them.
   const roleSelect = byId('new-role');
+  const credentialHost = byId('credential-fields');
+  let usernameCheckTimer = null;
+  function wireUsernameCheck() {
+    const input = byId('new-username');
+    const status = byId('username-status');
+    if (!input || !status) return;
+    input.addEventListener('input', () => {
+      const username = input.value.trim().toLowerCase();
+      input.value = username;
+      status.className = 'hint';
+      status.textContent = username.length < 4 ? '4–25 characters: letters, numbers, underscore, or dot.' : 'Checking availability…';
+      input.dataset.available = 'false';
+      clearTimeout(usernameCheckTimer);
+      if (username.length < 4) return;
+      usernameCheckTimer = setTimeout(async () => {
+        try {
+          const result = await checkUsername(username);
+          input.dataset.available = String(result.available);
+          status.textContent = result.available ? '✓ Username available' : '✕ Username already exists';
+          status.classList.toggle('validation-success', result.available);
+          status.classList.toggle('validation-error', !result.available);
+        } catch (error) {
+          input.dataset.available = 'false';
+          status.textContent = formatFirebaseError(error);
+          status.classList.add('validation-error');
+        }
+      }, 280);
+    });
+  }
+  function syncCredentialFields() {
+    if (!credentialHost) return;
+    const staffRole = roleSelect.value === 'staff';
+    credentialHost.innerHTML = staffRole ? staffCredentialFields : legacyCredentialFields;
+    if (staffRole) wireUsernameCheck();
+  }
   const hint = byId('role-station-hint');
   const list = byId('station-assign-list');
   function syncStationPicker() {
@@ -792,7 +841,9 @@ async function showUserForm(user) {
       : 'Staff and Station Admins see only the stations you tick.';
   }
   roleSelect.addEventListener('change', syncStationPicker);
+  roleSelect.addEventListener('change', syncCredentialFields);
   syncStationPicker();
+  if (!isEdit) syncCredentialFields();
 
   // ── Pump assignment picker ────────────────────────────────────────────
   // Ticked pumps are the ONLY pumps a staff member sees at login. Leaving
@@ -816,6 +867,13 @@ async function showUserForm(user) {
 
   async function refreshPumpPicker() {
     const isStaffRole = roleSelect.value === 'staff';
+    if (!isEdit) {
+      pumpFieldset.hidden = true;
+      pumpList.innerHTML = '';
+      pumpHint.textContent = 'Assign pumps after the staff member activates their account.';
+      return;
+    }
+    pumpFieldset.hidden = false;
     pumpFieldset.classList.toggle('is-disabled', !isStaffRole);
     if (!isStaffRole) {
       pumpList.innerHTML = '';
@@ -895,6 +953,18 @@ async function showUserForm(user) {
         invalidateUsers();
         closeModal('generic-modal');
         toast(`${user.email} updated.`, 'success');
+      } else if (role === 'staff') {
+        const fullName = byId('new-full-name').value.trim();
+        const username = byId('new-username').value.trim().toLowerCase();
+        const phoneNumber = byId('new-phone').value.trim();
+        if (!fullName) return failInline(err, btn, 'Enter the staff member’s full name.');
+        if (!/^[a-z0-9_.]{4,25}$/.test(username)) return failInline(err, btn, 'Username must be 4–25 characters using letters, numbers, underscore, or dot.');
+        const availability = await checkUsername(username);
+        if (!availability.available) return failInline(err, btn, 'That username is already in use. Choose another.');
+        const result = await createStaff({ fullName, username, phoneNumber, stationIds });
+        invalidateUsers();
+        closeModal('generic-modal');
+        showStaffCreated(result);
       } else {
         const email = byId('new-email').value.trim();
         const password = byId('new-password').value;
@@ -906,13 +976,108 @@ async function showUserForm(user) {
         closeModal('generic-modal');
         toast(`Account created for ${email}.`, 'success');
       }
-      rerender();
+      if (role !== 'staff') rerender();
     } catch (e2) {
       console.error('User save error:', e2);
       showFieldError(err, formatFirebaseError(e2));
       setBusy(btn, false);
     }
   });
+}
+
+async function prepareExistingAccounts() {
+  const ok = await confirmDialog({
+    title: 'Prepare existing accounts?',
+    message: 'This generates usernames and one-time joining codes for existing accounts that do not yet have a secure PIN identity. Existing email/password access is not deleted.',
+    confirmLabel: 'Prepare accounts',
+  });
+  if (!ok) return;
+  try {
+    const result = await prepareLegacyUsers();
+    if (!result.migrated?.length) {
+      toast('All visible accounts already have a username and PIN.', 'info');
+      return;
+    }
+    byId('modal-title').textContent = 'Accounts prepared';
+    byId('modal-body').innerHTML = `<div class="staff-created-success"><div class="success-check" aria-hidden="true">✓</div><h3>Share each joining code privately</h3><p class="muted-note">These codes are shown once. Each person creates a new 4-digit PIN when they join.</p><div class="migration-code-list">${result.migrated.map(item => `<div class="migration-code-row"><span><strong>${h(item.fullName)}</strong><small>${h(item.username)}</small></span><output>${h(item.joiningCode)}</output><button type="button" class="icon-btn copy-migration-code" data-code="${h(item.joiningCode)}" aria-label="Copy joining code for ${h(item.fullName)}">⧉</button></div>`).join('')}</div></div>`;
+    openModal('generic-modal');
+    document.querySelectorAll('.copy-migration-code').forEach(button => button.addEventListener('click', async () => {
+      try { await navigator.clipboard.writeText(button.dataset.code); toast('Joining code copied.', 'success', 1800); }
+      catch { toast('Copy failed — write the code down before closing.', 'error'); }
+    }));
+    invalidateUsers();
+    rerender();
+  } catch (error) {
+    toast(formatFirebaseError(error), 'error');
+  }
+}
+
+function showStaffCreated(result) {
+  const reset = result.isReset === true;
+  byId('modal-title').textContent = reset ? 'PIN reset code generated' : 'Staff created successfully';
+  byId('modal-body').innerHTML = `<div class="staff-created-success">
+    <div class="success-check" aria-hidden="true">✓</div><h3>Share this joining code with ${h(result.fullName || 'the staff member')}</h3>
+    <p class="muted-note">The code is shown once. ${reset ? 'Their previous PIN no longer works.' : 'They will create their own 4-digit PIN when they join.'}</p>
+    <dl class="staff-created-details"><dt>Name</dt><dd>${h(result.fullName)}</dd><dt>Username</dt><dd>${h(result.username)}</dd><dt>Joining code</dt><dd><output id="created-joining-code">${h(result.joiningCode)}</output></dd></dl>
+    <div class="confirm-actions"><button type="button" id="copy-joining-code" class="btn btn-secondary btn-full">Copy code</button><button type="button" id="create-another-staff" class="btn btn-primary btn-full">Create another</button></div>
+  </div>`;
+  openModal('generic-modal');
+  byId('copy-joining-code')?.addEventListener('click', async event => {
+    try {
+      await navigator.clipboard.writeText(result.joiningCode);
+      setBusy(event.currentTarget, true, 'Copied');
+      setTimeout(() => setBusy(event.currentTarget, false), 1200);
+    } catch { toast('Copy failed — write the code down before closing.', 'error'); }
+  });
+  byId('create-another-staff')?.addEventListener('click', async () => {
+    closeModal('generic-modal');
+    await showUserForm(null);
+  });
+}
+
+async function resetStaffPinForUser(user) {
+  if (!user || !can('user.update', { target: user })) {
+    toast(denyReason('user.update', { target: user }), 'error');
+    return;
+  }
+  const ok = await confirmDialog({
+    title: 'Reset PIN?',
+    message: `Reset ${user.fullName || user.email || user.username || 'this staff member'}’s PIN? A new temporary joining code will be generated and their current PIN will stop working.`,
+    confirmLabel: 'Reset PIN',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    const result = await resetStaffPin(user.id);
+    showStaffCreated({ ...result, isReset: true, fullName: result.fullName || user.fullName || user.email });
+    invalidateUsers();
+  } catch (error) {
+    console.error('PIN reset error:', error);
+    toast(formatFirebaseError(error), 'error');
+  }
+}
+
+async function disableStaffUser(user) {
+  if (!user || !can('user.delete', { target: user })) {
+    toast(denyReason('user.delete', { target: user }), 'error');
+    return;
+  }
+  const ok = await confirmDialog({
+    title: 'Disable staff account?',
+    message: `${user.fullName || user.username || 'This staff member'} will be unable to sign in. Existing history and pump assignments will remain for audit purposes.`,
+    confirmLabel: 'Disable account',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await disableStaff(user.id);
+    invalidateUsers();
+    toast('Staff account disabled.', 'success');
+    rerender();
+  } catch (error) {
+    console.error('Disable staff error:', error);
+    toast(formatFirebaseError(error), 'error');
+  }
 }
 
 async function removeUser(user) {

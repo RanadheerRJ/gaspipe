@@ -1233,3 +1233,38 @@ fieldset.is-disabled { opacity: .55; pointer-events: none; }
 .profile-settings-list dd { margin: 0; color: var(--text); font-size: 13px; overflow-wrap: anywhere; }
 .role-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: var(--radius-pill); background: var(--primary-light); color: var(--primary); font-weight: 700; }
 .profile-readonly-note { color: var(--text-secondary); font-size: 12px; line-height: 1.45; }
+
+/* ===== Trusted username/PIN authentication ===== */
+.auth-subtitle { margin: -10px 0 18px; color: var(--text-secondary); font-size: 14px; }
+.auth-links { display: flex; flex-wrap: wrap; align-items: center; justify-content: center; gap: 5px 9px; margin-top: 16px; color: var(--text-secondary); font-size: 13px; }
+.auth-links .auth-legacy-link { width: 100%; margin-top: 8px; color: var(--text-muted); font-size: 12px; }
+.auth-link-separator { color: var(--border-strong); }
+.auth-step-note { margin: -3px 0 16px; color: var(--text-secondary); font-size: 14px; }
+.remember-row { display: flex; align-items: center; gap: 8px; min-height: 44px; margin: -5px 0 13px; color: var(--text-secondary); font-size: 13px; cursor: pointer; }
+.remember-row input { width: 18px; height: 18px; accent-color: var(--primary); }
+.join-welcome { display: flex; flex-direction: column; align-items: center; gap: 1px; margin: -2px 0 18px; padding: 14px; border-radius: var(--radius-sm); background: var(--green-bg); color: var(--green); text-align: center; }
+.join-welcome-icon { display: grid; place-items: center; width: 32px; height: 32px; margin-bottom: 3px; border-radius: 50%; background: var(--green); color: #fff; font-weight: 800; }
+.join-welcome p { font-size: 16px; }
+.join-welcome small { font-size: 12px; }
+.auth-info-card { display: flex; gap: 10px; align-items: flex-start; margin-bottom: 16px; padding: 12px; border: 1px solid var(--blue); border-radius: var(--radius-sm); background: var(--blue-bg); color: var(--text-secondary); font-size: 13px; line-height: 1.45; }
+.auth-info-card > span { font-size: 18px; }
+
+/* Staff identity management */
+.validation-success { color: var(--green) !important; }
+.validation-error { color: var(--red) !important; }
+.profile-account-actions { display: grid; grid-template-columns: 1fr 1fr; gap: 8px; }
+.staff-created-success { text-align: center; }
+.staff-created-success h3 { margin: 8px 0 4px; font-size: 18px; }
+.success-check { display: grid; place-items: center; width: 48px; height: 48px; margin: 0 auto; border-radius: 50%; background: var(--green-bg); color: var(--green); font-size: 26px; font-weight: 800; animation: successPop .28s ease-out; }
+@keyframes successPop { from { transform: scale(.65); opacity: .5; } to { transform: scale(1); opacity: 1; } }
+.staff-created-details { display: grid; grid-template-columns: 1fr 1fr; gap: 7px 12px; margin: 18px 0; padding: 14px; border-radius: var(--radius-sm); background: var(--surface-2); text-align: left; }
+.staff-created-details dt { color: var(--text-muted); font-size: 12px; font-weight: 700; }
+.staff-created-details dd { margin: 0; color: var(--text); font-size: 14px; overflow-wrap: anywhere; }
+.staff-created-details dd:last-child { color: var(--primary); font-family: var(--mono); font-size: 20px; font-weight: 800; letter-spacing: 2px; }
+.migration-code-list { display: grid; gap: 7px; max-height: 300px; overflow: auto; margin-top: 14px; text-align: left; }
+.migration-code-row { display: flex; align-items: center; gap: 9px; padding: 9px 10px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.migration-code-row > span { display: flex; flex: 1; flex-direction: column; min-width: 0; }
+.migration-code-row strong, .migration-code-row small { overflow: hidden; text-overflow: ellipsis; white-space: nowrap; }
+.migration-code-row small { color: var(--text-secondary); }
+.migration-code-row output { color: var(--primary); font-family: var(--mono); font-weight: 800; letter-spacing: 1.5px; }
+@media (max-width: 420px) { .profile-account-actions { grid-template-columns: 1fr; } }

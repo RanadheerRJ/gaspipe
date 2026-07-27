@@ -52,6 +52,43 @@ const FIREBASE_CONFIG = {
 };
 ```
 
+### Trusted username/PIN backend
+
+Username + PIN authentication is implemented through the separate `functions/`
+Firebase Cloud Functions service. The GitHub Pages app remains plain static HTML,
+CSS, and ES modules; Functions are the trusted server boundary for operations a
+browser cannot safely perform.
+
+The Functions service provides:
+
+- server-side scrypt hashing with per-PIN random salts; hashes and salts live
+  only in the client-inaccessible `staffSecrets/{uid}` collection
+- unique lowercase usernames in `usernames/{username}` and one-time 5-digit
+  joining codes in `joiningCodes/{code}`
+- staff creation, code preview/activation, username/PIN sign-in, PIN change,
+  admin reset, legacy-account preparation, and login/logout audit events
+- transactional failed-attempt counters and a 15-minute lock after five bad
+  PIN attempts
+- Firebase custom-token sessions, preserving the existing UID-based Firestore
+  RBAC model
+
+Install and deploy the trusted service separately (from a machine with Firebase
+CLI access):
+
+```bash
+cd functions
+npm install
+cd ..
+firebase deploy --only functions
+```
+
+`firebase.json` points Functions at `functions/` and does not add a frontend
+build step. Deploying the static GitHub Pages app alone does not deploy these
+Functions. Deploy Functions before enabling username/PIN sign-in in production.
+Run **Config → Security → Prepare existing accounts for username + PIN** once
+as an admin, share each one-time code privately, and do not put codes in chat,
+logs, screenshots, or source control.
+
 ### Firestore Security Rules
 
 Copy `firestore.rules` into Firebase Console → Firestore Database → Rules → **Publish**.
@@ -188,14 +225,45 @@ Accessibility:
 
 ```
 users/{uid}
-  ├── email: string
+  ├── email: string              // legacy accounts only; optional for username/PIN users
+  ├── fullName: string           // canonical display name for new identities
+  ├── username: string           // lowercase unique login name
+  ├── phoneNumber: string        // optional
   ├── role: "superadmin" | "stationadmin" | "staff"
   ├── stationIds: string[]      // empty for Super Admin (implicit access to all)
   ├── pumpIds: string[]         // staff only — empty means "all pumps at assigned stations"
+  ├── status: "invited" | "active" | "disabled"
+  ├── pin_reset_required: boolean
+  ├── isAdmin: boolean
   ├── createdBy: string (uid | "system")
+  ├── createdByAdmin: string (uid)
+  ├── lastLogin: timestamp
   ├── createdAt: timestamp
   ├── updatedAt: timestamp      // set when an admin edits the profile
   └── updatedBy: string (uid)
+
+usernames/{lowercaseUsername}
+  └── uid: string                // reservation; client access denied
+
+joiningCodes/{fiveDigitCode}
+  ├── uid: string
+  ├── purpose: "activation" | "pin-reset" | "legacy-migration"
+  └── expiresAt: timestamp       // client access denied
+
+staffSecrets/{uid}
+  ├── pinHash: string            // scrypt output; client access denied
+  ├── pinSalt: string            // client access denied
+  ├── joiningCode: string        // client access denied
+  ├── joiningCodeExpiresAt: timestamp
+  ├── failedAttempts: number
+  └── lockedUntil: timestamp | null
+
+auditLogs/{id}
+  ├── actorUid: string | null
+  ├── targetUid: string | null
+  ├── action: string
+  ├── metadata: map
+  └── createdAt: timestamp
 
 stations/{id}
   ├── name: string
@@ -238,8 +306,9 @@ stations/{id}/shifts/{id}
   ├── clockInAt: timestamp       // missing on pre-migration records
   ├── clockOutAt: timestamp      // missing on pre-migration records
   ├── hoursWorked: number        // missing on pre-migration records
-  ├── staffUid: string (uid)     // same person as createdBy
-  ├── staffName: string          // display name/email at clock-out
+  ├── staffId: string (uid)      // canonical identity for new records
+  ├── staffUid: string (uid)     // backwards-compatible alias
+  ├── staffName: string          // legacy denormalized fallback; reads prefer users.fullName
   ├── createdBy: string (uid)
   └── createdAt: timestamp
 ```

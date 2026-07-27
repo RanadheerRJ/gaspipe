@@ -5,7 +5,7 @@
  * an employee at a station they manage.
  */
 
-import { getAllStations, getStationsByIds, getStation, getShifts } from './store.js';
+import { getAllStations, getStationsByIds, getStation, getShifts, getAllUsers, getUsersCreatedBy } from './store.js';
 import {
   getCurrentUserData, isSuperAdmin, isStationAdmin, isStaff, can, formatFirebaseError,
 } from './auth.js';
@@ -42,19 +42,21 @@ function stationDateRange() {
 }
 
 function employeeId(shift) {
-  return shift.staffUid || shift.createdBy || '';
+  return shift.staffId || shift.staffUid || shift.createdBy || '';
 }
 
-function employeeName(shift) {
-  return shift.staffName || shift.staffEmail || shift.createdBy || 'Unknown staff member';
+function employeeName(shift, people = new Map()) {
+  const person = people.get(employeeId(shift));
+  return person?.fullName || person?.displayName || person?.email || person?.username
+    || shift.staffName || shift.staffEmail || shift.createdBy || 'Unknown staff member';
 }
 
-function employeesFrom(shifts) {
+function employeesFrom(shifts, people = new Map()) {
   const map = new Map();
   shifts.forEach(shift => {
     const uid = employeeId(shift);
     if (!uid) return;
-    if (!map.has(uid)) map.set(uid, { uid, name: employeeName(shift) });
+    if (!map.has(uid)) map.set(uid, { uid, name: employeeName(shift, people) });
   });
   return [...map.values()].sort((a, b) => a.name.localeCompare(b.name));
 }
@@ -89,7 +91,7 @@ function reportSummary(rows) {
 function reportEmployeeLabel(rows) {
   if (reportState.employee === 'all') return isStaff() ? (getCurrentUserData()?.email || 'My report') : 'All employees';
   const found = reportState.employees.find(e => e.uid === reportState.employee);
-  return found?.name || rows[0] && employeeName(rows[0]) || getCurrentUserData()?.email || 'Employee report';
+  return found?.name || rows[0] && employeeName(rows[0], reportState.people) || getCurrentUserData()?.fullName || getCurrentUserData()?.email || 'Employee report';
 }
 
 function employeeOptions() {
@@ -156,9 +158,14 @@ function paintReport() {
 
 async function loadReportData() {
   const dateRange = stationDateRange();
-  reportState.shifts = await getShifts(reportState.stationId, { from: dateRange.from, max: 5000 });
+  const [shifts, peopleRows] = await Promise.all([
+    getShifts(reportState.stationId, { from: dateRange.from, max: 5000 }),
+    isSuperAdmin() ? getAllUsers() : isStationAdmin() ? getUsersCreatedBy(getCurrentUserData()?.uid) : Promise.resolve([getCurrentUserData()]),
+  ]);
+  reportState.shifts = shifts;
+  reportState.people = new Map((peopleRows || []).filter(Boolean).map(person => [person.uid || person.id, person]));
   const scoped = reportState.shifts.filter(s => (!dateRange.to || (s.date || '') <= dateRange.to));
-  reportState.employees = employeesFrom(scoped);
+  reportState.employees = employeesFrom(scoped, reportState.people);
   const me = getCurrentUserData();
   if (isStaff()) reportState.employee = me?.uid || '';
   else if (reportState.employee !== 'all' && !reportState.employees.some(e => e.uid === reportState.employee)) reportState.employee = 'all';
@@ -214,6 +221,7 @@ export async function renderReports(stationId) {
       stations,
       station: null,
       shifts: [],
+      people: new Map(),
       employees: [],
       employee: isStaff() ? getCurrentUserData()?.uid || '' : 'all',
       range: 'today', from: '', to: '',

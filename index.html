@@ -47,28 +47,13 @@
       </div>
       <div class="auth-card">
         <h2 id="auth-title">Sign in</h2>
+        <p id="auth-subtitle" class="auth-subtitle">Use your PumpLog username and PIN.</p>
         <p id="auth-error" class="auth-msg hidden" role="alert" aria-live="assertive"></p>
         <form id="auth-form" novalidate>
-          <div class="field">
-            <label for="auth-email">Email</label>
-            <input type="email" id="auth-email" name="email" placeholder="you@example.com"
-                   required autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" />
-          </div>
-          <div class="field">
-            <label for="auth-password">Password</label>
-            <div class="input-affix">
-              <input type="password" id="auth-password" name="password" placeholder="At least 6 characters"
-                     minlength="6" required autocomplete="current-password" />
-              <button type="button" id="auth-password-toggle" class="affix-btn"
-                      aria-label="Show password" aria-pressed="false">Show</button>
-            </div>
-          </div>
+          <div id="auth-fields"></div>
           <button type="submit" id="auth-submit" class="btn btn-primary btn-full">Sign in</button>
         </form>
-        <p class="auth-toggle">
-          <span id="auth-toggle-text">Don't have an account? </span>
-          <button type="button" id="auth-toggle-link" class="link-btn">Sign up</button>
-        </p>
+        <div id="auth-links" class="auth-links" aria-live="polite"></div>
       </div>
     </main>
   </div>
@@ -185,12 +170,14 @@
       </div>
       <div class="modal-body">
         <dl class="profile-list">
+          <dt>Name</dt><dd id="profile-name">—</dd>
+          <dt>Username</dt><dd id="profile-username">—</dd>
           <dt>Email</dt><dd id="profile-email">—</dd>
           <dt>Role</dt><dd id="profile-role">—</dd>
           <dt>Stations</dt><dd id="profile-stations">—</dd>
           <dt id="profile-pumps-label">Pumps</dt><dd id="profile-pumps">—</dd>
         </dl>
-        <button id="btn-signout" class="btn btn-secondary btn-full">Sign out</button>
+        <div class="profile-account-actions"><button id="profile-change-pin" class="btn btn-secondary btn-full">Change PIN</button><button id="btn-signout" class="btn btn-secondary btn-full">Sign out</button></div>
       </div>
     </div>
   </div>

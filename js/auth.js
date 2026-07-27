@@ -143,6 +143,13 @@ export function formatFirebaseError(err) {
     'failed-precondition': 'Firestore needs an index for this query. Open the browser console and follow the “create index” link.',
     'not-found': 'That record no longer exists — it may have been deleted already.',
     'already-exists': 'That record already exists.',
+    'functions/unauthenticated': 'Username or PIN is incorrect.',
+    'functions/permission-denied': 'You do not have permission to do that.',
+    'functions/invalid-argument': 'Check the highlighted details and try again.',
+    'functions/resource-exhausted': 'Too many attempts. Try again later.',
+    'functions/deadline-exceeded': 'That joining code has expired. Ask an admin for a new one.',
+    'functions/failed-precondition': 'Complete the required account setup before continuing.',
+    'functions/not-found': 'That joining code is invalid or has expired.',
   };
 
   if (map[code]) return map[code];

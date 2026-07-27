@@ -9,11 +9,14 @@ import {
   getAuth,
   setPersistence,
   browserLocalPersistence,
+  browserSessionPersistence,
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  signInWithCustomToken,
   createUserWithEmailAndPassword,
   signOut,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
+import { getFunctions, httpsCallable } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-functions.js';
 import {
   getFirestore,
   initializeFirestore,
@@ -56,12 +59,16 @@ const FIREBASE_CONFIG = {
 let mainApp = null;
 let mainAuth = null;
 let mainDb = null;
+let mainFunctions = null;
 
 function initMainApp(config = FIREBASE_CONFIG) {
   if (mainApp) return { app: mainApp, auth: mainAuth, db: mainDb };
 
   mainApp = getApps().length ? getApps()[0] : initializeApp(config);
   mainAuth = getAuth(mainApp);
+  // Callable identity helpers run in the trusted us-central1 Functions backend;
+  // Firestore and the static Pages app never handle PIN hashes.
+  mainFunctions = getFunctions(mainApp, 'us-central1');
 
   // Explicit local persistence keeps staff signed in across app restarts and tab closes.
   setPersistence(mainAuth, browserLocalPersistence).catch(() => {});
@@ -87,6 +94,14 @@ function getAuthInstance() {
   return mainAuth || initMainApp().auth;
 }
 
+function setAuthPersistence(remember = true) {
+  return setPersistence(getAuthInstance(), remember ? browserLocalPersistence : browserSessionPersistence);
+}
+
+function getFunctionsInstance() {
+  return mainFunctions || (initMainApp(), mainFunctions);
+}
+
 // ── Secondary app: create users without signing the admin out ───────────
 let adminApp = null;
 
@@ -110,10 +125,14 @@ export {
   initMainApp,
   getDb,
   getAuthInstance,
+  setAuthPersistence,
+  getFunctionsInstance,
+  httpsCallable,
   getAdminApp,
   destroyAdminApp,
   onAuthStateChanged,
   signInWithEmailAndPassword,
+  signInWithCustomToken,
   createUserWithEmailAndPassword,
   signOut,
   collection,

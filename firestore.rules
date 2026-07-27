@@ -112,15 +112,28 @@ service cloud.firestore {
     }
 
     function userFieldsOk() {
-      return request.resource.data.keys().hasAll(['email', 'role', 'stationIds'])
+      return request.resource.data.keys().hasAll(['role', 'stationIds'])
+        && (request.resource.data.keys().hasAny(['email'])
+            || request.resource.data.keys().hasAny(['username']))
         && request.resource.data.keys().hasOnly([
-             'email', 'role', 'stationIds', 'pumpIds', 'createdBy', 'createdAt', 'updatedAt', 'updatedBy'
+             'email', 'fullName', 'username', 'phoneNumber', 'role', 'stationIds', 'pumpIds',
+             'status', 'createdBy', 'createdByAdmin', 'createdAt', 'updatedAt', 'updatedBy',
+             'lastLogin', 'pin_reset_required', 'isAdmin'
            ])
         && request.resource.data.stationIds is list
         && request.resource.data.stationIds.size() <= 50
         && (!request.resource.data.keys().hasAny(['pumpIds'])
             || (request.resource.data.pumpIds is list
                 && request.resource.data.pumpIds.size() <= 200))
+        && (!request.resource.data.keys().hasAny(['fullName']) || request.resource.data.fullName is string)
+        && (!request.resource.data.keys().hasAny(['username']) || request.resource.data.username is string)
+        && (!request.resource.data.keys().hasAny(['phoneNumber']) || request.resource.data.phoneNumber is string)
+        && (!request.resource.data.keys().hasAny(['status'])
+            || request.resource.data.status in ['invited', 'active', 'disabled'])
+        && (!request.resource.data.keys().hasAny(['pin_reset_required'])
+            || request.resource.data.pin_reset_required is bool)
+        && (!request.resource.data.keys().hasAny(['isAdmin'])
+            || request.resource.data.isAdmin is bool)
         && isValidRole(request.resource.data.role);
     }
 
@@ -165,7 +178,8 @@ service cloud.firestore {
         && resource.data.role == 'staff'
         && resource.data.createdBy == request.auth.uid
         && request.resource.data.role == 'staff'
-        && request.resource.data.email == resource.data.email
+        && ((!resource.data.keys().hasAny(['email']) && !request.resource.data.keys().hasAny(['email']))
+            || request.resource.data.email == resource.data.email)
         && request.resource.data.createdBy == resource.data.createdBy
         && request.resource.data.stationIds.hasOnly(myStations())
         && userFieldsOk();
@@ -229,6 +243,27 @@ service cloud.firestore {
              (isSuperAdmin() && resource.data.role != 'superadmin')
           || stationAdminDeletingOwnStaff()
         );
+    }
+
+    // ── Trusted identity records ───────────────────────────────────
+    // Only Cloud Functions/Admin SDK may access these collections. Keeping
+    // them client-inaccessible prevents PIN hashes and joining codes from
+    // becoming an offline attack surface.
+    match /staffSecrets/{uid} {
+      allow read, write: if false;
+    }
+
+    match /usernames/{username} {
+      allow read, write: if false;
+    }
+
+    match /joiningCodes/{code} {
+      allow read, write: if false;
+    }
+
+    match /auditLogs/{auditId} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
     }
 
     // ── Stations ────────────────────────────────────────────────────
@@ -313,8 +348,9 @@ service cloud.firestore {
           && canUsePump(stationId, request.resource.data.pumpId)
           && request.resource.data.createdBy == request.auth.uid
           && request.resource.data.keys().hasAll([
-               'staffUid', 'staffName', 'clockInAt', 'clockOutAt', 'hoursWorked'
+               'staffId', 'staffUid', 'staffName', 'clockInAt', 'clockOutAt', 'hoursWorked'
              ])
+          && request.resource.data.staffId == request.auth.uid
           && request.resource.data.staffUid == request.auth.uid
           && request.resource.data.staffName is string
           && request.resource.data.clockInAt is timestamp

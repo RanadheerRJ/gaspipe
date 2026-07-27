@@ -17,6 +17,8 @@ import { initPumps, renderPumps, stopPumpsLive } from './pumps.js';
 import { initConfig, renderConfig } from './config-page.js';
 import { initHistory, renderHistory } from './history.js';
 import { initReports, renderReports } from './reports.js';
+import { signInWithUsernamePin, previewJoiningCode, activateStaff, recordLogout } from './staff-auth.js';
+import { openChangePinForm } from './profile.js';
 
 const $ = id => document.getElementById(id);
 const STORE_KEY = 'pumplog:lastStation';
@@ -220,7 +222,13 @@ function clearAuthMessage() {
   el.className = 'auth-msg hidden';
 }
 
-const authSubmitLabel = () => (authMode === 'signup' ? 'Create account' : 'Sign in');
+const authSubmitLabel = () => ({
+  signin: 'Sign in',
+  join: 'Continue',
+  joinPin: 'Activate account',
+  legacy: 'Sign in with email',
+  forgot: 'Back to sign in',
+}[authMode] || 'Continue');
 
 function resetAuthSubmit() {
   authSubmitting = false;
@@ -238,64 +246,126 @@ function setAuthSubmitting(busy) {
   btn.disabled = busy;
   if (busy) {
     btn.setAttribute('aria-busy', 'true');
-    btn.textContent = authMode === 'signup' ? 'Creating account…' : 'Signing in…';
+    btn.textContent = authMode === 'signin' ? 'Signing in…'
+      : authMode === 'joinPin' ? 'Activating…'
+        : authMode === 'legacy' ? 'Signing in…' : 'Checking…';
   } else {
     btn.removeAttribute('aria-busy');
     btn.textContent = authSubmitLabel();
   }
 }
 
+function validPin(pin) {
+  if (!/^\d{4}$/.test(pin)) return false;
+  if (/^(\d)\1{3}$/.test(pin)) return false;
+  return !'0123456789'.includes(pin) && !'9876543210'.includes(pin);
+}
+
+function wireAuthFields() {
+  document.querySelectorAll('#auth-fields input').forEach(input =>
+    input.addEventListener('input', () => { if (!authSubmitting) clearAuthMessage(); }));
+  document.querySelectorAll('[data-password-toggle]').forEach(toggle => {
+    toggle.addEventListener('click', () => {
+      const field = document.getElementById(toggle.dataset.passwordToggle);
+      if (!field) return;
+      const show = field.type === 'password';
+      field.type = show ? 'text' : 'password';
+      toggle.textContent = show ? 'Hide' : 'Show';
+      toggle.setAttribute('aria-pressed', String(show));
+      toggle.setAttribute('aria-label', show ? 'Hide PIN' : 'Show PIN');
+    });
+  });
+}
+
+function renderAuthFields() {
+  const fields = $('auth-fields');
+  const links = $('auth-links');
+  if (!fields || !links) return;
+  if (authMode === 'signin') {
+    fields.innerHTML = `
+      <div class="field"><label for="auth-username">Username</label>
+        <input type="text" id="auth-username" autocomplete="username" autocapitalize="off" spellcheck="false" minlength="4" maxlength="25" required /></div>
+      <div class="field"><label for="auth-pin">PIN</label><div class="input-affix">
+        <input type="password" id="auth-pin" inputmode="numeric" autocomplete="current-password" pattern="[0-9]{4}" maxlength="4" required />
+        <button type="button" class="affix-btn" data-password-toggle="auth-pin" aria-label="Show PIN" aria-pressed="false">Show</button></div></div>
+      <label class="remember-row"><input type="checkbox" id="auth-remember" checked /> <span>Remember me on this device</span></label>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="forgot">Forgot PIN?</button>
+      <span class="auth-link-separator">·</span><button type="button" class="link-btn" data-auth-mode="join">Join with code</button>
+      <button type="button" class="link-btn auth-legacy-link" data-auth-mode="legacy">Existing account sign in</button>`;
+  } else if (authMode === 'join') {
+    fields.innerHTML = `<p class="auth-step-note">Enter the 5-digit code your admin shared with you.</p>
+      <div class="field"><label for="auth-joining-code">Joining code</label>
+        <input type="text" id="auth-joining-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{5}" maxlength="5" placeholder="00000" required /></div>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
+  } else if (authMode === 'joinPin') {
+    fields.innerHTML = `<div class="join-welcome"><span class="join-welcome-icon" aria-hidden="true">✓</span><p>Welcome, <strong>${h(pendingJoin?.fullName || 'there')}</strong></p><small>Username: ${h(pendingJoin?.username || '')}</small></div>
+      <p class="auth-step-note">Create a private 4-digit PIN. Avoid repeated or sequential numbers.</p>
+      <div class="field"><label for="auth-new-pin">Create PIN</label><div class="input-affix"><input type="password" id="auth-new-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /><button type="button" class="affix-btn" data-password-toggle="auth-new-pin" aria-label="Show PIN" aria-pressed="false">Show</button></div></div>
+      <div class="field"><label for="auth-confirm-pin">Confirm PIN</label><input type="password" id="auth-confirm-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /></div>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="join">Use a different code</button>`;
+  } else if (authMode === 'legacy') {
+    fields.innerHTML = `<p class="auth-step-note">Use this temporary path while an existing account is migrated to username and PIN.</p>
+      <div class="field"><label for="auth-email">Email</label><input type="email" id="auth-email" autocomplete="email" required /></div>
+      <div class="field"><label for="auth-password">Password</label><div class="input-affix"><input type="password" id="auth-password" autocomplete="current-password" required /><button type="button" class="affix-btn" data-password-toggle="auth-password" aria-label="Show password" aria-pressed="false">Show</button></div></div>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to username sign in</button>`;
+  } else {
+    fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🔐</span><p>For security, PIN resets are issued by a Station Admin or Super Admin. Ask your admin for a new joining code.</p></div>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
+  }
+  wireAuthFields();
+  document.querySelectorAll('[data-auth-mode]').forEach(button => button.addEventListener('click', () => setAuthMode(button.dataset.authMode)));
+  resetAuthSubmit();
+}
+
+let pendingJoin = null;
 function setAuthMode(mode) {
   authMode = mode;
-  const signup = mode === 'signup';
-  $('auth-title').textContent = signup ? 'Create account' : 'Sign in';
-  $('auth-submit').textContent = authSubmitLabel();
-  $('auth-password').autocomplete = signup ? 'new-password' : 'current-password';
-  $('auth-toggle-text').textContent = signup ? 'Already have an account? ' : "Don't have an account? ";
-  $('auth-toggle-link').textContent = signup ? 'Sign in' : 'Sign up';
+  if (mode !== 'joinPin') pendingJoin = null;
+  const titles = { signin: 'Sign in', join: 'Join organization', joinPin: 'Set your PIN', legacy: 'Existing account', forgot: 'Forgot PIN' };
+  const subtitles = { signin: 'Use your PumpLog username and PIN.', join: 'Activate your staff account securely.', joinPin: 'Your PIN stays private and is never stored in the browser.', legacy: 'Complete migration from the previous login.', forgot: 'Recover access without exposing your PIN.' };
+  $('auth-title').textContent = titles[mode] || 'Sign in';
+  $('auth-subtitle').textContent = subtitles[mode] || '';
+  renderAuthFields();
 }
 
 function setupAuthForm() {
   setAuthMode('signin');
-
-  $('auth-toggle-link').addEventListener('click', () => {
-    if (authSubmitting) return;
-    clearAuthMessage();
-    setAuthMode(authMode === 'signup' ? 'signin' : 'signup');
-  });
-
-  const pwToggle = $('auth-password-toggle');
-  pwToggle.addEventListener('click', () => {
-    const field = $('auth-password');
-    const show = field.type === 'password';
-    field.type = show ? 'text' : 'password';
-    pwToggle.textContent = show ? 'Hide' : 'Show';
-    pwToggle.setAttribute('aria-pressed', String(show));
-    pwToggle.setAttribute('aria-label', show ? 'Hide password' : 'Show password');
-  });
-
-  ['auth-email', 'auth-password'].forEach(id =>
-    $(id).addEventListener('input', () => { if (!authSubmitting) clearAuthMessage(); }));
-
-  $('auth-form').addEventListener('submit', async (e) => {
+  $('auth-form').addEventListener('submit', async e => {
     e.preventDefault();
     if (authSubmitting) return;
-
-    const email = $('auth-email').value.trim();
-    const password = $('auth-password').value;
-
-    if (!email || !password) return showAuthMessage('Enter both email and password.', 'error');
-    if (authMode === 'signup' && password.length < 6) {
-      return showAuthMessage('Password must be at least 6 characters.', 'error');
-    }
-
-    setAuthSubmitting(true);
-    showAuthMessage(authMode === 'signup' ? 'Creating your account…' : 'Signing you in…', 'info');
-
+    const fail = message => showAuthMessage(message, 'error');
     try {
-      if (authMode === 'signup') await signUp(email, password);
-      else await signIn(email, password);
-      // onAuthChange takes over from here and swaps to the app shell.
+      setAuthSubmitting(true);
+      if (authMode === 'signin') {
+        const username = $('auth-username').value.trim().toLowerCase();
+        const pin = $('auth-pin').value;
+        if (!username || !validPin(pin)) { resetAuthSubmit(); return fail('Enter your username and a valid 4-digit PIN.'); }
+        showAuthMessage('Signing you in…', 'info');
+        await signInWithUsernamePin({ username, pin, remember: $('auth-remember')?.checked !== false });
+      } else if (authMode === 'join') {
+        const code = $('auth-joining-code').value.trim();
+        if (!/^\d{5}$/.test(code)) { resetAuthSubmit(); return fail('Enter the 5-digit joining code.'); }
+        showAuthMessage('Checking your joining code…', 'info');
+        pendingJoin = { ...(await previewJoiningCode(code)), joiningCode: code };
+        setAuthMode('joinPin');
+        showAuthMessage('Create your PIN to activate your account.', 'info');
+      } else if (authMode === 'joinPin') {
+        const pin = $('auth-new-pin').value;
+        const confirmation = $('auth-confirm-pin').value;
+        if (!validPin(pin)) { resetAuthSubmit(); return fail('PIN must be exactly 4 digits and not repeated or sequential.'); }
+        if (pin !== confirmation) { resetAuthSubmit(); return fail('PINs do not match.'); }
+        showAuthMessage('Activating your account…', 'info');
+        await activateStaff({ joiningCode: $('auth-joining-code')?.value || pendingJoin?.joiningCode || pendingJoin?.code, pin });
+      } else if (authMode === 'legacy') {
+        const email = $('auth-email').value.trim();
+        const password = $('auth-password').value;
+        if (!email || !password) { resetAuthSubmit(); return fail('Enter both email and password.'); }
+        showAuthMessage('Signing you in…', 'info');
+        await signIn(email, password);
+      } else if (authMode === 'forgot') {
+        setAuthMode('signin');
+        showAuthMessage('Ask your station admin for a new joining code to reset your PIN.', 'info');
+      }
     } catch (err) {
       console.error('Auth error:', err);
       showAuthMessage(formatFirebaseError(err), 'error');
@@ -342,6 +412,8 @@ function setupUI() {
   $('btn-profile').addEventListener('click', () => {
     const userData = getCurrentUserData();
     if (!userData) return;
+    $('profile-name').textContent = userData.fullName || userData.displayName || '—';
+    $('profile-username').textContent = userData.username || '—';
     $('profile-email').textContent = userData.email || '—';
     $('profile-role').textContent = ROLES[userData.role] || userData.role || '—';
     $('profile-stations').textContent = isSuperAdmin()
@@ -357,10 +429,16 @@ function setupUI() {
     openModal('profile-modal');
   });
 
+  $('profile-change-pin').addEventListener('click', () => {
+    closeModal('profile-modal');
+    openChangePinForm();
+  });
+
   $('btn-signout').addEventListener('click', async (e) => {
     setBusy(e.currentTarget, true, 'Signing out…');
     try {
       closeModal('profile-modal');
+      await recordLogout().catch(() => {});
       await doSignOut();
     } finally {
       setBusy(e.currentTarget, false);

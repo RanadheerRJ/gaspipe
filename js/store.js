@@ -234,8 +234,12 @@ export function watchShifts(stationId, { onUpdate, onError, max = 200 } = {}) {
 // ── Users ───────────────────────────────────────────────────────────────
 export function getAllUsers() {
   return cached('users:all', async () => {
-    const snap = await getDocs(query(collection(getDb(), 'users'), orderBy('email')));
-    return snapToArray(snap);
+    // Username/PIN staff profiles intentionally have no email field. Sort
+    // client-side so legacy email users and new identities both appear.
+    const snap = await getDocs(collection(getDb(), 'users'));
+    return snapToArray(snap).sort((a, b) =>
+      (a.fullName || a.email || a.username || '').localeCompare(b.fullName || b.email || b.username || '')
+    );
   });
 }
 
