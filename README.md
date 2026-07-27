@@ -105,6 +105,9 @@ all stations.
 - Privacy default: Station Admins and Super Admins see the active staff member's
   name in a lock; Staff see only **“In use — try again shortly”** for a colleague's
   active pump. This is a deliberate UI choice, not a security boundary.
+- A manager may remove a pump assignment without ending an in-progress session.
+  The active owner keeps that pump visible long enough to clock out; after it is
+  idle, the pump remains unavailable until the manager assigns it again.
 - Leaving every pump unticked in the editor means **“all pumps at the assigned
   stations”** — this keeps older staff accounts (created before pump
   assignments existed) working unchanged until you restrict them.

@@ -254,7 +254,10 @@ export function can(action, ctx = {}) {
     case 'pumpSession.start':
       return stationOk && (superAdmin || stationAdmin || canUsePump(ctx.pumpId));
     case 'pumpSession.end':
-      return stationOk && (superAdmin || stationAdmin || canUsePump(ctx.pumpId));
+      // An active owner may finish a session even if an admin removed the
+      // assignment while it was in progress. Firestore still verifies the
+      // activeUid on the atomic clock-out transaction.
+      return stationOk && (superAdmin || stationAdmin || canUsePump(ctx.pumpId) || ctx.activeUid === me.uid);
     case 'pumpSession.forceRelease':
       return (superAdmin || stationAdmin) && stationOk;
 

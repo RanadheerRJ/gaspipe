@@ -245,7 +245,13 @@ export async function renderDashboard(stationId, range = 'today') {
       getPumps(stationId), getPumpSessions(stationId),
     ]);
     if (!station) { content.innerHTML = emptyState('⚠️', 'Station not found. It may have been deleted.'); return; }
-    const pumps = filterMyPumps(allPumps);
+    const assignedPumps = filterMyPumps(allPumps);
+    const activeMineIds = new Set(sessions
+      .filter(session => session.status === 'active' && session.activeUid === getCurrentUserData()?.uid)
+      .map(session => session.id));
+    // An owner keeps seeing an active pump long enough to close it if a
+    // manager removes its assignment during the shift.
+    const pumps = allPumps.filter(pump => assignedPumps.includes(pump) || activeMineIds.has(pump.id));
     const ownOnly = !can('shift.update', { stationId });
     const volume = shifts.reduce((sum, s) => sum + (Number(s.volume) || 0), 0);
     const sales = shifts.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
@@ -339,7 +345,9 @@ function paintFeed(meta = {}) {
 function openPumpDetail(pumpId) {
   if (!feedCtx) return; const { stationId, pumps, rateMap } = feedCtx; const pump = pumps.find(p => p.id === pumpId); if (!pump) return;
   const status = pumpStatus(pumpId, latestRows, latestSessions); const meta = STATUS_META[status.state]; const recent = latestRows.filter(s => s.pumpId === pumpId).slice(0, 5);
-  const mayLog = !isSuperAdmin() && !isStationAdmin() && can('shift.create', { stationId }) && canUsePump(pump.id) && (!status.session || status.session.activeUid === getCurrentUserData()?.uid); const rate = rateMap[pump.product];
+  const mayLog = !isSuperAdmin() && !isStationAdmin() && can('shift.create', { stationId })
+    && (canUsePump(pump.id) || status.session?.activeUid === getCurrentUserData()?.uid)
+    && (!status.session || status.session.activeUid === getCurrentUserData()?.uid); const rate = rateMap[pump.product];
   const recentList = recent.length ? `<ul class="feed-detail-list">${recent.map(s => `<li><span class="shift-badge">S${h(s.shiftLabel || '?')}</span><span class="feed-detail-main"><strong>${formatVolume(s.volume)}</strong> · ${formatCurrency(s.sales)}<small>${h(formatDate(s.date))}${formatTime(s.createdAt) ? ` · ${h(formatTime(s.createdAt))}` : ''}${s.hoursWorked != null ? ` · ${h(Number(s.hoursWorked).toFixed(2))} h` : ''}</small></span></li>`).join('')}</ul>` : '<p class="muted-note">No readings recorded for this pump yet.</p>';
   const sessionLine = status.session ? `Started ${formatDateTime(status.session.clockInAt) || 'just now'}${visibleActiveName(status.session) ? ` by ${visibleActiveName(status.session)}` : ''}` : 'No active shift';
   document.getElementById('modal-title').textContent = pump.name;

@@ -78,7 +78,8 @@ function actionFor(pump, session, mayLog) {
 function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
   const session = sessionFor(pump.id, sessions);
   const state = sessionLabel(session);
-  const mayLog = !isPumpManager() && can('shift.create', { stationId }) && canUsePump(pump.id);
+  const mayLog = !isPumpManager() && can('shift.create', { stationId })
+    && (canUsePump(pump.id) || isMine(session));
   const action = actionFor(pump, session, mayLog);
   const assigned = isPumpManager()
     ? staff.filter(user => (user.pumpIds || []).includes(pump.id))
@@ -173,7 +174,14 @@ export async function renderPumps(stationId) {
       isPumpManager() ? getStaffForStation(stationId) : [],
     ]);
     const mayConfigure = can('pump.create', { stationId });
-    const myPumps = filterMyPumps(pumps);
+    const assignedPumps = filterMyPumps(pumps);
+    const activeMineIds = new Set(sessions
+      .filter(session => session.status === 'active' && session.activeUid === getCurrentUserData()?.uid)
+      .map(session => session.id));
+    // Keep an in-progress pump visible to its owner if a manager removes the
+    // assignment mid-shift. The owner may still end it, but cannot start it
+    // again after it becomes idle unless it is reassigned.
+    const myPumps = pumps.filter(pump => assignedPumps.includes(pump) || activeMineIds.has(pump.id));
 
     if (pumps.length === 0) {
       content.innerHTML = `<h2 class="page-title">Pumps</h2>${emptyState('⛽', mayConfigure
@@ -374,7 +382,7 @@ function openClockOutForm(stationId, pump, rate, session) {
     toast('This shift is no longer assigned to you. The pump status was refreshed.', 'error');
     return;
   }
-  if (!can('pumpSession.end', { stationId, pumpId: pump.id }) || !canUsePump(pump.id)) {
+  if (!can('pumpSession.end', { stationId, pumpId: pump.id, activeUid: session.activeUid })) {
     toast(denyReason('pumpSession.end', { stationId }), 'error');
     return;
   }
