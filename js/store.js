@@ -122,7 +122,6 @@ export function watchPumpSessions(stationId, { onUpdate, onError } = {}) {
   return onSnapshot(q, snap => {
     onUpdate?.(snapToArray(snap), { fromCache: snap.metadata.fromCache, at: Date.now() });
   }, err => {
-    console.warn('Pump session subscription error:', err);
     onError?.(err);
   });
 }
@@ -226,7 +225,6 @@ export function watchShifts(stationId, { onUpdate, onError, max = 200 } = {}) {
     const rows = sortShiftRows(snapToArray(snap)).slice(0, max);
     onUpdate?.(rows, { fromCache: snap.metadata.fromCache, at: Date.now() });
   }, (err) => {
-    console.warn('Live feed subscription error:', err);
     onError?.(err);
   });
 }

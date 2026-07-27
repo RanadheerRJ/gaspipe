@@ -1,5 +1,32 @@
 /* PumpLog — Shared UI helpers (a11y-first, dependency-free) */
 
+// ── Consistent iconography ──────────────────────────────────────────────
+// One icon per action, everywhere. Buttons pair these with text labels —
+// never icon-only developer shortcuts.
+export const ICONS = Object.freeze({
+  edit: '✏️',
+  save: '✅',
+  delete: '🗑️',
+  add: '➕',
+  cancel: '❌',
+  search: '🔍',
+  refresh: '🔄',
+  lock: '🔒',
+  unlock: '🔓',
+  key: '🔑',
+  pin: '🔢',
+  shield: '🛡️',
+  warning: '⚠️',
+  success: '✅',
+  error: '❌',
+  user: '👤',
+  users: '👥',
+  station: '🏪',
+  pump: '⛽',
+  rate: '₹',
+  settings: '⚙️',
+});
+
 // ── Safety ──────────────────────────────────────────────────────────────
 // Every value interpolated into innerHTML must go through this.
 export function escapeHtml(value) {
@@ -33,6 +60,8 @@ function onModalKeydown(e) {
   if (!modal) return;
 
   if (e.key === 'Escape') {
+    // Locked modals (force-change credentials) cannot be dismissed.
+    if (modal.classList.contains('modal-locked')) return;
     e.preventDefault();
     closeModal(activeModalId);
     return;
@@ -121,6 +150,15 @@ export function toast(message, type = 'info', timeout = 4000) {
   window.setTimeout(() => el.remove(), timeout);
 }
 
+/** Success toasts read “✅ User Created”; errors read “❌ Username already exists”. */
+export function toastSuccess(message, timeout = 4000) {
+  toast(message?.startsWith(ICONS.success) ? message : `${ICONS.success} ${message}`, 'success', timeout);
+}
+
+export function toastError(message, timeout = 6000) {
+  toast(message?.startsWith(ICONS.error) ? message : `${ICONS.error} ${message}`, 'error', timeout);
+}
+
 // ── Accessible confirm dialog (replaces blocking confirm()) ─────────────
 export function confirmDialog({ title, message, confirmLabel = 'Confirm', danger = false, confirmationText = '' }) {
   return new Promise(resolve => {
@@ -167,6 +205,37 @@ export function confirmDialog({ title, message, confirmLabel = 'Confirm', danger
     openModal('confirm-modal');
     requestAnimationFrame(() => (confirmationText ? input : cancelBtn)?.focus());
   });
+}
+
+/**
+ * Standard production dialogs — one wording everywhere.
+ *   Save  : ⚠️ Confirm Changes — “You are about to update this record.”
+ *   Delete: ⚠️ Delete Confirmation — “This action cannot be undone.”
+ */
+export function confirmSave(detail = '') {
+  return confirmDialog({
+    title: `${ICONS.warning} Confirm Changes`,
+    message: detail ? `You are about to update ${detail}. Continue?` : 'You are about to update this record. Continue?',
+    confirmLabel: `Save ${ICONS.save}`,
+  });
+}
+
+export function confirmDelete(detail = '', confirmationText = '') {
+  return confirmDialog({
+    title: `${ICONS.warning} Delete Confirmation`,
+    message: detail
+      ? `This action cannot be undone. ${detail}`
+      : 'This action cannot be undone.',
+    confirmLabel: `Delete ${ICONS.delete}`,
+    danger: true,
+    confirmationText,
+  });
+}
+
+/** Toggle the non-dismissible state used by mandatory credential flows. */
+export function setModalLocked(id, locked = true) {
+  const modal = document.getElementById(id);
+  if (modal) modal.classList.toggle('modal-locked', locked);
 }
 
 // ── Button busy state ───────────────────────────────────────────────────

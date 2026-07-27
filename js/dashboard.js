@@ -273,7 +273,6 @@ export async function renderDashboard(stationId, range = 'today') {
     wireRateCard(stationId);
     if (quick) wireQuickStart(quick);
   } catch (err) {
-    console.error('Dashboard render error:', err);
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
 }
@@ -290,8 +289,8 @@ function startLiveFeed(stationId, pumps, rateMap, seedRows, seedSessions) {
   latestRows = [...known.values()].sort(byNewest);
   latestSessions = seedSessions || [];
   paintFeed({ at: Date.now(), fromCache: true });
-  shiftUnsub = watchShifts(stationId, { onUpdate: (rows, meta) => { if (!feedCtx || feedCtx.token !== token) return; rows.forEach(row => known.set(row.id, row)); latestRows = [...known.values()].sort(byNewest); paintFeed(meta); }, onError: err => { const el = document.getElementById('feed-updated'); if (el) el.textContent = 'Live updates paused — pull ↻ to refresh.'; console.warn('Live shift feed paused:', err?.code || err); } });
-  sessionUnsub = watchPumpSessions(stationId, { onUpdate: (sessions, meta) => { if (!feedCtx || feedCtx.token !== token) return; latestSessions = sessions; paintFeed(meta); updateHeaderClock(); }, onError: err => console.warn('Live pump status paused:', err?.code || err) });
+  shiftUnsub = watchShifts(stationId, { onUpdate: (rows, meta) => { if (!feedCtx || feedCtx.token !== token) return; rows.forEach(row => known.set(row.id, row)); latestRows = [...known.values()].sort(byNewest); paintFeed(meta); }, onError: err => { const el = document.getElementById('feed-updated'); if (el) el.textContent = 'Live updates paused — pull ↻ to refresh.'; } });
+  sessionUnsub = watchPumpSessions(stationId, { onUpdate: (sessions, meta) => { if (!feedCtx || feedCtx.token !== token) return; latestSessions = sessions; paintFeed(meta); updateHeaderClock(); }, onError: () => {} });
 }
 
 function getSession(pumpId, sessions = latestSessions) { return sessions.find(s => s.id === pumpId && s.status === 'active') || null; }

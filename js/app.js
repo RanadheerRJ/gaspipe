@@ -1,43 +1,76 @@
-/* PumpLog — application shell */
+/* PumpLog — application shell
+ *
+ * Sign-in gate order, every sign-in:
+ *   1. Forced password change   (temporary password accounts)
+ *   2. Forced Cloud PIN change  (temporary PIN or station rotation policy)
+ *   3. Local App Lock           (device PIN — refresh / PWA reopen)
+ *   4. App shell renders
+ */
 
-import { initMainApp } from './firebase.js';
+import { initMainApp, setAuthPersistence } from './firebase.js';
 import {
-  initAuth, onAuthChange, getCurrentUserData,
-  isSuperAdmin, isStationAdmin, isStaff, can, ROLES,
-  doSignOut, signIn, signUp, formatFirebaseError,
+  initAuth, onAuthChange, getCurrentUser, getCurrentUserData,
+  isSuperAdmin, isStationAdmin, isStaff, can,
+  doSignOut, signIn, formatFirebaseError,
 } from './auth.js';
 import {
   getAllStations, getStationsByIds, invalidate,
 } from './store.js';
 import {
-  h, openModal, closeModal, closeAllModals, showLoading, toast, setBusy,
+  h, openModal, closeModal, closeAllModals, showLoading, toast, toastError,
+  toastSuccess, setBusy,
 } from './components.js';
+import {
+  DEFAULT_SECURITY, getSecuritySettings, watchSecuritySettings,
+  enabledLoginMethods, getEffectiveSecurity, invalidateSecuritySettings,
+  validateCloudPinPolicy,
+} from './station-settings.js';
+import {
+  getAppLockStatus, engageAppLockFor, armAppLockSession,
+  resetAppLockForSignOut, updateAppLockPolicy,
+} from './app-lock.js';
 import { initDashboard, renderDashboard, stopLiveFeed } from './dashboard.js';
 import { initPumps, renderPumps, stopPumpsLive } from './pumps.js';
 import { initConfig, renderConfig } from './config-page.js';
 import { initHistory, renderHistory } from './history.js';
 import { initReports, renderReports } from './reports.js';
 import {
-  signInWithUsernamePin, previewJoiningCode, activateStaff, bootstrapDeveloper,
-  previewAdminInvite, activateAdminInvite, recordLogout,
+  listPublicStations, signInWithUsernamePin, signInWithEmailPin,
+  resolveLoginIdentifier, previewJoiningCode, activateStaff,
+  previewAdminInvite, activateAdminInvite, recordLogin, recordLogout, getMyPinStatus,
 } from './staff-auth.js';
-import { openChangePinForm } from './profile.js';
+import {
+  openProfileModal, openForcedPasswordChange, openForcedCloudPinChange,
+  openAppLockSetupModal,
+} from './profile.js';
 
 const $ = id => document.getElementById(id);
 const STORE_KEY = 'pumplog:lastStation';
+const LOGIN_STATION_KEY = 'pumplog:lastLoginStation';
 
 let currentStationId = null;
 let userStations = [];
 let currentPage = 'dashboard';
 let currentRange = 'today';
 let authMode = 'signin';
+let authMethod = 'username-pin';
 let authSubmitting = false;
 let uiReady = false;
 let renderToken = 0;
+let pendingJoin = null;
+
+let loginStations = [];
+let loginStationId = null;
+let loginPolicy = { ...DEFAULT_SECURITY };
+let loginSettingsUnsub = null;
+let appLockPromptShown = false;
 
 // ── Boot ────────────────────────────────────────────────────────────────
 initAuth();
-document.addEventListener('DOMContentLoaded', setupAuthForm, { once: true });
+document.addEventListener('DOMContentLoaded', () => {
+  setupAuthForm();
+  loadLoginStations();
+}, { once: true });
 
 window.addEventListener('pumplog:stationsChanged', async (event) => {
   invalidate();
@@ -52,48 +85,121 @@ window.addEventListener('pumplog:stationsChanged', async (event) => {
   renderCurrentPage();
 });
 
+// Station security edits apply immediately inside an armed session.
+window.addEventListener('pumplog:securityChanged', async () => {
+  const userData = getCurrentUserData();
+  if (!userData) return;
+  const policy = await getEffectiveSecurity(userData);
+  updateAppLockPolicy(policy);
+});
+
 // ── Auth state ──────────────────────────────────────────────────────────
 onAuthChange(async (user, userData, authError) => {
   if (user && userData) {
-    initMainApp();
-    clearAuthMessage();
-    resetAuthSubmit();
-    $('auth-screen').classList.add('hidden');
-    $('app-shell').classList.remove('hidden');
-    showLoading(false);
-
-    initDashboard();
-    initPumps();
-    initConfig();
-    initHistory();
-    initReports();
-
-    setupUI();
-    applyRoleVisibility();
-
-    await loadUserStations();
-    restoreStation(userData);
-
-    if (!currentStationId && isSuperAdmin()) currentPage = 'config';
-    renderCurrentPage();
+    await runSignInGate(user, userData);
   } else {
+    resetAppLockForSignOut();
     $('auth-screen').classList.remove('hidden');
     $('app-shell').classList.add('hidden');
     closeAllModals();
     showLoading(false);
     resetAuthSubmit();
     stopLiveFeed();
+    stopPumpsLive();
     currentStationId = null;
     userStations = [];
     currentPage = 'dashboard';
+    appLockPromptShown = false;
     invalidate();
+    if (authMode !== 'signin') setAuthMode('signin');
+    watchLoginSettings(loginStationId);
 
     if (authError) {
-      setAuthMode('signin');
       showAuthMessage(formatFirebaseError(authError), 'error');
     }
   }
 });
+
+/**
+ * Block the app shell until mandatory credential and lock steps complete.
+ */
+async function runSignInGate(user, userData) {
+  initMainApp();
+  $('auth-screen').classList.add('hidden');
+  showLoading(true);
+  clearAuthMessage();
+  resetAuthSubmit();
+
+  try {
+    const status = await getMyPinStatus().catch(() => null);
+
+    if (status?.passwordResetRequired) {
+      showLoading(false);
+      await openForcedPasswordChange(status); // resolved only on success
+      showLoading(true);
+      if (!getCurrentUser()) { showLoading(false); return; } // chose "Sign out instead"
+    }
+    if (status?.pinResetRequired || status?.pinRotationRequired) {
+      showLoading(false);
+      await openForcedCloudPinChange(status);
+      showLoading(true);
+      if (!getCurrentUser()) { showLoading(false); return; }
+    }
+
+    // Local App Lock — device bound, station policies drive the triggers.
+    const policy = await getEffectiveSecurity(userData);
+    if (policy.appLockEnabled) {
+      const lockStatus = getAppLockStatus(user.uid);
+      if (lockStatus.configured && (policy.appLockOnRefresh || policy.appLockOnPwaReopen)) {
+        showLoading(false);
+        await engageAppLockFor(user, userData, policy); // resolves on unlock
+      }
+    }
+
+    await enterApp(user, policy);
+  } catch (err) {
+    showLoading(false);
+    $('auth-screen').classList.remove('hidden');
+    setAuthMode('signin');
+    showAuthMessage(formatFirebaseError(err), 'error');
+    await doSignOut().catch(() => {});
+  }
+}
+
+async function enterApp(user, policy) {
+  const userData = getCurrentUserData();
+  showLoading(false);
+  $('auth-screen').classList.add('hidden');
+  $('app-shell').classList.remove('hidden');
+  loginSettingsUnsub?.();
+  loginSettingsUnsub = null;
+
+  initDashboard();
+  initPumps();
+  initConfig();
+  initHistory();
+  initReports();
+
+  setupUI();
+  applyRoleVisibility();
+
+  await loadUserStations();
+  restoreStation(userData);
+
+  if (!currentStationId && isSuperAdmin()) currentPage = 'config';
+  renderCurrentPage();
+
+  // App Lock session triggers — and a one-time setup offer when the station
+  // requires a lock but this device has no local PIN yet.
+  if (policy?.appLockEnabled) {
+    if (getAppLockStatus(user.uid).configured) {
+      armAppLockSession(user, policy);
+    } else if (!appLockPromptShown) {
+      appLockPromptShown = true;
+      window.setTimeout(() => openAppLockSetupModal({ dismissible: true }), 900);
+    }
+  }
+}
 
 // ── Stations ────────────────────────────────────────────────────────────
 async function loadUserStations() {
@@ -104,8 +210,7 @@ async function loadUserStations() {
       ? await getAllStations()
       : await getStationsByIds(userData.stationIds || []);
   } catch (err) {
-    console.error('Station load error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
     userStations = [];
   }
 }
@@ -166,8 +271,7 @@ async function renderCurrentPage() {
       default:        await renderDashboard(currentStationId, currentRange);
     }
   } catch (err) {
-    console.error('Render error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
   } finally {
     if (token === renderToken) content.setAttribute('aria-busy', 'false');
   }
@@ -194,20 +298,94 @@ async function refreshData(source) {
 
   try {
     invalidate();               // drop every cached query
+    invalidateSecuritySettings();
     await loadUserStations();
     if (currentStationId && !userStations.some(s => s.id === currentStationId)) {
       setStation(userStations[0]?.id || null);
     }
     await renderCurrentPage();
-    if (source === 'user') toast('Data refreshed.', 'success', 2000);
+    if (source === 'user') toastSuccess('Data refreshed.', 2000);
   } catch (err) {
-    console.error('Refresh error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
   } finally {
     refreshing = false;
     [fab, topBtn].forEach(b => b?.classList.remove('is-spinning'));
     fab?.removeAttribute('aria-busy');
   }
+}
+
+// ═══════════════════════════════════════════════════════════════════════
+//  Sign-in screen
+// ═══════════════════════════════════════════════════════════════════════
+
+async function loadLoginStations() {
+  const select = $('auth-station');
+  const hint = $('auth-station-hint');
+  if (!select) return;
+  select.innerHTML = '<option value="">Loading stations…</option>';
+  select.disabled = true;
+  try {
+    const { stations } = await listPublicStations();
+    loginStations = stations || [];
+  } catch (err) {
+    loginStations = [];
+    if (hint) hint.textContent = 'Could not load the station list. Check your connection, then refresh.';
+    select.innerHTML = '<option value="">Administrator sign-in</option>';
+    select.disabled = false;
+    loginStationId = '';
+    await applyLoginPolicy('');
+    return;
+  }
+
+  if (!loginStations.length) {
+    // A new deployment with no stations configured yet.
+    select.innerHTML = '<option value="">Administrator sign-in</option>';
+    select.disabled = false;
+    if (hint) hint.textContent = 'No stations configured yet. Sign in as an administrator to create one.';
+    loginStationId = '';
+    await applyLoginPolicy('');
+    return;
+  }
+
+  select.disabled = false;
+  select.innerHTML = loginStations.map(s => `<option value="${h(s.id)}">${h(s.name)}</option>`).join('');
+  const remembered = localStorage.getItem(LOGIN_STATION_KEY);
+  loginStationId = loginStations.some(s => s.id === remembered) ? remembered : loginStations[0].id;
+  select.value = loginStationId;
+  select.addEventListener('change', async () => {
+    loginStationId = select.value;
+    localStorage.setItem(LOGIN_STATION_KEY, loginStationId);
+    await applyLoginPolicy(loginStationId);
+  });
+  await applyLoginPolicy(loginStationId);
+}
+
+/** Refresh the visible sign-in methods for the selected station. */
+async function applyLoginPolicy(stationId) {
+  loginPolicy = await getSecuritySettings(stationId);
+  const methods = enabledLoginMethods(loginPolicy);
+  if (!methods.some(m => m.id === authMethod)) {
+    authMethod = methods[0]?.id || 'username-pin';
+  }
+  if (authMode === 'signin' && !authSubmitting) renderAuthFields();
+  watchLoginSettings(stationId);
+}
+
+function watchLoginSettings(stationId) {
+  loginSettingsUnsub?.();
+  loginSettingsUnsub = null;
+  if (!stationId) return;
+  loginSettingsUnsub = watchSecuritySettings(stationId, settings => {
+    if (!settings) return;
+    loginPolicy = settings;
+    if (authMode === 'signin' && !authSubmitting) {
+      const methods = enabledLoginMethods(loginPolicy);
+      if (!methods.some(m => m.id === authMethod)) {
+        authMethod = methods[0]?.id || 'username-pin';
+      }
+      renderAuthFields();
+    }
+  });
 }
 
 // ── Auth form ───────────────────────────────────────────────────────────
@@ -228,13 +406,10 @@ function clearAuthMessage() {
 const authSubmitLabel = () => ({
   signin: 'Sign in',
   join: 'Continue',
-  joinPin: 'Activate account',
-  developer: 'Developer sign in',
+  joinPin: 'Activate account ✅',
   adminJoin: 'Continue',
-  adminJoinPin: 'Create Station Admin',
-  legacy: 'Sign in with email',
-  forgot: 'Back to sign in',
-}[authMode] || 'Continue');
+  adminJoinPin: 'Create Station Admin ✅',
+}[authMode] || 'Sign in');
 
 function resetAuthSubmit() {
   authSubmitting = false;
@@ -253,18 +428,24 @@ function setAuthSubmitting(busy) {
   if (busy) {
     btn.setAttribute('aria-busy', 'true');
     btn.textContent = authMode === 'signin' ? 'Signing in…'
-      : authMode === 'joinPin' ? 'Activating…'
-        : authMode === 'legacy' ? 'Signing in…' : 'Checking…';
+      : authMode === 'joinPin' || authMode === 'adminJoinPin' ? 'Activating…' : 'Checking…';
   } else {
     btn.removeAttribute('aria-busy');
     btn.textContent = authSubmitLabel();
   }
 }
 
-function validPin(pin) {
-  if (!/^\d{4}$/.test(pin)) return false;
-  if (/^(\d)\1{3}$/.test(pin)) return false;
-  return !'0123456789'.includes(pin) && !'9876543210'.includes(pin);
+function pinFieldHTML({ id, label, autocomplete = 'current-password' }) {
+  return `<div class="field"><label for="${id}">${label}</label><div class="input-affix">
+    <input type="password" id="${id}" inputmode="numeric" autocomplete="${autocomplete}" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required />
+    <button type="button" class="affix-btn" data-password-toggle="${id}" aria-label="Show PIN" aria-pressed="false">Show</button></div></div>`;
+}
+
+function passwordFieldHTML({ id, label, autocomplete = 'current-password', note = '' }) {
+  return `<div class="field"><label for="${id}">${label}</label><div class="input-affix">
+    <input type="password" id="${id}" autocomplete="${autocomplete}" required />
+    <button type="button" class="affix-btn" data-password-toggle="${id}" aria-label="Show password" aria-pressed="false">Show</button></div>
+    ${note ? `<small class="hint">${note}</small>` : ''}</div>`;
 }
 
 function wireAuthFields() {
@@ -278,28 +459,70 @@ function wireAuthFields() {
       field.type = show ? 'text' : 'password';
       toggle.textContent = show ? 'Hide' : 'Show';
       toggle.setAttribute('aria-pressed', String(show));
-      toggle.setAttribute('aria-label', show ? 'Hide PIN' : 'Show PIN');
+      toggle.setAttribute('aria-label', show ? 'Hide secret' : 'Show secret');
     });
   });
+}
+
+function renderMethodTabs() {
+  const host = $('auth-methods');
+  if (!host) return;
+  const methods = enabledLoginMethods(loginPolicy);
+  if (authMode !== 'signin' || methods.length <= 1) {
+    host.classList.add('hidden');
+    host.innerHTML = '';
+    return;
+  }
+  host.classList.remove('hidden');
+  host.innerHTML = methods.map(m => `
+    <button type="button" role="tab" class="auth-method-tab ${m.id === authMethod ? 'is-active' : ''}"
+      data-method="${m.id}" aria-selected="${m.id === authMethod}">${m.label}</button>`).join('');
+  host.querySelectorAll('[data-method]').forEach(btn => btn.addEventListener('click', () => {
+    authMethod = btn.dataset.method;
+    renderAuthFields();
+  }));
+}
+
+function signinFieldsHTML() {
+  const remember = '<label class="remember-row"><input type="checkbox" id="auth-remember" checked /> <span>Remember me on this device</span></label>';
+  switch (authMethod) {
+    case 'email-password':
+      return `<div class="field"><label for="auth-email">Email</label>
+          <input type="email" id="auth-email" autocomplete="email" autocapitalize="off" spellcheck="false" required /></div>
+        ${passwordFieldHTML({ id: 'auth-password', label: 'Password' })}${remember}`;
+    case 'username-password':
+      return `<div class="field"><label for="auth-username">Username</label>
+          <input type="text" id="auth-username" autocomplete="username" autocapitalize="off" spellcheck="false" minlength="4" maxlength="16" required /></div>
+        ${passwordFieldHTML({ id: 'auth-password', label: 'Password' })}${remember}`;
+    case 'email-pin':
+      return `<div class="field"><label for="auth-email">Email</label>
+          <input type="email" id="auth-email" autocomplete="email" autocapitalize="off" spellcheck="false" required /></div>
+        ${pinFieldHTML({ id: 'auth-pin', label: 'Cloud PIN' })}${remember}`;
+    case 'username-pin':
+    default:
+      return `<div class="field"><label for="auth-username">Username</label>
+          <input type="text" id="auth-username" autocomplete="username" autocapitalize="off" spellcheck="false" minlength="4" maxlength="16" required /></div>
+        ${pinFieldHTML({ id: 'auth-pin', label: 'Cloud PIN' })}${remember}`;
+  }
 }
 
 function renderAuthFields() {
   const fields = $('auth-fields');
   const links = $('auth-links');
   if (!fields || !links) return;
+  renderMethodTabs();
+
+  const methods = enabledLoginMethods(loginPolicy);
   if (authMode === 'signin') {
-    fields.innerHTML = `
-      <div class="field"><label for="auth-username">Username</label>
-        <input type="text" id="auth-username" autocomplete="username" autocapitalize="off" spellcheck="false" minlength="4" maxlength="6" required /></div>
-      <div class="field"><label for="auth-pin">PIN</label><div class="input-affix">
-        <input type="password" id="auth-pin" inputmode="numeric" autocomplete="current-password" pattern="[0-9]{4}" maxlength="4" required />
-        <button type="button" class="affix-btn" data-password-toggle="auth-pin" aria-label="Show PIN" aria-pressed="false">Show</button></div></div>
-      <label class="remember-row"><input type="checkbox" id="auth-remember" checked /> <span>Remember me on this device</span></label>`;
-    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="forgot">Forgot PIN?</button>
+    if (methods.length === 0) {
+      fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🚫</span>
+        <p>All sign-in methods are disabled for this station. Contact your Station Admin to enable one in Config → Station Security.</p></div>`;
+    } else {
+      fields.innerHTML = signinFieldsHTML();
+    }
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="forgot">Forgot Cloud PIN?</button>
       <span class="auth-link-separator">·</span><button type="button" class="link-btn" data-auth-mode="join">Join with code</button>
-      <button type="button" class="link-btn" data-auth-mode="adminJoin">Join as Station Admin</button>
-      <button type="button" class="link-btn auth-legacy-link" data-auth-mode="developer">Developer setup</button>
-      <button type="button" class="link-btn auth-legacy-link" data-auth-mode="legacy">Existing account sign in</button>`;
+      <span class="auth-link-separator">·</span><button type="button" class="link-btn" data-auth-mode="adminJoin">Join as Station Admin</button>`;
   } else if (authMode === 'join') {
     fields.innerHTML = `<p class="auth-step-note">Enter the 5-digit code your admin shared with you.</p>
       <div class="field"><label for="auth-joining-code">Joining code</label>
@@ -307,50 +530,53 @@ function renderAuthFields() {
     links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
   } else if (authMode === 'joinPin') {
     fields.innerHTML = `<div class="join-welcome"><span class="join-welcome-icon" aria-hidden="true">✓</span><p>Welcome, <strong>${h(pendingJoin?.fullName || 'there')}</strong></p><small>Username: ${h(pendingJoin?.username || '')}</small></div>
-      <p class="auth-step-note">Create a private 4-digit PIN. Avoid repeated or sequential numbers.</p>
-      <div class="field"><label for="auth-new-pin">Create PIN</label><div class="input-affix"><input type="password" id="auth-new-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /><button type="button" class="affix-btn" data-password-toggle="auth-new-pin" aria-label="Show PIN" aria-pressed="false">Show</button></div></div>
-      <div class="field"><label for="auth-confirm-pin">Confirm PIN</label><input type="password" id="auth-confirm-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /></div>`;
+      <p class="auth-step-note">Create a private Cloud PIN of 4–8 digits. Avoid repeated or sequential numbers.</p>
+      ${pinFieldHTML({ id: 'auth-new-pin', label: 'Create Cloud PIN', autocomplete: 'new-password' })}
+      ${pinFieldHTML({ id: 'auth-confirm-pin', label: 'Confirm Cloud PIN', autocomplete: 'new-password' })}`;
     links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="join">Use a different code</button>`;
-  } else if (authMode === 'developer') {
-    fields.innerHTML = `<p class="auth-step-note">Enter the private 10-digit developer bootstrap code configured in Firebase Functions. The first setup also creates the developer PIN for username <strong>dev01</strong>.</p>
-      <div class="field"><label for="auth-developer-code">Developer code</label><input type="password" id="auth-developer-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{10}" maxlength="10" required /></div>
-      <div class="field"><label for="auth-developer-pin">Developer PIN</label><input type="password" id="auth-developer-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /></div>
-      <div class="field"><label for="auth-developer-confirm-pin">Confirm developer PIN</label><input type="password" id="auth-developer-confirm-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /></div>`;
-    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
   } else if (authMode === 'adminJoin') {
-    fields.innerHTML = `<p class="auth-step-note">Enter the 10-digit invite code from your PumpLog Developer.</p>
+    fields.innerHTML = `<p class="auth-step-note">Enter the 10-digit invite code from your PumpLog administrator.</p>
       <div class="field"><label for="auth-admin-code">Station Admin invite code</label><input type="text" id="auth-admin-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{10}" maxlength="10" placeholder="0000000000" required /></div>`;
     links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
   } else if (authMode === 'adminJoinPin') {
-    fields.innerHTML = `<div class="join-welcome"><span class="join-welcome-icon" aria-hidden="true">🔷</span><p>Create your Station Admin profile</p><small>Invite verified · choose your own username and PIN</small></div>
+    fields.innerHTML = `<div class="join-welcome"><span class="join-welcome-icon" aria-hidden="true">🔷</span><p>Create your Station Admin profile</p><small>Invite verified · choose your own username and Cloud PIN</small></div>
       <div class="field"><label for="admin-full-name">Full name</label><input type="text" id="admin-full-name" maxlength="80" autocomplete="name" required /></div>
-      <div class="field"><label for="admin-username">Username</label><input type="text" id="admin-username" minlength="4" maxlength="6" pattern="[a-zA-Z0-9_.]+" autocomplete="username" autocapitalize="off" required /></div>
+      <div class="field"><label for="admin-username">Username</label><input type="text" id="admin-username" minlength="4" maxlength="16" pattern="[a-zA-Z0-9_.]+" autocomplete="username" autocapitalize="off" required /></div>
       <div class="field"><label for="admin-phone">Phone number <span class="optional">(optional)</span></label><input type="tel" id="admin-phone" autocomplete="tel" inputmode="tel" /></div>
-      <div class="field"><label for="admin-pin">Create 4-digit PIN</label><input type="password" id="admin-pin" inputmode="numeric" autocomplete="new-password" maxlength="4" required /></div>
-      <div class="field"><label for="admin-confirm-pin">Confirm PIN</label><input type="password" id="admin-confirm-pin" inputmode="numeric" autocomplete="new-password" maxlength="4" required /></div>`;
+      ${pinFieldHTML({ id: 'admin-pin', label: 'Create Cloud PIN', autocomplete: 'new-password' })}
+      ${pinFieldHTML({ id: 'admin-confirm-pin', label: 'Confirm Cloud PIN', autocomplete: 'new-password' })}`;
     links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="adminJoin">Use a different invite</button>`;
-  } else if (authMode === 'legacy') {
-    fields.innerHTML = `<p class="auth-step-note">Use this temporary path while an existing account is migrated to username and PIN.</p>
-      <div class="field"><label for="auth-email">Email</label><input type="email" id="auth-email" autocomplete="email" required /></div>
-      <div class="field"><label for="auth-password">Password</label><div class="input-affix"><input type="password" id="auth-password" autocomplete="current-password" required /><button type="button" class="affix-btn" data-password-toggle="auth-password" aria-label="Show password" aria-pressed="false">Show</button></div></div>`;
-    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to username sign in</button>`;
   } else {
-    fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🔐</span><p>For security, PIN resets are issued by a Station Admin or Super Admin. Ask your admin for a new joining code.</p></div>`;
+    fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🔐</span><p>For security, Cloud PIN resets are issued by a Station Admin or Super Admin as a temporary PIN or one-time joining code. Ask your admin for a reset.</p></div>
+      <div class="auth-info-card"><span aria-hidden="true">📱</span><p>Forgot your <strong>App Lock</strong> PIN? Use “Forgot App Lock PIN?” on the lock screen and answer your security questions.</p></div>`;
     links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
   }
   wireAuthFields();
-  document.querySelectorAll('[data-auth-mode]').forEach(button => button.addEventListener('click', () => setAuthMode(button.dataset.authMode)));
+  document.querySelectorAll('[data-auth-mode]').forEach(button =>
+    button.addEventListener('click', () => setAuthMode(button.dataset.authMode)));
   resetAuthSubmit();
+  $('auth-submit').hidden = authMode === 'forgot' || (authMode === 'signin' && methods.length === 0);
 }
 
-let pendingJoin = null;
 function setAuthMode(mode) {
   authMode = mode;
-  if (mode !== 'joinPin') pendingJoin = null;
-  const titles = { signin: 'Sign in', join: 'Join organization', joinPin: 'Set your PIN', developer: 'Developer setup', adminJoin: 'Join as Station Admin', adminJoinPin: 'Create your profile', legacy: 'Existing account', forgot: 'Forgot PIN' };
-  const subtitles = { signin: 'Use your PumpLog username and PIN.', join: 'Activate your staff account securely.', joinPin: 'Your PIN stays private and is never stored in the browser.', developer: 'Private developer bootstrap for an empty Firebase project.', adminJoin: 'Use the 10-digit invite from your developer.', adminJoinPin: 'Your new Station Admin account is secured by your PIN.', legacy: 'Complete migration from the previous login.', forgot: 'Recover access without exposing your PIN.' };
+  if (mode !== 'joinPin' && mode !== 'adminJoinPin') pendingJoin = null;
+  const titles = {
+    signin: 'Sign in', join: 'Join organization', joinPin: 'Set your Cloud PIN',
+    adminJoin: 'Join as Station Admin', adminJoinPin: 'Create your profile', forgot: 'Forgot your credentials',
+  };
+  const stationName = loginStations.find(s => s.id === loginStationId)?.name;
+  const subtitles = {
+    signin: stationName ? `Signing in to ${stationName}.` : 'Sign in to PumpLog.',
+    join: 'Activate your staff account securely.',
+    joinPin: 'Your Cloud PIN is stored securely in Firebase — never in this app.',
+    adminJoin: 'Use the 10-digit invite from your administrator.',
+    adminJoinPin: 'Your new Station Admin account is secured by your Cloud PIN.',
+    forgot: 'How account recovery works.',
+  };
   $('auth-title').textContent = titles[mode] || 'Sign in';
   $('auth-subtitle').textContent = subtitles[mode] || '';
+  $('auth-station-field').classList.toggle('hidden', mode !== 'signin');
   renderAuthFields();
 }
 
@@ -363,35 +589,25 @@ function setupAuthForm() {
     try {
       setAuthSubmitting(true);
       if (authMode === 'signin') {
-        const username = $('auth-username').value.trim().toLowerCase();
-        const pin = $('auth-pin').value;
-        if (!username || !validPin(pin)) { resetAuthSubmit(); return fail('Enter your username and a valid 4-digit PIN.'); }
-        showAuthMessage('Signing you in…', 'info');
-        await signInWithUsernamePin({ username, pin, remember: $('auth-remember')?.checked !== false });
+        await handleSignIn(fail);
       } else if (authMode === 'join') {
         const code = $('auth-joining-code').value.trim();
-        if (!/^\d{5}$/.test(code)) { resetAuthSubmit(); return fail('Enter the 5-digit joining code.'); }
+        if (!/^\d{5}$/.test(code)) { resetAuthSubmit(); return fail('❌ Enter the 5-digit joining code.'); }
         showAuthMessage('Checking your joining code…', 'info');
         pendingJoin = { ...(await previewJoiningCode(code)), joiningCode: code };
         setAuthMode('joinPin');
-        showAuthMessage('Create your PIN to activate your account.', 'info');
+        showAuthMessage('Create your Cloud PIN to activate your account.', 'info');
       } else if (authMode === 'joinPin') {
         const pin = $('auth-new-pin').value;
         const confirmation = $('auth-confirm-pin').value;
-        if (!validPin(pin)) { resetAuthSubmit(); return fail('PIN must be exactly 4 digits and not repeated or sequential.'); }
-        if (pin !== confirmation) { resetAuthSubmit(); return fail('PINs do not match.'); }
+        const invalid = validateCloudPinPolicy(pin, { minPinLength: 4, pinComplexity: 'standard' });
+        if (invalid) { resetAuthSubmit(); return fail(invalid); }
+        if (pin !== confirmation) { resetAuthSubmit(); return fail('❌ Cloud PINs do not match.'); }
         showAuthMessage('Activating your account…', 'info');
-        await activateStaff({ joiningCode: $('auth-joining-code')?.value || pendingJoin?.joiningCode || pendingJoin?.code, pin });
-      } else if (authMode === 'developer') {
-        const code = $('auth-developer-code').value.trim();
-        const pin = $('auth-developer-pin').value;
-        if (!/^\d{10}$/.test(code)) { resetAuthSubmit(); return fail('Enter the 10-digit developer code.'); }
-        if (!validPin(pin) || pin !== $('auth-developer-confirm-pin').value) { resetAuthSubmit(); return fail('Developer PINs must match and be exactly 4 digits.'); }
-        showAuthMessage('Securing developer session…', 'info');
-        await bootstrapDeveloper(code, pin);
+        await activateStaff({ joiningCode: pendingJoin?.joiningCode || $('auth-joining-code')?.value, pin });
       } else if (authMode === 'adminJoin') {
         const code = $('auth-admin-code').value.trim();
-        if (!/^\d{10}$/.test(code)) { resetAuthSubmit(); return fail('Enter the 10-digit Station Admin invite code.'); }
+        if (!/^\d{10}$/.test(code)) { resetAuthSubmit(); return fail('❌ Enter the 10-digit Station Admin invite code.'); }
         showAuthMessage('Checking your invite…', 'info');
         pendingJoin = { ...(await previewAdminInvite(code)), joiningCode: code, kind: 'admin' };
         setAuthMode('adminJoinPin');
@@ -401,26 +617,50 @@ function setupAuthForm() {
         const username = $('admin-username').value.trim().toLowerCase();
         const phoneNumber = $('admin-phone').value.trim();
         const pin = $('admin-pin').value;
-        if (!fullName || !/^[a-z0-9_.]{4,6}$/.test(username)) { resetAuthSubmit(); return fail('Enter a name and a valid 4–6 character username.'); }
-        if (!validPin(pin) || pin !== $('admin-confirm-pin').value) { resetAuthSubmit(); return fail('PINs must match and be exactly 4 digits.'); }
+        const invalid = validateCloudPinPolicy(pin, { minPinLength: 4, pinComplexity: 'standard' });
+        if (!fullName || !/^[a-z0-9_.]{4,16}$/.test(username)) { resetAuthSubmit(); return fail('❌ Enter your name and a valid 4–16 character username.'); }
+        if (invalid) { resetAuthSubmit(); return fail(invalid); }
+        if (pin !== $('admin-confirm-pin').value) { resetAuthSubmit(); return fail('❌ Cloud PINs do not match.'); }
         showAuthMessage('Creating your Station Admin profile…', 'info');
         await activateAdminInvite({ joiningCode: pendingJoin?.joiningCode, fullName, username, phoneNumber, pin });
-      } else if (authMode === 'legacy') {
-        const email = $('auth-email').value.trim();
-        const password = $('auth-password').value;
-        if (!email || !password) { resetAuthSubmit(); return fail('Enter both email and password.'); }
-        showAuthMessage('Signing you in…', 'info');
-        await signIn(email, password);
-      } else if (authMode === 'forgot') {
-        setAuthMode('signin');
-        showAuthMessage('Ask your station admin for a new joining code to reset your PIN.', 'info');
       }
     } catch (err) {
-      console.error('Auth error:', err);
       showAuthMessage(formatFirebaseError(err), 'error');
       resetAuthSubmit();
     }
   });
+}
+
+async function handleSignIn(fail) {
+  const remember = $('auth-remember')?.checked !== false;
+  const identifier = $('auth-email')?.value.trim()
+    ?? $('auth-username')?.value.trim().toLowerCase() ?? '';
+  if (!identifier) { resetAuthSubmit(); return fail('❌ Enter your sign-in details.'); }
+
+  await setAuthPersistence(remember);
+  showAuthMessage('Signing you in…', 'info');
+  switch (authMethod) {
+    case 'email-password': {
+      await signIn(identifier, $('auth-password').value);
+      recordLogin().catch(() => {});
+      break;
+    }
+    case 'username-password': {
+      const { email } = await resolveLoginIdentifier(identifier);
+      await signIn(email, $('auth-password').value);
+      recordLogin().catch(() => {});
+      break;
+    }
+    case 'email-pin': {
+      await signInWithEmailPin({ email: identifier, pin: $('auth-pin').value, remember });
+      break;
+    }
+    case 'username-pin':
+    default: {
+      await signInWithUsernamePin({ username: identifier, pin: $('auth-pin').value, remember });
+      break;
+    }
+  }
 }
 
 // ── App UI (wired once) ─────────────────────────────────────────────────
@@ -459,51 +699,30 @@ function setupUI() {
   $('station-selector').addEventListener('click', openStationPicker);
 
   $('btn-profile').addEventListener('click', () => {
-    const userData = getCurrentUserData();
-    if (!userData) return;
-    $('profile-name').textContent = userData.fullName || userData.displayName || '—';
-    $('profile-username').textContent = userData.username || '—';
-    $('profile-email').textContent = userData.email || '—';
-    $('profile-role').textContent = ROLES[userData.role] || userData.role || '—';
-    $('profile-stations').textContent = isSuperAdmin()
-      ? 'All stations'
-      : userStations.length
-        ? userStations.map(s => s.name).join(', ')
-        : 'None assigned';
-    $('profile-pumps').textContent = userData.role === 'staff'
-      ? (userData.pumpIds?.length
-          ? `${userData.pumpIds.length} assigned pump${userData.pumpIds.length === 1 ? '' : 's'}`
-          : 'All pumps at your stations')
-      : 'All pumps';
-    openModal('profile-modal');
+    openProfileModal({
+      stations: userStations,
+      onSignOut: async (event) => {
+        setBusy(event?.currentTarget || null, true, 'Signing out…');
+        try {
+          closeModal('profile-modal');
+          await recordLogout().catch(() => {});
+          await doSignOut();
+        } finally {
+          setBusy(event?.currentTarget || null, false);
+        }
+      },
+    });
   });
 
-  $('profile-change-pin').addEventListener('click', () => {
-    closeModal('profile-modal');
-    openChangePinForm();
-  });
-
-  $('btn-signout').addEventListener('click', async (e) => {
-    setBusy(e.currentTarget, true, 'Signing out…');
-    try {
-      closeModal('profile-modal');
-      await recordLogout().catch(() => {});
-      await doSignOut();
-    } finally {
-      setBusy(e.currentTarget, false);
-    }
-  });
-
-  // Close buttons + overlay clicks
+  // Close buttons + overlay clicks (locked modals cannot be dismissed).
   document.querySelectorAll('.modal').forEach(modal => {
-    modal.querySelector('.modal-close')?.addEventListener('click', () => {
+    const guardedClose = () => {
+      if (modal.classList.contains('modal-locked')) return;
       closeModal(modal.id);
       modal.dispatchEvent(new CustomEvent('pumplog:closed'));
-    });
-    modal.querySelector('[data-close]')?.addEventListener('click', () => {
-      closeModal(modal.id);
-      modal.dispatchEvent(new CustomEvent('pumplog:closed'));
-    });
+    };
+    modal.querySelector('.modal-close')?.addEventListener('click', guardedClose);
+    modal.querySelector('[data-close]')?.addEventListener('click', guardedClose);
   });
 
   // Refresh when the tab regains focus after being away for a while.
@@ -555,7 +774,6 @@ function openStationPicker() {
 // ── Service worker ──────────────────────────────────────────────────────
 if ('serviceWorker' in navigator) {
   window.addEventListener('load', () => {
-    navigator.serviceWorker.register('sw.js').catch(err =>
-      console.warn('Service worker registration failed:', err));
+    navigator.serviceWorker.register('sw.js').catch(() => {});
   });
 }

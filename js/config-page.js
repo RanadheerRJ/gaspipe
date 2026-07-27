@@ -1,4 +1,4 @@
-/* PumpLog — Config page (Rates, Pumps, Stations, Team) */
+/* PumpLog — Config page (Profile, Station Security, Rates, Pumps, Stations, Team) */
 
 import {
   getDb, collection, doc, addDoc, updateDoc, deleteDoc, getDocs, query, limit,
@@ -6,8 +6,7 @@ import {
 } from './firebase.js';
 import {
   getCurrentUserData, isSuperAdmin, isStationAdmin,
-  can, denyReason, assignableRoles, ROLES, ROLE_BADGE,
-  createUserAsAdmin, updateUserAsAdmin, deleteUserAsAdmin, doSignOut, formatFirebaseError,
+  can, denyReason, assignableRoles, ROLES, ROLE_BADGE, formatFirebaseError,
 } from './auth.js';
 import {
   getAllStations, getStationsByIds, getRates, getPumps, getPumpSessions, getAllUsers, getUsersCreatedBy,
@@ -15,17 +14,32 @@ import {
 } from './store.js';
 import {
   h, formatCurrency, formatDate, formatDateTime, getTodayDate,
-  openModal, closeModal, emptyState, toast, confirmDialog, setBusy, showSkeleton,
+  openModal, closeModal, emptyState, toast, toastSuccess, toastError,
+  confirmDialog, confirmSave, confirmDelete, setBusy, showSkeleton, debounce, ICONS,
 } from './components.js';
-import { createStaff, checkUsername, resetStaffPin, prepareLegacyUsers, disableStaff, createAdminInvite } from './staff-auth.js';
-import { openChangePinForm } from './profile.js';
+import {
+  DEFAULT_SECURITY, normalizeSecurity, getSecuritySettings, saveSecuritySettings,
+  mergeSecurity, validatePasswordPolicy, validateCloudPinPolicy,
+  PASSWORD_COMPLEXITY_OPTIONS, PIN_COMPLEXITY_OPTIONS, isValidEmail, isValidUsername,
+} from './station-settings.js';
+import {
+  checkUsername, createUserAccount, updateUserAccount, adminSetPassword, adminSetPin,
+  deactivateUserAccount, removeUserAccount, createAdminInvite,
+} from './staff-auth.js';
+import { openProfileModal, avatarHTML } from './profile.js';
 
 let currentStationId = null;
 let stationsCache = [];
+let teamCache = [];
+let teamSearch = '';
 
 export function initConfig() {}
 
 const rerender = () => renderConfig(currentStationId);
+const byId = id => document.getElementById(id);
+const onClick = (id, fn) => byId(id)?.addEventListener('click', fn);
+const onEach = (sel, fn) => document.querySelectorAll(sel).forEach(el =>
+  el.addEventListener('click', () => fn(el.dataset.id, el)));
 
 // ── Render ──────────────────────────────────────────────────────────────
 export async function renderConfig(stationId) {
@@ -42,17 +56,20 @@ export async function renderConfig(stationId) {
 
   try {
     // Load every section in parallel instead of sequentially.
-    const [rates, pumps, sessions, stations, users] = await Promise.all([
+    const [rates, pumps, sessions, stations, users, security] = await Promise.all([
       stationId ? getRates(stationId) : [],
       stationId ? getPumps(stationId) : [],
       stationId ? getPumpSessions(stationId) : [],
       isSuperAdmin() ? getAllStations() : getStationsByIds(me.stationIds || []),
       isSuperAdmin() ? getAllUsers() : getUsersCreatedBy(me.uid),
+      stationId ? getSecuritySettings(stationId) : { ...DEFAULT_SECURITY },
     ]);
     stationsCache = stations;
+    teamCache = users;
 
     const sections = [
       renderProfileSection(me, stations, pumps),
+      renderStationSecuritySection(stationId, security),
       renderRatesSection(stationId, rates),
       renderPumpsSection(stationId, pumps, sessions),
       renderStationsSection(stations),
@@ -63,7 +80,6 @@ export async function renderConfig(stationId) {
     content.innerHTML = `<h2 class="page-title">Settings</h2>${sections}`;
     wireHandlers(rates, pumps, sessions, stations, users);
   } catch (err) {
-    console.error('Config render error:', err);
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
 }
@@ -76,21 +92,134 @@ function renderProfileSection(me, stations, pumps) {
   const pumpText = me.role === 'staff'
     ? (me.pumpIds?.length ? `${me.pumpIds.length} assigned pump${me.pumpIds.length === 1 ? '' : 's'}` : 'All pumps at assigned stations')
     : `${(pumps || []).length || 'All'} pumps visible at this station`;
-  const displayName = me.displayName || me.email || 'PumpLog user';
   return section('Profile', '', `<div class="profile-card-grid">
-    <div class="profile-card-identity"><span class="profile-avatar" aria-hidden="true">👤</span><div><strong>${h(displayName)}</strong><small>${h(me.email || 'No email')}</small></div></div>
+    <div class="profile-card-identity">${avatarHTML(me, 'medium')}<div><strong>${h(me.fullName || me.email || 'PumpLog user')}</strong><small>${h(me.email || me.username ? `@${me.username || ''}` : '')}</small></div></div>
     <dl class="profile-settings-list"><dt>Role</dt><dd><span class="role-badge">${ROLE_BADGE[me.role] || '⚪'} ${h(ROLES[me.role] || me.role || 'Staff')}</span></dd>
       <dt>Assigned stations</dt><dd>${h(stationText)}</dd><dt>Pump access</dt><dd>${h(pumpText)}</dd></dl>
-    <p class="profile-readonly-note">This information is read-only here. Station and pump access changes are managed by an administrator.</p>
-    <div class="profile-account-actions"><button type="button" id="config-change-pin" class="btn btn-secondary btn-full">Change PIN</button><button type="button" id="config-signout" class="btn btn-secondary btn-full">Sign out</button></div>
+    <div class="profile-account-actions"><button type="button" id="config-open-profile" class="btn btn-primary btn-full">${ICONS.user} Profile &amp; security</button></div>
   </div>`);
+}
+
+// ── Station Security (sign-in methods, App Lock, credential policies) ───
+function canManageSecurity(stationId) {
+  if (!stationId) return false;
+  return isSuperAdmin() || (isStationAdmin() && (getCurrentUserData()?.stationIds || []).includes(stationId));
+}
+
+function renderStationSecuritySection(stationId, security) {
+  if (!stationId) {
+    return section('Station Security', '', emptyState('🛡️', 'Select a station from the top bar to manage its security settings.'));
+  }
+  const s = normalizeSecurity(security);
+  const mayEdit = canManageSecurity(stationId);
+  const disabled = mayEdit ? '' : 'disabled';
+
+  const toggle = (name, label, hint, checked) => `
+    <label class="toggle-row">
+      <span class="toggle-text">${h(label)}${hint ? `<small>${h(hint)}</small>` : ''}</span>
+      <input type="checkbox" class="toggle-input" role="switch" name="${name}" ${checked ? 'checked' : ''} ${disabled} />
+    </label>`;
+
+  const number = (name, label, value, min, max, hint = '') => `
+    <div class="field"><label for="sec-${name}">${h(label)}</label>
+      <input type="number" id="sec-${name}" name="${name}" value="${value}" min="${min}" max="${max}" inputmode="numeric" ${disabled} />
+      ${hint ? `<small class="hint">${h(hint)}</small>` : ''}</div>`;
+
+  const select = (name, label, options, value) => `
+    <div class="field"><label for="sec-${name}">${h(label)}</label>
+      <select id="sec-${name}" name="${name}" ${disabled}>${options.map(([v, l]) =>
+        `<option value="${v}" ${v === value ? 'selected' : ''}>${h(l)}</option>`).join('')}</select></div>`;
+
+  const body = `
+    ${mayEdit ? '' : `<p class="section-hint">Read-only — only a Super Admin or this station's Station Admin can change these.</p>`}
+    <div class="settings-group">
+      <h4 class="settings-group-title">🔑 Sign-in methods</h4>
+      <p class="section-hint">Disabled methods are hidden from the station's login screen and rejected by the secure identity service.</p>
+      ${toggle('enableEmailLogin', 'Enable Email Login', 'Allow email as the sign-in identifier.', s.enableEmailLogin)}
+      ${toggle('enableUsernameLogin', 'Enable Username Login', 'Allow username as the sign-in identifier.', s.enableUsernameLogin)}
+      ${toggle('enablePasswordLogin', 'Enable Password Login', 'Password sign-in (email or username).', s.enablePasswordLogin)}
+      ${toggle('enablePinLogin', 'Enable Cloud PIN Login', 'Cloud PIN sign-in, verified by Firebase.', s.enablePinLogin)}
+    </div>
+    <div class="settings-group">
+      <h4 class="settings-group-title">📱 App Lock (device-level)</h4>
+      <p class="section-hint">App Lock is device-specific and never synced. Staff set their local PIN once per device.</p>
+      ${toggle('appLockEnabled', 'Enable App Lock', 'Require a local App Lock PIN on devices.', s.appLockEnabled)}
+      ${toggle('appLockOnRefresh', 'Auto-lock on refresh', 'Lock immediately after a browser refresh.', s.appLockOnRefresh)}
+      ${toggle('appLockOnPwaReopen', 'Auto-lock on PWA reopen', 'Lock when the installed app is closed and reopened.', s.appLockOnPwaReopen)}
+      ${toggle('appLockOnInactivity', 'Auto-lock after inactivity', 'Lock when nobody interacts with the app.', s.appLockOnInactivity)}
+      ${number('appLockTimeoutMinutes', 'Auto-lock timeout (minutes)', s.appLockTimeoutMinutes, 1, 120, 'Applies to inactivity and backgrounded tabs.')}
+    </div>
+    <div class="settings-group">
+      <h4 class="settings-group-title">🛡️ Credential policies</h4>
+      <div class="form-row">
+        ${number('minPasswordLength', 'Minimum password length', s.minPasswordLength, 6, 64)}
+        ${number('minPinLength', 'Minimum Cloud PIN length', s.minPinLength, 4, 8, 'Between 4 and 8 digits.')}
+      </div>
+      <div class="form-row">
+        ${select('passwordComplexity', 'Password complexity', PASSWORD_COMPLEXITY_OPTIONS, s.passwordComplexity)}
+        ${select('pinComplexity', 'Cloud PIN complexity', PIN_COMPLEXITY_OPTIONS, s.pinComplexity)}
+      </div>
+      ${number('pinRotationDays', 'Force Cloud PIN rotation after (days)', s.pinRotationDays, 0, 365, '0 = never force rotation. The new PIN is required at the next sign-in.')}
+    </div>
+    ${mayEdit ? `<button type="button" id="save-station-security" class="btn btn-primary btn-full mt-16">${ICONS.save} Save security settings</button>` : ''}`;
+
+  return section('Station Security', '', body);
+}
+
+function wireStationSecurity(stationId) {
+  onClick('save-station-security', async event => {
+    const button = event.currentTarget;
+    const read = name => {
+      const el = document.querySelector(`[name="${name}"]`);
+      if (!el) return undefined;
+      if (el.type === 'checkbox') return el.checked;
+      if (el.type === 'number') return Number(el.value);
+      return el.value;
+    };
+    const patch = normalizeSecurity({
+      enableEmailLogin: read('enableEmailLogin'),
+      enableUsernameLogin: read('enableUsernameLogin'),
+      enablePasswordLogin: read('enablePasswordLogin'),
+      enablePinLogin: read('enablePinLogin'),
+      appLockEnabled: read('appLockEnabled'),
+      appLockOnRefresh: read('appLockOnRefresh'),
+      appLockOnPwaReopen: read('appLockOnPwaReopen'),
+      appLockOnInactivity: read('appLockOnInactivity'),
+      appLockTimeoutMinutes: read('appLockTimeoutMinutes'),
+      minPasswordLength: read('minPasswordLength'),
+      minPinLength: read('minPinLength'),
+      passwordComplexity: read('passwordComplexity'),
+      pinComplexity: read('pinComplexity'),
+      pinRotationDays: read('pinRotationDays'),
+    });
+    if (!patch.enableEmailLogin && !patch.enableUsernameLogin) {
+      toastError('Validation failed — enable Email Login, Username Login, or both, or nobody can sign in.');
+      return;
+    }
+    if (!patch.enablePasswordLogin && !patch.enablePinLogin) {
+      toastError('Validation failed — enable Password Login, Cloud PIN Login, or both.');
+      return;
+    }
+    const station = stationsCache.find(s => s.id === stationId);
+    const ok = await confirmSave(`the security settings for ${station?.name || 'this station'}`);
+    if (!ok) return;
+    setBusy(button, true, 'Saving…');
+    try {
+      await saveSecuritySettings(stationId, patch);
+      toastSuccess('Security Settings Saved');
+      rerender();
+    } catch (err) {
+      toastError(formatFirebaseError(err));
+      setBusy(button, false);
+    }
+  });
 }
 
 // ── Rates ───────────────────────────────────────────────────────────────
 function renderRatesSection(stationId, rates) {
   const mayEdit = can('rate.update', { stationId });
   const addBtn = can('rate.create', { stationId })
-    ? '<button id="add-rate-btn" class="btn btn-primary btn-small">+ Add rate</button>'
+    ? `<button id="add-rate-btn" class="btn btn-primary btn-small">${ICONS.add} Add rate</button>`
     : '';
 
   if (!stationId) {
@@ -105,8 +234,8 @@ function renderRatesSection(stationId, rates) {
     title: `${h(r.product)} — ${formatCurrency(r.rate)}/L`,
     meta: `Effective ${formatDate(r.effectiveDate)}`,
     actions: mayEdit ? [
-      { cls: 'edit-rate', id: r.id, icon: '✏️', label: `Edit ${r.product} rate` },
-      { cls: 'delete-rate', id: r.id, icon: '🗑️', label: `Delete ${r.product} rate` },
+      { cls: 'edit-rate', id: r.id, icon: ICONS.edit, label: `Edit ${r.product} rate` },
+      { cls: 'delete-rate', id: r.id, icon: ICONS.delete, label: `Delete ${r.product} rate` },
     ] : [],
   })).join('');
 
@@ -118,7 +247,7 @@ function renderPumpsSection(stationId, pumps, sessions = []) {
   if (!stationId) return '';
   const mayEdit = can('pump.update', { stationId });
   const addBtn = can('pump.create', { stationId })
-    ? '<button id="add-pump-btn-cfg" class="btn btn-primary btn-small">+ Add pump</button>'
+    ? `<button id="add-pump-btn-cfg" class="btn btn-primary btn-small">${ICONS.add} Add pump</button>`
     : '';
 
   if (pumps.length === 0) {
@@ -128,11 +257,11 @@ function renderPumpsSection(stationId, pumps, sessions = []) {
   const items = pumps.map(p => {
     const session = sessions.find(s => s.id === p.id && s.status === 'active');
     const actions = mayEdit ? [
-      { cls: 'edit-pump', id: p.id, icon: '✏️', label: `Edit ${p.name}` },
-      { cls: 'delete-pump', id: p.id, icon: '🗑️', label: `Delete ${p.name}` },
+      { cls: 'edit-pump', id: p.id, icon: ICONS.edit, label: `Edit ${p.name}` },
+      { cls: 'delete-pump', id: p.id, icon: ICONS.delete, label: `Delete ${p.name}` },
     ] : [];
     if (session && can('pumpSession.forceRelease', { stationId })) {
-      actions.push({ cls: 'force-release', id: p.id, icon: '🔓', label: `Force release ${p.name}` });
+      actions.push({ cls: 'force-release', id: p.id, icon: ICONS.unlock, label: `Force release ${p.name}` });
     }
     const active = session
       ? ` · Active since ${formatDateTime(session.clockInAt) || 'just now'} · ${h(session.activeName || 'Staff member')}`
@@ -146,7 +275,7 @@ function renderPumpsSection(stationId, pumps, sessions = []) {
 // ── Stations (Super Admin) ──────────────────────────────────────────────
 function renderStationsSection(stations) {
   const addBtn = can('station.create')
-    ? '<button id="add-station-btn" class="btn btn-primary btn-small">+ Create station</button>'
+    ? `<button id="add-station-btn" class="btn btn-primary btn-small">${ICONS.add} Create station</button>`
     : '';
 
   if (stations.length === 0) {
@@ -155,8 +284,8 @@ function renderStationsSection(stations) {
 
   const items = stations.map(s => {
     const actions = [];
-    if (can('station.update')) actions.push({ cls: 'edit-station', id: s.id, icon: '✏️', label: `Edit ${s.name}` });
-    if (can('station.delete')) actions.push({ cls: 'delete-station', id: s.id, icon: '🗑️', label: `Delete ${s.name}` });
+    if (can('station.update')) actions.push({ cls: 'edit-station', id: s.id, icon: ICONS.edit, label: `Edit ${s.name}` });
+    if (can('station.delete')) actions.push({ cls: 'delete-station', id: s.id, icon: ICONS.delete, label: `Delete ${s.name}` });
     if (can('station.reset', { stationId: s.id })) {
       actions.push({ cls: 'reset-station', id: s.id, icon: '♻️', label: `Reset data for ${s.name}` });
     }
@@ -171,72 +300,121 @@ function renderStationsSection(stations) {
 }
 
 // ── Team ────────────────────────────────────────────────────────────────
+function statusTag(user) {
+  const status = user.status || 'active';
+  if (status === 'disabled') return '<span class="tag tag-off">Inactive</span>';
+  if (status === 'invited') return '<span class="tag tag-invited">Invited</span>';
+  return '<span class="tag tag-on">Active</span>';
+}
+
 function renderTeamSection(users, me) {
   const addBtn = can('user.create')
-    ? `<button id="add-team-btn" class="btn btn-primary btn-small">+ Add ${isSuperAdmin() ? 'user' : 'staff'}</button>`
+    ? `<button id="add-team-btn" class="btn btn-primary btn-small">${ICONS.add} Add ${isSuperAdmin() ? 'user' : 'staff'}</button>`
     : '';
 
   const hint = isSuperAdmin()
     ? 'Every PumpLog account. You cannot change your own role here.'
     : 'Staff accounts you created for your stations.';
 
-  if (users.length === 0) {
-    return section('Team', addBtn, emptyState('👥', 'No team members yet.'));
+  const searchBar = users.length > 4 ? `
+    <div class="field search-field">
+      <label for="team-search" class="sr-only">Search team</label>
+      <div class="input-affix search-affix">
+        <input type="search" id="team-search" placeholder="Search by name, username, or email" value="${h(teamSearch)}" />
+        <span class="affix-btn affix-static" aria-hidden="true">${ICONS.search}</span>
+      </div>
+    </div>` : '';
+
+  const term = teamSearch.trim().toLowerCase();
+  const visible = term
+    ? users.filter(u => [u.fullName, u.email, u.username, u.employeeId].some(v => (v || '').toLowerCase().includes(term)))
+    : users;
+
+  const listBody = users.length === 0
+    ? emptyState('👥', 'No team members yet.')
+    : visible.length === 0
+      ? emptyState(ICONS.search, 'No team members match your search.')
+      : visible.map(user => teamItemHTML(user, me)).join('');
+
+  return section('Team', addBtn, `<p class="section-hint">${h(hint)}</p>${searchBar}<div id="team-list">${listBody}</div>`);
+}
+
+function repaintTeamList(me) {
+  const host = byId('team-list');
+  if (!host) return;
+  const term = teamSearch.trim().toLowerCase();
+  const visible = term
+    ? teamCache.filter(u => [u.fullName, u.email, u.username, u.employeeId].some(v => (v || '').toLowerCase().includes(term)))
+    : teamCache;
+  host.innerHTML = visible.length
+    ? visible.map(user => teamItemHTML(user, me)).join('')
+    : emptyState(ICONS.search, 'No team members match your search.');
+  wireTeamActions(visible);
+}
+
+function teamItemHTML(u, me) {
+  const isMe = u.id === me.uid;
+  const mayEdit = can('user.update', { target: u });
+  const mayDelete = can('user.delete', { target: u });
+  const stationIds = u.stationIds || [];
+  const nameOf = id => stationsCache.find(s => s.id === id)?.name || 'Unknown station';
+  const stationText = u.role === 'superadmin'
+    ? 'All stations'
+    : stationIds.length === 0
+      ? 'No stations assigned'
+      : stationIds.map(nameOf).join(', ');
+  const pumpText = u.role === 'staff'
+    ? (u.pumpIds?.length ? `${u.pumpIds.length} pump${u.pumpIds.length === 1 ? '' : 's'}` : 'all pumps')
+    : null;
+
+  const actions = [];
+  if (mayEdit) {
+    actions.push({ cls: 'edit-user', id: u.id, icon: ICONS.edit, label: `Edit ${u.fullName || u.email}` });
+    actions.push({ cls: 'credentials-user', id: u.id, icon: ICONS.key, label: `Reset credentials for ${u.fullName || u.email}` });
+    actions.push(u.status === 'disabled'
+      ? { cls: 'activate-user', id: u.id, icon: '▶️', label: `Activate ${u.fullName || u.email}` }
+      : { cls: 'deactivate-user', id: u.id, icon: '⏸️', label: `Deactivate ${u.fullName || u.email}` });
+  } else if (!isMe) {
+    actions.push({ cls: '', id: u.id, icon: ICONS.edit, label: 'Edit unavailable', disabled: true, title: denyReason('user.update', { target: u }) });
+  }
+  if (mayDelete) {
+    actions.push({ cls: 'remove-user', id: u.id, icon: ICONS.delete, label: `Remove ${u.fullName || u.email}` });
+  } else if (!isMe) {
+    actions.push({ cls: '', id: u.id, icon: ICONS.delete, label: 'Remove unavailable', disabled: true, title: denyReason('user.delete', { target: u }) });
   }
 
-  const nameOf = id => stationsCache.find(s => s.id === id)?.name || 'Unknown station';
+  return `<div class="config-item team-item">
+    ${avatarHTML(u, 'small')}
+    <div class="item-info">
+      <div class="item-title">${h(u.fullName || u.email || u.username || 'Unnamed user')}${isMe ? ' <span class="tag tag-you">You</span>' : ''} ${statusTag(u)}${u.pwaLoginAllowed === false ? ' <span class="tag tag-off">PWA off</span>' : ''}</div>
+      <div class="item-meta">${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''}${u.email ? ` · ${h(u.email)}` : ''}${u.employeeId ? ` · ID ${h(u.employeeId)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}</div>
+    </div>
+    <div class="item-actions">${actions.map(a => `
+      <button class="icon-btn ${a.cls}" data-id="${h(a.id)}" aria-label="${h(a.label)}" title="${h(a.title || a.label)}" ${a.disabled ? 'disabled' : ''}>${a.icon}</button>`).join('')}</div>
+  </div>`;
+}
 
-  const items = users.map(u => {
-    const stationIds = u.stationIds || [];
-    const isMe = u.id === me.uid;
-    const mayEdit = can('user.update', { target: u });
-    const mayDelete = can('user.delete', { target: u });
-
-    const stationText = u.role === 'superadmin'
-      ? 'All stations'
-      : stationIds.length === 0
-        ? 'No stations assigned'
-        : stationIds.map(nameOf).join(', ');
-
-    const pumpText = u.role === 'staff'
-      ? (u.pumpIds?.length
-          ? `${u.pumpIds.length} pump${u.pumpIds.length === 1 ? '' : 's'} assigned`
-          : 'all pumps')
-      : null;
-
-    const actions = [];
-    if (mayEdit) {
-      actions.push({ cls: 'edit-user', id: u.id, icon: '✏️', label: `Edit ${u.email || u.fullName}` });
-      if (u.role === 'staff') actions.push({ cls: 'reset-pin-user', id: u.id, icon: '🔑', label: `Reset PIN for ${u.email || u.fullName}` });
-    } else if (!isMe) {
-      actions.push({ cls: '', id: u.id, icon: '✏️', label: 'Edit unavailable', disabled: true, title: denyReason('user.update', { target: u }) });
-    }
-    if (mayDelete) {
-      actions.push(u.username
-        ? { cls: 'disable-user', id: u.id, icon: '⛔', label: `Disable ${u.fullName || u.username}` }
-        : { cls: 'delete-user', id: u.id, icon: '🗑️', label: `Remove ${u.email || u.fullName}` });
-    } else if (!isMe) {
-      actions.push({ cls: '', id: u.id, icon: '🗑️', label: 'Remove unavailable', disabled: true, title: denyReason('user.delete', { target: u }) });
-    }
-
-    return configItem({
-      title: `${h(u.fullName || u.email || u.username || 'Unnamed user')}${isMe ? ' <span class="tag tag-you">You</span>' : ''}`,
-      meta: `${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}`,
-      actions,
-    });
-  }).join('');
-
-  return section('Team', addBtn, `<p class="section-hint">${h(hint)}</p>${items}`);
+// ── Security info ───────────────────────────────────────────────────────
+function renderSecuritySection() {
+  const inviteButton = isSuperAdmin() ? `<button type="button" id="create-admin-invite" class="btn btn-primary btn-full mt-16">${ICONS.users} Invite Station Admin</button>` : '';
+  return section('Security', '', `<div class="security-grid">
+    <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔐</span><div><strong>Firebase Auth sign-in</strong><p>Each person stays signed in on their device until they choose Sign out. Firebase Auth and Firestore rules remain the authority.</p></div></article>
+    <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔒</span><div><strong>One pump, one active shift</strong><p>A live Firestore transaction locks a pump to one staff member. Clock-out releases it atomically with the saved shift record.</p></div></article>
+    <article class="security-card"><span class="security-card-icon" aria-hidden="true">🛡️</span><div><strong>Role-based access</strong><p>Staff see their assigned pumps and records. Station Admins manage their stations. Super Admins manage every station. UI checks never replace server rules.</p></div></article>
+    <article class="security-card"><span class="security-card-icon" aria-hidden="true">📱</span><div><strong>App Lock is local</strong><p>App Lock PINs and security answers never leave the device. Cloud PINs are scrypt-hashed by Firebase Functions only.</p></div></article>
+  </div><p class="security-note">For recovery, managers can force-release an active lock from the Pumps section. This discards the unfinished reading and does not create a shift.</p>
+  ${inviteButton}`);
 }
 
 // ── Markup helpers ──────────────────────────────────────────────────────
 const SECTION_META = {
-  Profile: { icon: '👤', description: 'Your account, role, station, and pump access.' },
+  Profile: { icon: '👤', description: 'Your account, role, station, and security settings.' },
+  'Station Security': { icon: '🛡️', description: 'Sign-in methods, App Lock, and credential policies for this station.' },
   Rates: { icon: '₹', description: 'Set the prices used to calculate each shift.' },
   Pumps: { icon: '⛽', description: 'Manage pumps, products, and stuck session locks.' },
   Stations: { icon: '🏪', description: 'Manage stations or safely reset station data.' },
-  Team: { icon: '👥', description: 'Manage staff, roles, stations, and pump assignments.' },
-  Security: { icon: '🔒', description: 'Understand how Firebase and live pump locks protect access.' },
+  Team: { icon: '👥', description: 'Create and manage users, credentials, and assignments.' },
+  Security: { icon: '🔒', description: 'How Firebase protects PumpLog accounts and data.' },
 };
 
 function section(title, actionHTML, bodyHTML) {
@@ -256,16 +434,6 @@ function section(title, actionHTML, bodyHTML) {
   </section>`;
 }
 
-function renderSecuritySection() {
-  const inviteButton = isSuperAdmin() ? '<button type="button" id="create-admin-invite" class="btn btn-primary btn-full mt-16">Invite Station Admin</button>' : '';
-  return section('Security', '', `<div class="security-grid">
-    <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔐</span><div><strong>Firebase Auth sign-in</strong><p>Each person stays signed in on their device until they choose Sign out. Firebase Auth and Firestore rules remain the authority.</p></div></article>
-    <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔒</span><div><strong>One pump, one active shift</strong><p>A live Firestore transaction locks a pump to one staff member. Clock-out releases it atomically with the saved shift record.</p></div></article>
-    <article class="security-card"><span class="security-card-icon" aria-hidden="true">🛡️</span><div><strong>Role-based access</strong><p>Staff see their assigned pumps and records. Station Admins manage their stations. Super Admins manage every station. UI checks never replace server rules.</p></div></article>
-  </div><p class="security-note">For recovery, managers can force-release an active lock from the Pumps section. This discards the unfinished reading and does not create a shift.</p>
-  ${inviteButton}<button type="button" id="prepare-legacy-users" class="btn btn-secondary btn-full mt-16">Prepare existing accounts for username + PIN</button>`);
-}
-
 function configItem({ title, meta, actions = [] }) {
   const buttons = actions.map(a => `
     <button class="icon-btn ${a.cls}" data-id="${h(a.id)}"
@@ -281,11 +449,6 @@ function configItem({ title, meta, actions = [] }) {
     ${buttons ? `<div class="item-actions">${buttons}</div>` : ''}
   </div>`;
 }
-
-const byId = id => document.getElementById(id);
-const onClick = (id, fn) => byId(id)?.addEventListener('click', fn);
-const onEach = (sel, fn) => document.querySelectorAll(sel).forEach(el =>
-  el.addEventListener('click', () => fn(el.dataset.id, el)));
 
 function wireConfigAccordion() {
   document.querySelectorAll('[data-config-section] .config-accordion-toggle').forEach(toggle => {
@@ -310,14 +473,9 @@ function wireConfigAccordion() {
 
 // ── Wiring ──────────────────────────────────────────────────────────────
 function wireHandlers(rates, pumps, sessions, stations, users) {
-  const sid = currentStationId;
   wireConfigAccordion();
-  onClick('config-signout', async event => {
-    setBusy(event.currentTarget, true, 'Signing out…');
-    await doSignOut();
-  });
-  onClick('config-change-pin', () => openChangePinForm());
-  onClick('prepare-legacy-users', () => prepareExistingAccounts());
+  wireStationSecurity(currentStationId);
+  onClick('config-open-profile', () => openProfileModal({ stations }));
   onClick('create-admin-invite', () => createStationAdminInvite());
 
   onClick('add-rate-btn', () => showRateForm(null));
@@ -335,12 +493,23 @@ function wireHandlers(rates, pumps, sessions, stations, users) {
   onEach('.reset-station', id => resetStationData(stations.find(s => s.id === id)));
 
   onClick('add-team-btn', () => showUserForm(null));
-  onEach('.edit-user', id => showUserForm(users.find(u => u.id === id)));
-  onEach('.reset-pin-user', id => resetStaffPinForUser(users.find(u => u.id === id)));
-  onEach('.disable-user', id => disableStaffUser(users.find(u => u.id === id)));
-  onEach('.delete-user', id => removeUser(users.find(u => u.id === id)));
+  wireTeamActions(users);
 
-  void sid;
+  const searchInput = byId('team-search');
+  if (searchInput) {
+    searchInput.addEventListener('input', debounce(() => {
+      teamSearch = searchInput.value;
+      repaintTeamList(getCurrentUserData());
+    }, 160));
+  }
+}
+
+function wireTeamActions(users) {
+  onEach('.edit-user', id => showUserForm(users.find(u => u.id === id)));
+  onEach('.credentials-user', id => showCredentialsForm(users.find(u => u.id === id)));
+  onEach('.deactivate-user', id => deactivateUser(users.find(u => u.id === id)));
+  onEach('.activate-user', id => activateUser(users.find(u => u.id === id)));
+  onEach('.remove-user', id => removeUser(users.find(u => u.id === id)));
 }
 
 // ── Rate form ───────────────────────────────────────────────────────────
@@ -362,13 +531,12 @@ function showRateForm(rate) {
   const isEdit = !!rate;
   const action = isEdit ? 'rate.update' : 'rate.create';
 
-  // Guard the two conditions that produced the old "failed to add rate" error.
   if (!currentStationId) {
-    toast('Select a station before adding a rate.', 'error');
+    toastError('Select a station before adding a rate.');
     return;
   }
   if (!can(action, { stationId: currentStationId })) {
-    toast(denyReason(action), 'error');
+    toastError(denyReason(action));
     return;
   }
 
@@ -391,7 +559,7 @@ function showRateForm(rate) {
         <input type="date" id="rate-date" value="${h(rate?.effectiveDate || getTodayDate())}" required />
       </div>
       <p class="form-error hidden" id="rate-form-error" role="alert"></p>
-      <button type="submit" class="btn btn-primary btn-full">${isEdit ? 'Save changes' : 'Add rate'}</button>
+      <button type="submit" class="btn btn-primary btn-full">${isEdit ? `Save ${ICONS.save}` : `${ICONS.add} Add rate`}</button>
     </form>
   `);
 
@@ -404,12 +572,12 @@ function showRateForm(rate) {
     const rateValue = parseFloat(byId('rate-value').value);
     const effectiveDate = byId('rate-date').value;
 
-    // Validate up front so a bad value never reaches Firestore.
-    if (!product) return showFieldError(err, 'Choose a product.');
-    if (!Number.isFinite(rateValue) || rateValue <= 0) return showFieldError(err, 'Enter a rate greater than zero.');
-    if (!effectiveDate) return showFieldError(err, 'Choose an effective date.');
+    if (!product) return showFieldError(err, '❌ Choose a product.');
+    if (!Number.isFinite(rateValue) || rateValue <= 0) return showFieldError(err, '❌ Enter a rate greater than zero.');
+    if (!effectiveDate) return showFieldError(err, '❌ Choose an effective date.');
 
     err.classList.add('hidden');
+    if (isEdit && !(await confirmSave(`the ${product} rate`))) return;
     setBusy(btn, true, 'Saving…');
 
     try {
@@ -421,7 +589,6 @@ function showRateForm(rate) {
           ...payload, updatedAt: serverTimestamp(),
         });
       } else {
-        // createdAt/createdBy are required by firestore.rules for new rates.
         await addDoc(collection(db, 'stations', currentStationId, 'rates'), {
           ...payload,
           createdBy: getCurrentUserData()?.uid || 'unknown',
@@ -431,11 +598,10 @@ function showRateForm(rate) {
 
       invalidateStation(currentStationId);
       closeModal('generic-modal');
-      toast(isEdit ? 'Rate updated.' : 'Rate added.', 'success');
+      toastSuccess(isEdit ? 'Changes Saved' : 'Rate Added');
       rerender();
     } catch (e2) {
-      console.error('Rate save error:', e2);
-      showFieldError(err, formatFirebaseError(e2));
+      showFieldError(err, `❌ ${formatFirebaseError(e2)}`);
       setBusy(btn, false);
     }
   });
@@ -443,25 +609,19 @@ function showRateForm(rate) {
 
 async function deleteRate(rate) {
   if (!rate || !can('rate.delete', { stationId: currentStationId })) {
-    toast(denyReason('rate.delete'), 'error');
+    toastError(denyReason('rate.delete'));
     return;
   }
-  const ok = await confirmDialog({
-    title: 'Delete rate?',
-    message: `${rate.product} at ${formatCurrency(rate.rate)}/L effective ${formatDate(rate.effectiveDate)} will be removed. Existing shift records keep the rate they were saved with.`,
-    confirmLabel: 'Delete rate',
-    danger: true,
-  });
+  const ok = await confirmDelete(`${rate.product} at ${formatCurrency(rate.rate)}/L effective ${formatDate(rate.effectiveDate)} will be removed. Existing shift records keep their saved rate.`);
   if (!ok) return;
 
   try {
     await deleteDoc(doc(getDb(), 'stations', currentStationId, 'rates', rate.id));
     invalidateStation(currentStationId);
-    toast('Rate deleted.', 'success');
+    toastSuccess('Rate Deleted');
     rerender();
   } catch (err) {
-    console.error('Delete rate error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
   }
 }
 
@@ -470,7 +630,7 @@ function showPumpForm(pump) {
   const isEdit = !!pump;
   const action = isEdit ? 'pump.update' : 'pump.create';
   if (!can(action, { stationId: currentStationId })) {
-    toast(denyReason(action), 'error');
+    toastError(denyReason(action));
     return;
   }
 
@@ -488,7 +648,7 @@ function showPumpForm(pump) {
         </select>
       </div>
       <p class="form-error hidden" id="pump-form-error" role="alert"></p>
-      <button type="submit" class="btn btn-primary btn-full">${isEdit ? 'Save changes' : 'Add pump'}</button>
+      <button type="submit" class="btn btn-primary btn-full">${isEdit ? `Save ${ICONS.save}` : `${ICONS.add} Add pump`}</button>
     </form>
   `);
 
@@ -499,10 +659,11 @@ function showPumpForm(pump) {
     const name = byId('pump-name').value.trim();
     const product = byId('pump-product').value;
 
-    if (!name) return showFieldError(err, 'Enter a pump name.');
-    if (!product) return showFieldError(err, 'Choose a product.');
+    if (!name) return showFieldError(err, '❌ Enter a pump name.');
+    if (!product) return showFieldError(err, '❌ Choose a product.');
 
     err.classList.add('hidden');
+    if (isEdit && !(await confirmSave(`pump ${name}`))) return;
     setBusy(btn, true, 'Saving…');
 
     try {
@@ -520,11 +681,10 @@ function showPumpForm(pump) {
       }
       invalidateStation(currentStationId);
       closeModal('generic-modal');
-      toast(isEdit ? 'Pump updated.' : 'Pump added.', 'success');
+      toastSuccess(isEdit ? 'Changes Saved' : 'Pump Added');
       rerender();
     } catch (e2) {
-      console.error('Pump save error:', e2);
-      showFieldError(err, formatFirebaseError(e2));
+      showFieldError(err, `❌ ${formatFirebaseError(e2)}`);
       setBusy(btn, false);
     }
   });
@@ -532,40 +692,34 @@ function showPumpForm(pump) {
 
 async function deletePump(pump) {
   if (!pump || !can('pump.delete', { stationId: currentStationId })) {
-    toast(denyReason('pump.delete'), 'error');
+    toastError(denyReason('pump.delete'));
     return;
   }
-  const ok = await confirmDialog({
-    title: 'Delete pump?',
-    message: `“${pump.name}” will be removed. Past shift records for this pump are kept.`,
-    confirmLabel: 'Delete pump',
-    danger: true,
-  });
+  const ok = await confirmDelete(`“${pump.name}” will be removed. Past shift records for this pump are kept.`);
   if (!ok) return;
 
   try {
     await deleteDoc(doc(getDb(), 'stations', currentStationId, 'pumps', pump.id));
     invalidateStation(currentStationId);
-    toast('Pump deleted.', 'success');
+    toastSuccess('Pump Deleted');
     rerender();
   } catch (err) {
-    console.error('Delete pump error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
   }
 }
 
 // ── Live lock recovery ──────────────────────────────────────────────────
 async function forceReleasePump(pump, session) {
   if (!pump || !session || !can('pumpSession.forceRelease', { stationId: currentStationId })) {
-    toast(denyReason('pumpSession.forceRelease'), 'error');
+    toastError(denyReason('pumpSession.forceRelease'));
     return;
   }
   const started = formatDateTime(session.clockInAt) || 'an unknown time';
   const startedBy = session.activeName || 'an unknown staff member';
   const ok = await confirmDialog({
-    title: 'Force-release pump?',
+    title: `${ICONS.warning} Force-Release Pump`,
     message: `Pump ${pump.name} has been active since ${started}, started by ${startedBy}. Force-release it without saving a shift record?`,
-    confirmLabel: 'Force release',
+    confirmLabel: `Force release ${ICONS.unlock}`,
     danger: true,
   });
   if (!ok) return;
@@ -576,11 +730,10 @@ async function forceReleasePump(pump, session) {
       updatedBy: getCurrentUserData()?.uid || 'unknown',
     });
     invalidateStation(currentStationId);
-    toast(`${pump.name} released. No shift record was saved.`, 'success');
+    toastSuccess(`${pump.name} released`);
     window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId: currentStationId } }));
   } catch (err) {
-    console.error('Force release error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
   }
 }
 
@@ -603,13 +756,13 @@ async function deleteSubcollection(stationId, name) {
 
 async function resetStationData(station) {
   if (!station || !can('station.reset', { stationId: station.id })) {
-    toast(denyReason('station.reset'), 'error');
+    toastError(denyReason('station.reset'));
     return;
   }
   const ok = await confirmDialog({
-    title: `Reset ${station.name}?`,
+    title: `${ICONS.warning} Reset ${station.name}?`,
     message: `This permanently deletes every shift record and pump session lock for ${station.name}. Pumps, rates, and team assignments will not be changed. This cannot be undone.`,
-    confirmLabel: 'Reset station data',
+    confirmLabel: `Reset station data ${ICONS.delete}`,
     danger: true,
     confirmationText: station.name,
   });
@@ -620,12 +773,12 @@ async function resetStationData(station) {
       deleteSubcollection(station.id, 'pumpSessions'),
     ]);
     invalidateStation(station.id);
-    toast(`Station reset — deleted ${shifts + sessions} data record${shifts + sessions === 1 ? '' : 's'}.`, 'success');
-    window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId: station.id } }));
+    toastSuccess('Station Reset', 4000);
+    toast(`Deleted ${shifts + sessions} data record${shifts + sessions === 1 ? '' : 's'}.`, 'info');
+    window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId: station.id } })); 
     rerender();
   } catch (err) {
-    console.error('Station reset error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
   }
 }
 
@@ -634,7 +787,7 @@ function showStationForm(station) {
   const isEdit = !!station;
   const action = isEdit ? 'station.update' : 'station.create';
   if (!can(action)) {
-    toast(denyReason(action), 'error');
+    toastError(denyReason(action));
     return;
   }
 
@@ -650,7 +803,7 @@ function showStationForm(station) {
         <input type="text" id="station-address" placeholder="City, area" value="${h(station?.address || '')}" />
       </div>
       <p class="form-error hidden" id="station-form-error" role="alert"></p>
-      <button type="submit" class="btn btn-primary btn-full">${isEdit ? 'Save changes' : 'Create station'}</button>
+      <button type="submit" class="btn btn-primary btn-full">${isEdit ? `Save ${ICONS.save}` : `${ICONS.add} Create station`}</button>
     </form>
   `);
 
@@ -661,9 +814,10 @@ function showStationForm(station) {
     const name = byId('station-name').value.trim();
     const address = byId('station-address').value.trim();
 
-    if (!name) return showFieldError(err, 'Enter a station name.');
+    if (!name) return showFieldError(err, '❌ Enter a station name.');
 
     err.classList.add('hidden');
+    if (isEdit && !(await confirmSave(`station ${name}`))) return;
     setBusy(btn, true, 'Saving…');
 
     try {
@@ -672,7 +826,7 @@ function showStationForm(station) {
         await updateDoc(doc(db, 'stations', station.id), { name, address, updatedAt: serverTimestamp() });
         invalidateStations();
         closeModal('generic-modal');
-        toast('Station updated.', 'success');
+        toastSuccess('Changes Saved');
         window.dispatchEvent(new CustomEvent('pumplog:stationsChanged', { detail: { stationId: station.id } }));
       } else {
         const ref = await addDoc(collection(db, 'stations'), {
@@ -682,12 +836,11 @@ function showStationForm(station) {
         });
         invalidateStations();
         closeModal('generic-modal');
-        toast('Station created.', 'success');
+        toastSuccess('Station Created');
         window.dispatchEvent(new CustomEvent('pumplog:stationsChanged', { detail: { stationId: ref.id } }));
       }
     } catch (e2) {
-      console.error('Station save error:', e2);
-      showFieldError(err, formatFirebaseError(e2));
+      showFieldError(err, `❌ ${formatFirebaseError(e2)}`);
       setBusy(btn, false);
     }
   });
@@ -695,51 +848,45 @@ function showStationForm(station) {
 
 async function deleteStation(station) {
   if (!station || !can('station.delete')) {
-    toast(denyReason('station.delete'), 'error');
+    toastError(denyReason('station.delete'));
     return;
   }
-  const ok = await confirmDialog({
-    title: 'Delete station?',
-    message: `“${station.name}” will be removed from the station list. Its rates, pumps and shift records stay in Firestore and are no longer reachable from the app.`,
-    confirmLabel: 'Delete station',
-    danger: true,
-  });
+  const ok = await confirmDelete(`“${station.name}” will be removed from the station list. Its rates, pumps and shift records stay in Firestore and are no longer reachable from the app.`);
   if (!ok) return;
 
   try {
     await deleteDoc(doc(getDb(), 'stations', station.id));
     invalidateStations();
-    toast('Station deleted.', 'success');
+    toastSuccess('Station Deleted');
     window.dispatchEvent(new CustomEvent('pumplog:stationsChanged', { detail: { stationId: null } }));
   } catch (err) {
-    console.error('Delete station error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
   }
 }
 
-// ── User create / edit ──────────────────────────────────────────────────
+// ═══════════════════════════════════════════════════════════════════════
+//  User create / edit
+// ═══════════════════════════════════════════════════════════════════════
 async function showUserForm(user) {
   const isEdit = !!user;
   const me = getCurrentUserData();
 
   if (isEdit && !can('user.update', { target: user })) {
-    toast(denyReason('user.update', { target: user }), 'error');
+    toastError(denyReason('user.update', { target: user }));
     return;
   }
   if (!isEdit && !can('user.create')) {
-    toast(denyReason('user.create'), 'error');
+    toastError(denyReason('user.create'));
     return;
   }
 
-  // Super Admin may assign any station; Station Admin only their own.
   const stations = isSuperAdmin() ? await getAllStations() : await getStationsByIds(me.stationIds || []);
   const roles = assignableRoles();
   const assigned = new Set(user?.stationIds || []);
 
-  // Keep the current role selectable even if it is not otherwise assignable.
   const roleList = isEdit && !roles.includes(user.role) ? [user.role, ...roles] : roles;
   const roleOptions = roleList.map(r =>
-    `<option value="${r}" ${user?.role === r ? 'selected' : ''}>${ROLES[r] || r}</option>`
+    `<option value="${r}" ${(user?.role || 'staff') === r ? 'selected' : ''}>${ROLES[r] || r}</option>`
   ).join('');
 
   const stationBoxes = stations.length
@@ -750,35 +897,79 @@ async function showUserForm(user) {
         </div>`).join('')
     : '<p class="muted-note">No stations available to assign yet.</p>';
 
-  const credentialFields = isEdit ? `
-    <div class="field">
-      <label>${user.role === 'staff' ? 'Full name' : 'Email'}</label>
-      <input type="text" value="${h(user.role === 'staff' ? (user.fullName || user.username || '') : (user.email || ''))}" disabled />
-      <small class="hint">Identity credentials are managed by the secure account flow.</small>
+  const identityFields = isEdit ? `
+    <div class="form-row">
+      <div class="field"><label for="user-first-name">First name</label>
+        <input type="text" id="user-first-name" maxlength="50" autocomplete="off" value="${h(user.firstName || (user.fullName || '').split(' ')[0] || '')}" required /></div>
+      <div class="field"><label for="user-last-name">Last name</label>
+        <input type="text" id="user-last-name" maxlength="50" autocomplete="off" value="${h(user.lastName || (user.fullName || '').split(' ').slice(1).join(' ') || '')}" required /></div>
     </div>
+    <div class="form-row">
+      <div class="field"><label>Username</label>
+        <input type="text" value="${h(user.username || '—')}" disabled />
+        <small class="hint">Usernames cannot change after creation.</small></div>
+      <div class="field"><label>Email</label>
+        <input type="text" value="${h(user.email || '—')}" disabled />
+        <small class="hint">Emails are managed by Firebase Authentication.</small></div>
+    </div>
+    <div class="form-row">
+      <div class="field"><label for="user-phone">Phone <span class="optional">(optional)</span></label>
+        <input type="tel" id="user-phone" autocomplete="off" inputmode="tel" value="${h(user.phoneNumber || '')}" /></div>
+      <div class="field"><label for="user-employee-id">Employee ID <span class="optional">(optional)</span></label>
+        <input type="text" id="user-employee-id" maxlength="40" autocomplete="off" value="${h(user.employeeId || '')}" /></div>
+    </div>
+    <div class="field"><label for="user-avatar">Avatar URL <span class="optional">(optional, https)</span></label>
+      <input type="url" id="user-avatar" placeholder="https://…" autocomplete="off" value="${h(user.avatarUrl || '')}" /></div>
   ` : `
-    <div id="credential-fields"></div>
+    <div class="form-row">
+      <div class="field"><label for="user-first-name">First name</label>
+        <input type="text" id="user-first-name" maxlength="50" autocomplete="off" required /></div>
+      <div class="field"><label for="user-last-name">Last name</label>
+        <input type="text" id="user-last-name" maxlength="50" autocomplete="off" required /></div>
+    </div>
+    <div class="form-row">
+      <div class="field"><label for="user-username">Username</label>
+        <input type="text" id="user-username" placeholder="e.g. ravi.k" minlength="4" maxlength="16" pattern="[a-zA-Z0-9_.]+" autocomplete="off" autocapitalize="off" spellcheck="false" required />
+        <small id="username-status" class="hint">4–16 characters: letters, numbers, underscore, or dot.</small></div>
+      <div class="field"><label for="user-email">Email</label>
+        <input type="email" id="user-email" placeholder="name@example.com" autocomplete="off" autocapitalize="off" spellcheck="false" required /></div>
+    </div>
+    <div class="form-row">
+      <div class="field"><label for="user-phone">Phone <span class="optional">(optional)</span></label>
+        <input type="tel" id="user-phone" autocomplete="off" inputmode="tel" /></div>
+      <div class="field"><label for="user-employee-id">Employee ID <span class="optional">(optional)</span></label>
+        <input type="text" id="user-employee-id" maxlength="40" autocomplete="off" /></div>
+    </div>
+    <div class="field"><label for="user-avatar">Avatar URL <span class="optional">(optional, https)</span></label>
+      <input type="url" id="user-avatar" placeholder="https://…" autocomplete="off" /></div>
+    <div class="form-row">
+      <div class="field"><label for="user-temp-password">Temporary password</label>
+        <input type="text" id="user-temp-password" autocomplete="off" required />
+        <small id="password-policy-hint" class="hint"></small></div>
+      <div class="field"><label for="user-temp-pin">Temporary Cloud PIN</label>
+        <input type="text" id="user-temp-pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="off" required />
+        <small id="pin-policy-hint" class="hint"></small></div>
+    </div>
+    <div class="settings-group user-options">
+      <label class="toggle-row"><span class="toggle-text">Must change password on first login</span><input type="checkbox" id="user-must-change-password" class="toggle-input" role="switch" checked /></label>
+      <label class="toggle-row"><span class="toggle-text">Must change Cloud PIN on first login</span><input type="checkbox" id="user-must-change-pin" class="toggle-input" role="switch" checked /></label>
+      <label class="toggle-row"><span class="toggle-text">Active<small>Inactive accounts cannot sign in.</small></span><input type="checkbox" id="user-active" class="toggle-input" role="switch" checked /></label>
+      <label class="toggle-row"><span class="toggle-text">Allow PWA login<small>Block this account from the installed app.</small></span><input type="checkbox" id="user-allow-pwa" class="toggle-input" role="switch" checked /></label>
+    </div>
   `;
-  const legacyCredentialFields = `
-    <div class="field"><label for="new-email">Email</label>
-      <input type="email" id="new-email" placeholder="admin@example.com" required autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
-    <div class="field"><label for="new-password">Temporary password</label>
-      <input type="password" id="new-password" placeholder="At least 6 characters" minlength="6" required autocomplete="new-password" /></div>`;
-  const staffCredentialFields = `
-    <div class="field"><label for="new-full-name">Full name</label>
-      <input type="text" id="new-full-name" placeholder="e.g. John Smith" maxlength="80" required autocomplete="name" /></div>
-    <div class="field"><label for="new-username">Username</label>
-      <input type="text" id="new-username" placeholder="john.smith" minlength="4" maxlength="6" pattern="[a-zA-Z0-9_.]+" required autocomplete="username" autocapitalize="off" spellcheck="false" />
-      <small id="username-status" class="hint">4–6 characters: letters, numbers, underscore, or dot.</small></div>
-    <div class="field"><label for="new-phone">Phone number <span class="optional">(optional)</span></label>
-      <input type="tel" id="new-phone" placeholder="+1 555 123 4567" autocomplete="tel" inputmode="tel" /></div>`;
 
-  showFormModal(isEdit ? 'Edit team member' : 'Add team member', `
+  const editOptions = isEdit ? `
+    <div class="settings-group user-options">
+      <label class="toggle-row"><span class="toggle-text">Active<small>Inactive accounts cannot sign in.</small></span><input type="checkbox" id="user-active" class="toggle-input" role="switch" ${user.status === 'disabled' ? '' : 'checked'} ${user.role === 'superadmin' ? 'disabled' : ''} /></label>
+      <label class="toggle-row"><span class="toggle-text">Allow PWA login</span><input type="checkbox" id="user-allow-pwa" class="toggle-input" role="switch" ${user.pwaLoginAllowed === false ? '' : 'checked'} /></label>
+    </div>` : '';
+
+  showFormModal(isEdit ? `Edit — ${user.fullName || user.email || user.username}` : 'Add team member', `
     <form id="user-form" novalidate>
-      ${credentialFields}
+      ${identityFields}
       <div class="field">
-        <label for="new-role">Role</label>
-        <select id="new-role" required ${roleList.length <= 1 ? 'data-single="1"' : ''}>${roleOptions}</select>
+        <label for="user-role">Role</label>
+        <select id="user-role" required>${roleOptions}</select>
       </div>
       <fieldset class="field">
         <legend>Assign to stations</legend>
@@ -790,50 +981,72 @@ async function showUserForm(user) {
         <div class="pump-assign-list" id="pump-assign-list"></div>
         <small class="hint" id="pump-assign-hint"></small>
       </fieldset>
+      ${editOptions}
       <p class="form-error hidden" id="user-form-error" role="alert"></p>
-      <button type="submit" class="btn btn-primary btn-full">${isEdit ? 'Save changes' : 'Create account'}</button>
+      <button type="submit" class="btn btn-primary btn-full">${isEdit ? `Save ${ICONS.save}` : `${ICONS.add} Create user`}</button>
     </form>
   `);
 
-  // Super Admins implicitly see every station, so hide the picker for them.
-  const roleSelect = byId('new-role');
-  const credentialHost = byId('credential-fields');
+  const roleSelect = byId('user-role');
+  const list = byId('station-assign-list');
+  const hint = byId('role-station-hint');
+  const checkedStationIds = () =>
+    Array.from(list.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+
+  // ── Username availability (create only) ─────────────────────────────
   let usernameCheckTimer = null;
-  function wireUsernameCheck() {
-    const input = byId('new-username');
+  const usernameInput = byId('user-username');
+  if (usernameInput) {
     const status = byId('username-status');
-    if (!input || !status) return;
-    input.addEventListener('input', () => {
-      const username = input.value.trim().toLowerCase();
-      input.value = username;
-      status.className = 'hint';
-      status.textContent = username.length < 4 ? '4–6 characters: letters, numbers, underscore, or dot.' : 'Checking availability…';
-      input.dataset.available = 'false';
+    usernameInput.addEventListener('input', () => {
+      const username = usernameInput.value.trim().toLowerCase();
+      usernameInput.value = username;
+      usernameInput.dataset.available = 'false';
       clearTimeout(usernameCheckTimer);
-      if (username.length < 4) return;
+      if (!isValidUsername(username)) {
+        status.className = 'hint';
+        status.textContent = '4–16 characters: letters, numbers, underscore, or dot.';
+        return;
+      }
+      status.className = 'hint';
+      status.textContent = 'Checking availability…';
       usernameCheckTimer = setTimeout(async () => {
         try {
           const result = await checkUsername(username);
-          input.dataset.available = String(result.available);
+          usernameInput.dataset.available = String(!!result.available);
           status.textContent = result.available ? '✓ Username available' : '✕ Username already exists';
-          status.classList.toggle('validation-success', result.available);
+          status.classList.toggle('validation-success', !!result.available);
           status.classList.toggle('validation-error', !result.available);
         } catch (error) {
-          input.dataset.available = 'false';
           status.textContent = formatFirebaseError(error);
           status.classList.add('validation-error');
         }
       }, 280);
     });
   }
-  function syncCredentialFields() {
-    if (!credentialHost) return;
-    const staffRole = roleSelect.value === 'staff';
-    credentialHost.innerHTML = staffRole ? staffCredentialFields : legacyCredentialFields;
-    if (staffRole) wireUsernameCheck();
+
+  // ── Policy hints follow the ticked stations (strictest wins) ─────────
+  const policyCache = new Map();
+  async function policyForSelection() {
+    const ids = checkedStationIds();
+    if (!ids.length) return { ...DEFAULT_SECURITY };
+    const missing = ids.filter(id => !policyCache.has(id));
+    await Promise.all(missing.map(async id => policyCache.set(id, await getSecuritySettings(id).catch(() => ({ ...DEFAULT_SECURITY })))));
+    return mergeSecurity(ids.map(id => policyCache.get(id)));
   }
-  const hint = byId('role-station-hint');
-  const list = byId('station-assign-list');
+  async function refreshPolicyHints() {
+    const passwordHint = byId('password-policy-hint');
+    const pinHint = byId('pin-policy-hint');
+    if (!passwordHint && !pinHint) return;
+    const policy = await policyForSelection();
+    if (passwordHint) {
+      passwordHint.textContent = `Min ${policy.minPasswordLength} characters${policy.passwordComplexity === 'lettersNumbers' ? ', letters + numbers' : policy.passwordComplexity === 'strong' ? ', upper + lower + number + symbol' : ''}.`;
+    }
+    if (pinHint) {
+      pinHint.textContent = `${policy.minPinLength}–8 digits${policy.pinComplexity === 'standard' ? ', no repeats or sequences' : ''}.`;
+    }
+  }
+
   function syncStationPicker() {
     const isSuper = roleSelect.value === 'superadmin';
     list.classList.toggle('is-disabled', isSuper);
@@ -841,23 +1054,18 @@ async function showUserForm(user) {
     hint.textContent = isSuper
       ? 'Super Admins have access to every station automatically.'
       : 'Staff and Station Admins see only the stations you tick.';
+    refreshPolicyHints();
   }
   roleSelect.addEventListener('change', syncStationPicker);
-  roleSelect.addEventListener('change', syncCredentialFields);
   syncStationPicker();
-  if (!isEdit) syncCredentialFields();
+  refreshPolicyHints();
 
-  // ── Pump assignment picker ────────────────────────────────────────────
-  // Ticked pumps are the ONLY pumps a staff member sees at login. Leaving
-  // everything unticked means "all pumps at the assigned stations".
+  // ── Pump assignment picker ──────────────────────────────────────────
   const pumpFieldset = byId('pump-assign-fieldset');
   const pumpList = byId('pump-assign-list');
   const pumpHint = byId('pump-assign-hint');
   const selectedPumps = new Set(user?.pumpIds || []);
-  const stationPumps = new Map(); // stationId -> pumps[] (loaded on demand)
-
-  const checkedStationIds = () =>
-    Array.from(list.querySelectorAll('input[type="checkbox"]:checked')).map(cb => cb.value);
+  const stationPumps = new Map();
 
   async function loadStationPumps(stationId) {
     if (!stationPumps.has(stationId)) {
@@ -872,7 +1080,7 @@ async function showUserForm(user) {
     if (!isEdit) {
       pumpFieldset.hidden = true;
       pumpList.innerHTML = '';
-      pumpHint.textContent = 'Assign pumps after the staff member activates their account.';
+      pumpHint.textContent = 'Assign pumps after the account is created.';
       return;
     }
     pumpFieldset.hidden = false;
@@ -893,7 +1101,6 @@ async function showUserForm(user) {
     pumpHint.textContent = 'Loading pumps…';
     await Promise.all(ids.map(loadStationPumps));
 
-    // Ticked pumps belonging to stations that were just unticked no longer apply.
     const validIds = new Set(ids.flatMap(id => (stationPumps.get(id) || []).map(p => p.id)));
     for (const pid of [...selectedPumps]) {
       if (!validIds.has(pid)) selectedPumps.delete(pid);
@@ -922,209 +1129,311 @@ async function showUserForm(user) {
   }
 
   list.addEventListener('change', (e) => {
-    if (e.target.matches('input[type="checkbox"]')) refreshPumpPicker();
+    if (e.target.matches('input[type="checkbox"]')) {
+      refreshPumpPicker();
+      refreshPolicyHints();
+    }
   });
   roleSelect.addEventListener('change', refreshPumpPicker);
   await refreshPumpPicker();
 
+  // ── Submit ──────────────────────────────────────────────────────────
   byId('user-form').addEventListener('submit', async (e) => {
     e.preventDefault();
     const btn = e.currentTarget.querySelector('button[type="submit"]');
     const err = byId('user-form-error');
+    const failInline = message => { showFieldError(err, message); setBusy(btn, false); };
     const role = roleSelect.value;
     const stationIds = Array.from(
-      document.querySelectorAll('#station-assign-list input[type="checkbox"]:checked')
+      list.querySelectorAll('input[type="checkbox"]:checked')
     ).map(cb => cb.value);
-    // Pump assignments apply to staff only; everyone else sees every pump.
     const pumpIds = role === 'staff' ? [...selectedPumps] : [];
+    const active = byId('user-active')?.checked !== false;
+    const allowPwaLogin = byId('user-allow-pwa')?.checked !== false;
 
     if (role !== 'superadmin' && stationIds.length === 0) {
-      return showFieldError(err, 'Assign at least one station, or the account will not see any data.');
+      return showFieldError(err, '❌ Assign at least one station, or the account will not see any data.');
     }
 
+    const firstName = byId('user-first-name').value.trim();
+    const lastName = byId('user-last-name').value.trim();
+    if (!firstName || !lastName) return showFieldError(err, '❌ Enter both first and last name.');
+
     err.classList.add('hidden');
-    setBusy(btn, true, isEdit ? 'Saving…' : 'Creating account…');
+
+    if (isEdit) {
+      const ok = await confirmSave(`${firstName} ${lastName}'s profile`);
+      if (!ok) return;
+      setBusy(btn, true, 'Saving…');
+    } else {
+      setBusy(btn, true, 'Creating account…');
+    }
 
     try {
       if (isEdit) {
-        await updateUserAsAdmin(user, {
+        await updateUserAccount(user.id, {
+          firstName,
+          lastName,
+          phoneNumber: byId('user-phone').value.trim(),
+          employeeId: byId('user-employee-id').value.trim(),
+          avatarUrl: byId('user-avatar').value.trim(),
           role,
           stationIds: role === 'superadmin' ? [] : stationIds,
           pumpIds,
+          active,
+          allowPwaLogin,
         });
         invalidateUsers();
         closeModal('generic-modal');
-        toast(`${user.email} updated.`, 'success');
-      } else if (role === 'staff') {
-        const fullName = byId('new-full-name').value.trim();
-        const username = byId('new-username').value.trim().toLowerCase();
-        const phoneNumber = byId('new-phone').value.trim();
-        if (!fullName) return failInline(err, btn, 'Enter the staff member’s full name.');
-        if (!/^[a-z0-9_.]{4,6}$/.test(username)) return failInline(err, btn, 'Username must be 4–6 characters using letters, numbers, underscore, or dot.');
-        const availability = await checkUsername(username);
-        if (!availability.available) return failInline(err, btn, 'That username is already in use. Choose another.');
-        const result = await createStaff({ fullName, username, phoneNumber, stationIds });
-        invalidateUsers();
-        closeModal('generic-modal');
-        showStaffCreated(result);
+        toastSuccess('User Updated');
+        rerender();
       } else {
-        const email = byId('new-email').value.trim();
-        const password = byId('new-password').value;
-        if (!email) return failInline(err, btn, 'Enter an email address.');
-        if (password.length < 6) return failInline(err, btn, 'Password must be at least 6 characters.');
+        const username = byId('user-username').value.trim().toLowerCase();
+        const email = byId('user-email').value.trim().toLowerCase();
+        const phoneNumber = byId('user-phone').value.trim();
+        const employeeId = byId('user-employee-id').value.trim();
+        const avatarUrl = byId('user-avatar').value.trim();
+        const temporaryPassword = byId('user-temp-password').value;
+        const temporaryCloudPin = byId('user-temp-pin').value;
 
-        await createUserAsAdmin(email, password, role, role === 'superadmin' ? [] : stationIds, pumpIds);
+        if (!isValidUsername(username)) return failInline('❌ Validation failed — username must be 4–16 characters using letters, numbers, underscore, or dot.');
+        if (!isValidEmail(email)) return failInline('❌ Validation failed — enter a valid email address.');
+        if (usernameInput?.dataset.available === 'false' && username.length >= 4) {
+          return failInline('❌ Wait for the username availability check, or choose another username.');
+        }
+        const policy = await policyForSelection();
+        const passwordError = validatePasswordPolicy(temporaryPassword, policy);
+        if (passwordError) return failInline(passwordError);
+        if (temporaryPassword.length < 6) return failInline('❌ Password must be at least 6 characters (Firebase Authentication minimum).');
+        const pinError = validateCloudPinPolicy(temporaryCloudPin, policy);
+        if (pinError) return failInline(pinError);
+
+        const result = await createUserAccount({
+          firstName,
+          lastName,
+          username,
+          email,
+          role,
+          stationIds: role === 'superadmin' ? [] : stationIds,
+          pumpIds,
+          temporaryPassword,
+          temporaryCloudPin,
+          phoneNumber,
+          employeeId,
+          avatarUrl,
+          mustChangePassword: byId('user-must-change-password')?.checked !== false,
+          mustChangePin: byId('user-must-change-pin')?.checked !== false,
+          active,
+          allowPwaLogin,
+        });
         invalidateUsers();
         closeModal('generic-modal');
-        toast(`Account created for ${email}.`, 'success');
+        toastSuccess('User Created');
+        showUserCreated(result, { temporaryPassword, temporaryCloudPin });
+        rerender();
       }
-      if (role !== 'staff') rerender();
     } catch (e2) {
-      console.error('User save error:', e2);
-      showFieldError(err, formatFirebaseError(e2));
+      showFieldError(err, `❌ ${formatFirebaseError(e2)}`);
       setBusy(btn, false);
     }
   });
 }
 
-async function createStationAdminInvite() {
-  const ok = await confirmDialog({
-    title: 'Invite a Station Admin?',
-    message: 'A one-time 10-digit invite will be generated. Share it privately; the invite expires in 30 days and is usable once.',
-    confirmLabel: 'Generate invite',
-  });
-  if (!ok) return;
-  try {
-    const result = await createAdminInvite(30);
-    byId('modal-title').textContent = 'Station Admin invite created';
-    byId('modal-body').innerHTML = `<div class="staff-created-success"><div class="success-check" aria-hidden="true">✓</div><h3>Share this code privately</h3><p class="muted-note">The new Station Admin will create their name, 4–6 character username, phone, and 4-digit PIN when they join.</p><div class="admin-invite-code"><output>${h(result.joiningCode)}</output><small>Expires in ${h(result.expiresInDays)} days · shown once</small></div><button type="button" id="copy-admin-invite" class="btn btn-primary btn-full">Copy 10-digit invite</button></div>`;
-    openModal('generic-modal');
-    byId('copy-admin-invite')?.addEventListener('click', async event => {
-      try { await navigator.clipboard.writeText(result.joiningCode); setBusy(event.currentTarget, true, 'Copied'); setTimeout(() => setBusy(event.currentTarget, false), 1200); }
-      catch { toast('Copy failed — write the invite down before closing.', 'error'); }
-    });
-  } catch (error) {
-    toast(formatFirebaseError(error), 'error');
-  }
-}
-
-async function prepareExistingAccounts() {
-  const ok = await confirmDialog({
-    title: 'Prepare existing accounts?',
-    message: 'This generates usernames and one-time joining codes for existing accounts that do not yet have a secure PIN identity. Existing email/password access is not deleted.',
-    confirmLabel: 'Prepare accounts',
-  });
-  if (!ok) return;
-  try {
-    const result = await prepareLegacyUsers();
-    if (!result.migrated?.length) {
-      toast('All visible accounts already have a username and PIN.', 'info');
-      return;
-    }
-    byId('modal-title').textContent = 'Accounts prepared';
-    byId('modal-body').innerHTML = `<div class="staff-created-success"><div class="success-check" aria-hidden="true">✓</div><h3>Share each joining code privately</h3><p class="muted-note">These codes are shown once. Each person creates a new 4-digit PIN when they join.</p><div class="migration-code-list">${result.migrated.map(item => `<div class="migration-code-row"><span><strong>${h(item.fullName)}</strong><small>${h(item.username)}</small></span><output>${h(item.joiningCode)}</output><button type="button" class="icon-btn copy-migration-code" data-code="${h(item.joiningCode)}" aria-label="Copy joining code for ${h(item.fullName)}">⧉</button></div>`).join('')}</div></div>`;
-    openModal('generic-modal');
-    document.querySelectorAll('.copy-migration-code').forEach(button => button.addEventListener('click', async () => {
-      try { await navigator.clipboard.writeText(button.dataset.code); toast('Joining code copied.', 'success', 1800); }
-      catch { toast('Copy failed — write the code down before closing.', 'error'); }
-    }));
-    invalidateUsers();
-    rerender();
-  } catch (error) {
-    toast(formatFirebaseError(error), 'error');
-  }
-}
-
-function showStaffCreated(result) {
-  const reset = result.isReset === true;
-  byId('modal-title').textContent = reset ? 'PIN reset code generated' : 'Staff created successfully';
+function showUserCreated(result, credentials) {
+  byId('modal-title').textContent = '✅ User Created';
   byId('modal-body').innerHTML = `<div class="staff-created-success">
-    <div class="success-check" aria-hidden="true">✓</div><h3>Share this joining code with ${h(result.fullName || 'the staff member')}</h3>
-    <p class="muted-note">The code is shown once. ${reset ? 'Their previous PIN no longer works.' : 'They will create their own 4-digit PIN when they join.'}</p>
-    <dl class="staff-created-details"><dt>Name</dt><dd>${h(result.fullName)}</dd><dt>Username</dt><dd>${h(result.username)}</dd><dt>Joining code</dt><dd><output id="created-joining-code">${h(result.joiningCode)}</output></dd></dl>
-    <div class="confirm-actions"><button type="button" id="copy-joining-code" class="btn btn-secondary btn-full">Copy code</button><button type="button" id="create-another-staff" class="btn btn-primary btn-full">Create another</button></div>
+    <div class="success-check" aria-hidden="true">✓</div>
+    <h3>Share these credentials privately</h3>
+    <p class="muted-note">${h(result.fullName)} signs in with the details below
+      ${result.mustChangePassword || result.mustChangePin ? ' and will be asked to create their own on first login.' : '.'}
+      This is the only time the temporary credentials are shown.</p>
+    <dl class="staff-created-details credentials-details">
+      <dt>Name</dt><dd>${h(result.fullName)}</dd>
+      <dt>Username</dt><dd>${h(result.username)}</dd>
+      <dt>Email</dt><dd>${h(result.email)}</dd>
+      <dt>Role</dt><dd>${h(ROLES[result.role] || result.role)}</dd>
+      <dt>Temporary password</dt><dd><output>${h(credentials.temporaryPassword)}</output></dd>
+      <dt>Temporary Cloud PIN</dt><dd><output>${h(credentials.temporaryCloudPin)}</output></dd>
+    </dl>
+    <div class="confirm-actions">
+      <button type="button" id="copy-user-credentials" class="btn btn-secondary btn-full">Copy credentials</button>
+      <button type="button" id="create-another-user" class="btn btn-primary btn-full">${ICONS.add} Create another</button>
+    </div>
   </div>`;
   openModal('generic-modal');
-  byId('copy-joining-code')?.addEventListener('click', async event => {
+
+  byId('copy-user-credentials')?.addEventListener('click', async event => {
+    const text = [
+      `PumpLog account for ${result.fullName}`,
+      `Sign in: ${result.email} or username ${result.username}`,
+      `Temporary password: ${credentials.temporaryPassword}`,
+      `Temporary Cloud PIN: ${credentials.temporaryCloudPin}`,
+      'You will be asked to create your own on first login.',
+    ].join('\n');
     try {
-      await navigator.clipboard.writeText(result.joiningCode);
-      setBusy(event.currentTarget, true, 'Copied');
-      setTimeout(() => setBusy(event.currentTarget, false), 1200);
-    } catch { toast('Copy failed — write the code down before closing.', 'error'); }
+      await navigator.clipboard.writeText(text);
+      setBusy(event.currentTarget, true, 'Copied ✅');
+      setTimeout(() => setBusy(event.currentTarget, false), 1400);
+    } catch {
+      toastError('Copy failed — write the credentials down before closing.');
+    }
   });
-  byId('create-another-staff')?.addEventListener('click', async () => {
+  byId('create-another-user')?.addEventListener('click', async () => {
     closeModal('generic-modal');
     await showUserForm(null);
   });
 }
 
-async function resetStaffPinForUser(user) {
+// ── Credential resets for existing users ────────────────────────────────
+async function showCredentialsForm(user) {
   if (!user || !can('user.update', { target: user })) {
-    toast(denyReason('user.update', { target: user }), 'error');
+    toastError(denyReason('user.update', { target: user }));
     return;
   }
+  const policy = await mergeSecurity(await Promise.all(
+    (user.stationIds || []).map(id => getSecuritySettings(id).catch(() => ({ ...DEFAULT_SECURITY })))
+  ));
+  const hasEmail = !!user.email;
+  showFormModal(`Reset credentials — ${user.fullName || user.username || user.email || 'user'}`, `
+    <p class="modal-intro">New temporary credentials take effect immediately. Share them privately — they are shown only here.</p>
+    <div class="settings-group">
+      <h4 class="settings-group-title">${ICONS.key} Temporary password</h4>
+      ${hasEmail ? `
+      <div class="field"><label for="reset-password">New temporary password</label>
+        <input type="text" id="reset-password" autocomplete="off" />
+        <small class="hint">Min ${policy.minPasswordLength} characters${policy.passwordComplexity === 'lettersNumbers' ? ', letters + numbers' : policy.passwordComplexity === 'strong' ? ', upper + lower + number + symbol' : ''}.</small></div>
+      <label class="toggle-row"><span class="toggle-text">Must change password on next login</span><input type="checkbox" id="reset-password-must-change" class="toggle-input" role="switch" checked /></label>
+      <button type="button" id="do-reset-password" class="btn btn-secondary btn-full">${ICONS.key} Set temporary password</button>` : `
+      <p class="muted-note">This username-only account has no email credential. Add an email first, or reset the Cloud PIN below.</p>`}
+    </div>
+    <div class="settings-group">
+      <h4 class="settings-group-title">${ICONS.pin} Temporary Cloud PIN</h4>
+      <div class="field"><label for="reset-pin">New temporary Cloud PIN</label>
+        <input type="text" id="reset-pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="off" />
+        <small class="hint">${policy.minPinLength}–8 digits${policy.pinComplexity === 'standard' ? ', no repeats or sequences' : ''}.</small></div>
+      <label class="toggle-row"><span class="toggle-text">Must change Cloud PIN on next login</span><input type="checkbox" id="reset-pin-must-change" class="toggle-input" role="switch" checked /></label>
+      <button type="button" id="do-reset-pin" class="btn btn-secondary btn-full">${ICONS.pin} Set temporary Cloud PIN</button>
+    </div>
+    <p id="credentials-error" class="form-error hidden" role="alert"></p>
+  `);
+
+  onClick('do-reset-password', async event => {
+    const button = event.currentTarget;
+    const password = byId('reset-password').value;
+    const invalid = validatePasswordPolicy(password, policy);
+    if (invalid) return showFieldError(byId('credentials-error'), invalid);
+    if (password.length < 6) return showFieldError(byId('credentials-error'), '❌ Password must be at least 6 characters (Firebase Authentication minimum).');
+    const ok = await confirmSave(`a new temporary password for ${user.fullName || user.email}`);
+    if (!ok) return;
+    setBusy(button, true, 'Saving…');
+    try {
+      await adminSetPassword(user.id, password, byId('reset-password-must-change').checked);
+      showFieldError(byId('credentials-error'), '');
+      byId('credentials-error').classList.add('hidden');
+      toastSuccess('Temporary Password Set');
+      setBusy(button, false);
+    } catch (err) {
+      showFieldError(byId('credentials-error'), `❌ ${formatFirebaseError(err)}`);
+      setBusy(button, false);
+    }
+  });
+
+  onClick('do-reset-pin', async event => {
+    const button = event.currentTarget;
+    const pin = byId('reset-pin').value;
+    const invalid = validateCloudPinPolicy(pin, policy);
+    if (invalid) return showFieldError(byId('credentials-error'), invalid);
+    const ok = await confirmSave(`a new temporary Cloud PIN for ${user.fullName || user.email || user.username}`);
+    if (!ok) return;
+    setBusy(button, true, 'Saving…');
+    try {
+      await adminSetPin(user.id, pin, byId('reset-pin-must-change').checked);
+      byId('credentials-error').classList.add('hidden');
+      toastSuccess('Temporary Cloud PIN Set');
+      setBusy(button, false);
+    } catch (err) {
+      showFieldError(byId('credentials-error'), `❌ ${formatFirebaseError(err)}`);
+      setBusy(button, false);
+    }
+  });
+}
+
+async function deactivateUser(user) {
+  if (!user || !can('user.delete', { target: user })) {
+    toastError(denyReason('user.delete', { target: user }));
+    return;
+  }
+  const name = user.fullName || user.email || user.username || 'This user';
   const ok = await confirmDialog({
-    title: 'Reset PIN?',
-    message: `Reset ${user.fullName || user.email || user.username || 'this staff member'}’s PIN? A new temporary joining code will be generated and their current PIN will stop working.`,
-    confirmLabel: 'Reset PIN',
+    title: `${ICONS.warning} Deactivate Account`,
+    message: `${name} will immediately lose access to PumpLog. History and assignments stay for audit. You can reactivate the account later.`,
+    confirmLabel: 'Deactivate ⏸️',
     danger: true,
   });
   if (!ok) return;
   try {
-    const result = await resetStaffPin(user.id);
-    showStaffCreated({ ...result, isReset: true, fullName: result.fullName || user.fullName || user.email });
+    await deactivateUserAccount(user.id);
     invalidateUsers();
-  } catch (error) {
-    console.error('PIN reset error:', error);
-    toast(formatFirebaseError(error), 'error');
+    toastSuccess('User Deactivated');
+    rerender();
+  } catch (err) {
+    toastError(formatFirebaseError(err));
   }
 }
 
-async function disableStaffUser(user) {
-  if (!user || !can('user.delete', { target: user })) {
-    toast(denyReason('user.delete', { target: user }), 'error');
+async function activateUser(user) {
+  if (!user || !can('user.update', { target: user })) {
+    toastError(denyReason('user.update', { target: user }));
     return;
   }
-  const ok = await confirmDialog({
-    title: 'Disable staff account?',
-    message: `${user.fullName || user.username || 'This staff member'} will be unable to sign in. Existing history and pump assignments will remain for audit purposes.`,
-    confirmLabel: 'Disable account',
-    danger: true,
-  });
-  if (!ok) return;
   try {
-    await disableStaff(user.id);
+    await updateUserAccount(user.id, { active: true });
     invalidateUsers();
-    toast('Staff account disabled.', 'success');
+    toastSuccess('User Activated');
     rerender();
-  } catch (error) {
-    console.error('Disable staff error:', error);
-    toast(formatFirebaseError(error), 'error');
+  } catch (err) {
+    toastError(formatFirebaseError(err));
   }
 }
 
 async function removeUser(user) {
   if (!user || !can('user.delete', { target: user })) {
-    toast(denyReason('user.delete', { target: user }), 'error');
+    toastError(denyReason('user.delete', { target: user }));
     return;
   }
-
-  const ok = await confirmDialog({
-    title: 'Remove access?',
-    message: `${user.email} will immediately lose all access to PumpLog. Their sign-in credential stays in Firebase Authentication — delete it there too if you want the login removed completely.`,
-    confirmLabel: 'Remove access',
-    danger: true,
-  });
+  const name = user.fullName || user.email || user.username || 'this user';
+  const ok = await confirmDelete(`${name} will permanently lose access. Their profile, secure identity, and sign-in credential will be deleted. Past shift records stay for audit.`);
   if (!ok) return;
 
   try {
-    await deleteUserAsAdmin(user);
+    await removeUserAccount(user.id);
     invalidateUsers();
-    toast(`${user.email} removed.`, 'success');
+    toastSuccess('User Removed');
     rerender();
   } catch (err) {
-    console.error('Delete user error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
+  }
+}
+
+// ── Station Admin invite ────────────────────────────────────────────────
+async function createStationAdminInvite() {
+  const ok = await confirmDialog({
+    title: `${ICONS.users} Invite a Station Admin?`,
+    message: 'A one-time 10-digit invite will be generated. Share it privately; the invite expires in 30 days and is usable once.',
+    confirmLabel: `Generate invite ${ICONS.save}`,
+  });
+  if (!ok) return;
+  try {
+    const result = await createAdminInvite(30);
+    byId('modal-title').textContent = 'Station Admin invite created';
+    byId('modal-body').innerHTML = `<div class="staff-created-success"><div class="success-check" aria-hidden="true">✓</div><h3>Share this code privately</h3><p class="muted-note">The new Station Admin will create their name, 4–16 character username, phone, and Cloud PIN when they join.</p><div class="admin-invite-code"><output>${h(result.joiningCode)}</output><small>Expires in ${h(result.expiresInDays)} days · shown once</small></div><button type="button" id="copy-admin-invite" class="btn btn-primary btn-full">Copy 10-digit invite</button></div>`;
+    openModal('generic-modal');
+    byId('copy-admin-invite')?.addEventListener('click', async event => {
+      try { await navigator.clipboard.writeText(result.joiningCode); setBusy(event.currentTarget, true, 'Copied ✅'); setTimeout(() => setBusy(event.currentTarget, false), 1200); }
+      catch { toastError('Copy failed — write the invite down before closing.'); }
+    });
+  } catch (error) {
+    toastError(formatFirebaseError(error));
   }
 }
 
@@ -1139,9 +1448,4 @@ function showFieldError(el, message) {
   if (!el) return;
   el.textContent = message;
   el.classList.remove('hidden');
-}
-
-function failInline(err, btn, message) {
-  showFieldError(err, message);
-  setBusy(btn, false);
 }

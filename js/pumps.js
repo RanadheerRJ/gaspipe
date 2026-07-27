@@ -10,15 +10,17 @@ import {
 } from './firebase.js';
 import {
   getCurrentUserData, isSuperAdmin, isStationAdmin, can, denyReason, formatFirebaseError,
-  hasPumpRestriction, canUsePump, filterMyPumps, updateUserAsAdmin,
+  hasPumpRestriction, canUsePump, filterMyPumps,
 } from './auth.js';
+import { updateUserAccount } from './staff-auth.js';
 import {
   getPumps, getCurrentRateMap, getPumpSessions, getStaffForStation, watchPumpSessions,
   invalidateStation, invalidateUsers,
 } from './store.js';
 import {
   h, formatCurrency, formatVolume, formatDateTime, formatTimeAgo,
-  getTodayDate, openModal, closeModal, emptyState, toast, setBusy, showSkeleton,
+  getTodayDate, openModal, closeModal, emptyState, toast, toastSuccess, toastError,
+  confirmSave, setBusy, showSkeleton,
 } from './components.js';
 
 let currentStationId = null;
@@ -219,7 +221,6 @@ export async function renderPumps(stationId) {
     paintPumpBoard();
     startSessionWatch(stationId);
   } catch (err) {
-    console.error('Pumps render error:', err);
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
 }
@@ -235,7 +236,7 @@ export function openShiftForm(stationId, pump, rate, session = null) {
 
 async function openPumpAssignmentForm(stationId, pump, staff) {
   if (!isPumpManager()) {
-    toast('Only Station Admins and Super Admins can assign pumps.', 'error');
+    toastError('Only Station Admins and Super Admins can assign pumps.');
     return;
   }
   const activeSession = sessionFor(pump.id, pumpContext?.sessions || []);
@@ -261,6 +262,8 @@ async function openPumpAssignmentForm(stationId, pump, staff) {
     const button = form.querySelector('button[type="submit"]');
     const error = document.getElementById('pump-assignment-error');
     const selected = new Set(Array.from(form.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value));
+    error.classList.add('hidden');
+    if (!(await confirmSave(`the pump assignments for ${pump.name}`))) return;
     setBusy(button, true, 'Saving…');
     try {
       await Promise.all(staff.map(async user => {
@@ -269,15 +272,14 @@ async function openPumpAssignmentForm(stationId, pump, staff) {
           ? [...new Set([...current, pump.id])]
           : current.filter(id => id !== pump.id);
         if (next.length === current.length && next.every((id, index) => id === current[index])) return;
-        await updateUserAsAdmin(user, { pumpIds: next });
+        await updateUserAccount(user.id, { pumpIds: next });
       }));
       invalidateUsers();
       closeModal('generic-modal');
-      toast(`${pump.name} assignments updated.`, 'success');
+      toastSuccess('Changes Saved — pump assignments updated');
       await renderPumps(stationId);
     } catch (err) {
-      console.error('Pump assignment error:', err);
-      error.textContent = formatFirebaseError(err);
+      error.textContent = `❌ ${formatFirebaseError(err)}`;
       error.classList.remove('hidden');
       setBusy(button, false);
     }
@@ -290,7 +292,7 @@ function openClockInForm(stationId, pump, rate) {
     return;
   }
   if (!can('pumpSession.start', { stationId, pumpId: pump.id }) || !canUsePump(pump.id)) {
-    toast(canUsePump(pump.id) ? denyReason('shift.create', { stationId }) : 'This pump is not assigned to you.', 'error');
+    toastError(canUsePump(pump.id) ? denyReason('shift.create', { stationId }) : 'This pump is not assigned to you.');
     return;
   }
 
@@ -360,10 +362,9 @@ function openClockInForm(stationId, pump, rate) {
       });
       invalidateStation(stationId);
       closeModal('generic-modal');
-      toast(`Shift started on ${pump.name}.`, 'success');
+      toastSuccess(`Shift Started — ${pump.name}`);
       window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId } }));
     } catch (err) {
-      console.error('Clock-in error:', err);
       if (err.code === 'pump-active') {
         const who = err.activeName || 'another staff member';
         const when = formatDateTime(err.clockInAt) || 'just now';
@@ -379,11 +380,11 @@ function openClockInForm(stationId, pump, rate) {
 function openClockOutForm(stationId, pump, rate, session) {
   const me = getCurrentUserData();
   if (!session || session.activeUid !== me?.uid) {
-    toast('This shift is no longer assigned to you. The pump status was refreshed.', 'error');
+    toastError('This shift is no longer assigned to you. The pump status was refreshed.');
     return;
   }
   if (!can('pumpSession.end', { stationId, pumpId: pump.id, activeUid: session.activeUid })) {
-    toast(denyReason('pumpSession.end', { stationId }), 'error');
+    toastError(denyReason('pumpSession.end', { stationId }));
     return;
   }
 
@@ -494,10 +495,9 @@ function openClockOutForm(stationId, pump, rate, session) {
       invalidateStation(stationId);
       closeModal('generic-modal');
       const volume = closing - opening;
-      toast(`Shift ended — ${formatVolume(volume)} · ${formatCurrency(volume * finalRate)}`, 'success');
+      toastSuccess(`Shift Ended — ${formatVolume(volume)} · ${formatCurrency(volume * finalRate)}`);
       window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId } }));
     } catch (err) {
-      console.error('Clock-out error:', err);
       if (err.code === 'session-released') fail('This pump session is no longer yours. It may have been force-released by an admin.');
       else fail(formatFirebaseError(err));
       setBusy(button, false);

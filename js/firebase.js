@@ -15,6 +15,9 @@ import {
   signInWithCustomToken,
   createUserWithEmailAndPassword,
   signOut,
+  updatePassword,
+  reauthenticateWithCredential,
+  EmailAuthProvider,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import { getFunctions, httpsCallable } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-functions.js';
 import {
@@ -77,9 +80,8 @@ function initMainApp(config = FIREBASE_CONFIG) {
     mainDb = initializeFirestore(mainApp, {
       localCache: persistentLocalCache({ tabManager: persistentMultipleTabManager() }),
     });
-  } catch (err) {
+  } catch {
     // Private browsing / unsupported storage — fall back to memory cache.
-    console.warn('Persistent Firestore cache unavailable, using memory cache.', err);
     mainDb = getFirestore(mainApp);
   }
 
@@ -135,6 +137,9 @@ export {
   signInWithCustomToken,
   createUserWithEmailAndPassword,
   signOut,
+  updatePassword,
+  reauthenticateWithCredential,
+  EmailAuthProvider,
   collection,
   collectionGroup,
   doc,

@@ -1,10 +1,15 @@
 # PumpLog — Multi-Station Fuel Tracker PWA
 
-A lightweight, installable PWA for tracking fuel station shift readings, rates, and sales across multiple stations. Built with plain HTML/CSS/JS + ES modules — no build step required.
+A production-ready, installable PWA for tracking fuel station shift readings, rates, and sales across multiple stations. Built with plain HTML/CSS/JS + ES modules — no build step required — plus a trusted Firebase Cloud Functions identity service.
 
 ## Features
 
-- **5 pages**: Dashboard, Pumps (clock-in/out), Config (rates/pumps/stations/team), History, Reports
+- **5 pages**: Dashboard, Pumps (clock-in/out), Config (security/rates/pumps/stations/team), History, Reports
+- **Four sign-in methods, station-configurable**: Email + Cloud PIN, Username + Cloud PIN, Email + Password, Username + Password — each enabled or disabled per station from Config → Station Security
+- **Station security policies**: per-station sign-in method toggles, App Lock requirements, and credential policies (password/PIN length, complexity, PIN rotation) applied immediately to the login screen, active sessions, and the identity service
+- **Local App Lock**: an optional device-level PIN screen that locks on refresh, PWA reopen, and inactivity, with a security-question reset flow. Stored only on the device — never synced to Firebase
+- **Cloud PIN**: scrypt-hashed server-side, verifiable in real time across all of a user's devices, changeable from the Profile page, with optional forced rotation
+- **Production user management**: admins create accounts with temporary passwords and Cloud PINs; users replace them with their own on first login
 - **Live pump locks**: clocking in claims a pump session transactionally; the dashboard and Pumps page update Active/Idle state on every device within a second
 - **Report Cards**: filter by station, employee, and date range, then export the visible breakdown as CSV or print it to PDF
 - **Station data reset**: managers can delete shift history and session locks after typing the station name; configuration is preserved
@@ -12,9 +17,9 @@ A lightweight, installable PWA for tracking fuel station shift readings, rates, 
 - **Role-based access control**: Super Admin, Station Admin, Staff — enforced in Firestore rules and mirrored in the UI
 - **Per-pump staff assignment**: admins/managers assign one or more pumps to each staff account; staff see only their pumps and only their own readings
 - **Rates owned by management**: only Super Admin / Station Admin can create, edit or delete rates; staff log readings against the configured rate (read-only)
-- **Full team management**: create, edit and remove users with station assignment
+- **Audit trail**: sign-ins, sign-outs, failed PIN attempts, and every account change are recorded server-side
 - **Installable**: home-screen icon on Android and iOS, splash screen, offline app shell
-- **Fast**: ~155 KB of app assets, no webfonts, no framework, cached reads
+- **Fast**: ~160 KB of app assets, no webfonts, no framework, cached reads
 - **Accessible**: keyboard navigation, focus trapping, screen-reader labels, 44px touch targets, dark mode
 - **Offline-ready**: persistent Firestore cache + service worker app shell
 - **Refresh anywhere**: floating refresh button plus one in the top bar
@@ -29,13 +34,109 @@ Home Screen” therefore shows the PumpLog drop logo instead of a screenshot or
 generic letter tile. `icons/logo-master.png` is the clean 1024-class master the
 set is derived from, and the same logo appears on the sign-in screen.
 
+## Authentication
+
+PumpLog has three distinct credentials. Understand which is which:
+
+| Credential | Where it lives | What it does |
+|---|---|---|
+| **Password** | Firebase Authentication | Signs in (with email or username), verified by Firebase Auth on the client |
+| **Cloud PIN** (4–8 digits) | `staffSecrets/{uid}` — server only, scrypt-hashed | Sign-in alternative, verified by Cloud Functions; syncs across all devices in real time |
+| **App Lock PIN** (4–8 digits) | This device's localStorage only — PBKDF2-hashed, **never synced** | Locks the screen on this device between uses |
+
+### Sign-in methods
+
+The login screen shows a station picker followed by method tabs. Each station's
+managers choose which methods are available (Config → Station Security, saved to
+`stations/{stationId}/settings/security`):
+
+- **Email + Cloud PIN**
+- **Username + Cloud PIN**
+- **Email + Password**
+- **Username + Password** — the username is mapped to the account email by the
+  identity service; the password itself is verified by Firebase Authentication.
+
+A disabled method is both **hidden from the station's login UI** and **rejected
+by the Cloud Functions**, so the configuration cannot be bypassed from the
+browser. At least one identifier (email/username) and one secret (password/PIN)
+must stay enabled — the settings page blocks saving a combination that would
+lock everyone out.
+
+### Cloud PIN
+
+- Verified only by Cloud Functions against a per-PIN salted **scrypt** hash.
+  Hashes and salts live exclusively in `staffSecrets/{uid}`, which Firestore
+  rules deny to every client.
+- Five wrong attempts lock the PIN for 15 minutes; Firestore-backed rate
+  limiting also throttles repeated attempts per identifier.
+- Changing the PIN (Profile → Security → Cloud PIN) takes effect **immediately
+  on every device**, because verification always happens server-side.
+- Accounts are created with a **temporary Cloud PIN**; the owner must choose a
+  personal PIN at next sign-in before the app opens.
+- Stations can force **PIN rotation after N days** (0 = never). An overdue PIN
+  triggers the same mandatory change screen at the next sign-in.
+
+### Local App Lock
+
+App Lock is a **device-level screen lock**, not account authentication. It is
+enabled per station and protects a device that is left unlocked:
+
+- **Lock immediately after a browser refresh** — the lock appears before any
+  data is painted or cached content is shown.
+- **Lock after the PWA is closed and reopened** — the same boot-time check
+  applies to the installed app.
+- **Lock after inactivity** — configurable timeout (1–120 minutes); returning
+  to a backgrounded tab after the timeout also locks.
+- First-time users are offered a guided setup: PIN → security questions.
+
+The App Lock PIN and the security-question answers are PBKDF2-hashed (150k
+iterations) and stored in the browser's localStorage **only** — they are never
+sent to Firebase, never synced between devices, and disappear if site data is
+cleared. Five wrong attempts trigger a 30-second cooldown.
+
+**Forgot the App Lock PIN?** The lock screen offers a reset flow:
+_Forgot App Lock PIN → answer your security questions → create a new App Lock
+PIN_. Available questions include favorite color, favorite food, first school,
+birth month, favorite movie, and childhood nickname. Answers can be rotated any
+time from Profile → Security → Security questions.
+
+### Password lifecycle
+
+- New accounts are issued a **temporary password** by an admin. At first
+  sign-in the app forces a password change (reauthenticated against Firebase
+  Auth) before any data is shown.
+- Passwords are also changeable voluntarily from Profile → Security → Password.
+- Admins can issue a fresh temporary password from Config → Team → user →
+  Credentials, without ever seeing the user's current password.
+
+### New user onboarding
+
+Managers create accounts from **Config → Team → ➕ Add User**:
+
+- **Required**: first name, last name, username (4–16 chars, `a–z 0–9 _ .`),
+  email, role, at least one station (except Super Admin), temporary password,
+  temporary Cloud PIN.
+- **Optional**: phone number, employee ID, avatar URL, pump restrictions
+  (staff only), and the flags *must change password*, *must change Cloud PIN*,
+  *account active*, *allow PWA sign-in*.
+- The temporary credentials are shown exactly once with a copy button — share
+  them privately.
+- Editing supports the same fields plus deactivate/reactivate and permanent
+  removal. Deactivation is reversible and keeps history for audit; removal
+  deletes the profile, the secure identity, and the Firebase Auth credential.
+
+Legacy username-only staff accounts (invited before v1.0) still work: the
+"Join with code" flow and joining-code resets remain available on the login
+screen, and 10-digit Station Admin invites are unchanged.
+
 ## Firebase Setup
 
 1. **Create a Firebase project** at https://console.firebase.google.com
 2. **Enable Authentication** → Sign-in method → Email/Password
 3. **Create a Firestore database** (start in test mode, then apply rules below)
-4. **Register a web app** in Project Settings → General → Your apps → Add app → Web
-5. **Copy the config object** (apiKey, authDomain, projectId, etc.)
+4. **Enable the Blaze plan** — Cloud Functions with outbound calls require pay-as-you-go (still free within quota)
+5. **Register a web app** in Project Settings → General → Your apps → Add app → Web
+6. **Copy the config object** (apiKey, authDomain, projectId, etc.)
 
 ### Configure PumpLog
 
@@ -52,25 +153,32 @@ const FIREBASE_CONFIG = {
 };
 ```
 
-### Trusted username/PIN backend
+### Trusted identity backend (Cloud Functions)
 
-Username + PIN authentication is implemented through the separate `functions/`
-Firebase Cloud Functions service. The GitHub Pages app remains plain static HTML,
-CSS, and ES modules; Functions are the trusted server boundary for operations a
-browser cannot safely perform.
+Username + Cloud PIN authentication and all privileged account operations are
+implemented in `functions/` — Firebase Cloud Functions (Node 20, CommonJS).
+The GitHub Pages app remains plain static HTML, CSS, and ES modules; Functions
+are the trusted server boundary for operations a browser cannot safely perform.
 
 The Functions service provides:
 
-- server-side scrypt hashing with per-PIN random salts; hashes and salts live
-  only in the client-inaccessible `staffSecrets/{uid}` collection
-- unique lowercase usernames in `usernames/{username}` and one-time 5-digit
-  joining codes in `joiningCodes/{code}`
-- staff creation, code preview/activation, username/PIN sign-in, PIN change,
-  admin reset, legacy-account preparation, and login/logout audit events
-- transactional failed-attempt counters and a 15-minute lock after five bad
-  PIN attempts
-- Firebase custom-token sessions, preserving the existing UID-based Firestore
-  RBAC model
+- **Sign-in**: `loginWithUsernamePin`, `loginWithEmailPin`,
+  `resolveLoginIdentifier` (username → email mapping for password sign-in) —
+  every call re-reads the station security settings and rejects disabled
+  methods, disabled accounts, and PWA-blocked accounts.
+- **Credential lifecycle**: `getMyPinStatus` (forced-change and rotation
+  state), `changePin`, `finishPasswordSetup`, `recordLogin`, `recordLogout`.
+- **Account administration**: `createUserAccount`, `updateUserAccount`,
+  `adminSetPassword`, `adminSetPin`, `deleteUserAccount` (deactivate or
+  permanent removal). Usernames are claimed transactionally; temporary
+  Cloud PINs are scrypt-hashed before they ever touch storage.
+- **Onboarding**: `listPublicStations` (login-screen station picker),
+  `createStaff`, `previewJoiningCode`, `activateStaff`, `createAdminInvite`,
+  `previewAdminInvite`, `activateAdminInvite`, `checkUsername`.
+- **Protection**: per-identifier Firestore-backed rate limiting, five-strikes
+  15-minute PIN lockout, least-privilege target checks (a Station Admin can
+  only manage staff they created at their own stations), and audit events for
+  sign-ins, sign-outs, failures, and every account change.
 
 Install and deploy the trusted service separately (from a machine with Firebase
 CLI access):
@@ -84,38 +192,32 @@ firebase deploy --only functions
 
 `firebase.json` points Functions at `functions/` and does not add a frontend
 build step. Deploying the static GitHub Pages app alone does not deploy these
-Functions. Deploy Functions before enabling username/PIN sign-in in production.
+Functions.
 
-For the empty development project, configure the private developer bootstrap
-secret before deployment. Do not commit or share this value:
-
-```bash
-firebase functions:secrets:set PUMPLOG_DEV_BOOTSTRAP_CODE --project gass-13462
-firebase deploy --only functions --project gass-13462
-```
-
-The developer bootstrap function is restricted to the fixed developer UID
-`gVXWLjIIpXMa26kxdKuZUEGCAwj1` and the private 10-digit secret. Use the
-**Developer setup** link on the login screen, then use **Config → Security →
-Invite Station Admin** to issue a one-time 10-digit invite. Invite activation
-creates a Station Admin profile; assign its station access from the existing
-Super Admin controls before it can manage station data.
-
-Run **Config → Security → Prepare existing accounts for username + PIN** once
-as an admin, share each one-time code privately, and do not put codes in chat,
-logs, screenshots, or source control.
+> **⚠️ Mandatory for v1.0 — deploy BOTH backends.** Login-method enforcement,
+> temporary-credential forced changes, station security settings, and admin
+> user management all depend on the current Functions **and** the current
+> Firestore rules:
+>
+> 1. `firebase deploy --only functions`
+> 2. **Re-publish `firestore.rules`** in Firebase Console → Firestore Database →
+>    Rules → Publish (pushing to GitHub Pages never updates rules).
+>
+> Until both are live, the app degrades gracefully — it falls back to default
+> security policies and administrator sign-in — but the new sign-in methods,
+> App Lock policy, and Team management will not be fully enforced.
 
 ### Firestore Security Rules
 
 Copy `firestore.rules` into Firebase Console → Firestore Database → Rules → **Publish**.
 
-> **Upgrading?** This release changes the rules for transactional pump locks,
-> staff pump assignments, session deletes, station resets, and the new report
-> fields. If you deployed an older version, **manually re-publish the latest
-> `firestore.rules` in Firebase Console → Firestore Database → Rules** — pushing
-> code to GitHub Pages does not update Firestore rules. Until you do, clock-in/out
-> and station reset operations will fail closed. Repeat this re-publish step for
-> every existing Firebase project using PumpLog.
+> **Upgrading?** This release adds the `stations/{id}/settings/security`
+> subcollection, the server-owned `rateLimits` collection, and new user profile
+> fields (`firstName`, `lastName`, `employeeId`, `avatarUrl`, `pwaLoginAllowed`,
+> `password_reset_required`). If you deployed an older version, **manually
+> re-publish the latest `firestore.rules`** — otherwise station security writes
+> and admin edits will fail closed. Repeat this re-publish step for every
+> existing Firebase project using PumpLog.
 
 Rules are the source of truth. `js/auth.js` mirrors them in a `can()` helper that
 only decides what the UI renders — bypassing the UI still hits the server rules.
@@ -132,13 +234,15 @@ only decides what the UI renders — bypassing the UI still hits the server rule
 | Capability | Super Admin | Station Admin | Staff |
 |---|:--:|:--:|:--:|
 | Stations — create / edit / delete | ✅ | ❌ | ❌ |
+| Station security settings | ✅ | ✅ own stations | 👁 read |
 | Rates & pumps (assigned stations) | ✅ | ✅ | 👁 read |
 | Shifts — log a reading | ✅ | ✅ | ✅ assigned pumps, configured rate |
 | Shifts — read | ✅ all | ✅ all | 👁 own records only |
 | Shifts — edit / delete | ✅ | ✅ | ❌ |
 | Assign pumps to staff | ✅ | ✅ own stations | ❌ |
 | Users — create | ✅ any role | ✅ staff only | ❌ |
-| Users — edit / remove | ✅ | ✅ own staff only | ❌ |
+| Users — edit / deactivate / remove | ✅ | ✅ own staff only | ❌ |
+| Issue temporary password / Cloud PIN | ✅ | ✅ own staff only | ❌ |
 | Config page | ✅ | ✅ | ❌ |
 
 **Role decision:** PumpLog intentionally keeps the existing three-role model. A
@@ -146,6 +250,35 @@ only decides what the UI renders — bypassing the UI still hits the server rule
 staff manager for their assigned station(s); there is no separate
 `stationmanager` role or migration. Super Admin has the same controls across
 all stations.
+
+### Station security settings
+
+Each station owns a `stations/{id}/settings/security` document (flag data only,
+never secrets — readable before sign-in so the login screen can adapt; writes
+are manager-only and re-enforced inside Cloud Functions):
+
+| Setting | Default | Range | Effect |
+|---|---|---|---|
+| Enable Email Login | on | — | Email accepted as a sign-in identifier |
+| Enable Username Login | on | — | Username accepted as a sign-in identifier |
+| Enable Password Login | on | — | Email/username + Password method available |
+| Enable Cloud PIN Login | on | — | Email/username + Cloud PIN method available |
+| Enable App Lock | off | — | Devices must set a local App Lock PIN |
+| Auto-lock on refresh | on | — | Lock immediately after a browser refresh |
+| Auto-lock on PWA reopen | on | — | Lock when the installed app is closed and reopened |
+| Auto-lock after inactivity | on | — | Lock when nobody interacts with the app |
+| Auto-lock timeout | 3 | 1–120 min | Inactivity/backgrounded-tab threshold |
+| Minimum password length | 8 | 6–64 | New + temporary passwords |
+| Minimum Cloud PIN length | 4 | 4–8 | New + temporary Cloud PINs |
+| Password complexity | letters + numbers | none / lettersNumbers / strong | New + temporary passwords |
+| Cloud PIN complexity | standard | digits / standard | `standard` blocks repeats (1111) and sequences (1234) |
+| Force Cloud PIN rotation after (days) | 0 | 0–365 | 0 = never; overdue PIN forces a change at next sign-in |
+
+Changes apply **immediately**: the login screen re-renders live (Firestore
+listener), armed sessions re-read the policy, and the identity service checks
+the flags on every call. When a user belongs to several stations, method
+toggles and App Lock merge permissively (any station allows/requires), while
+credential policies use the **strictest** value across their stations.
 
 ### Pump assignment & per-person data
 
@@ -170,20 +303,27 @@ all stations.
   The rate field on the shift form is read-only for staff, and readings always
   save at the configured rate.
 
-Guardrails enforced in both the UI and the rules:
+Guardrails enforced in both the UI, the rules, and the Cloud Functions:
 
 - Nobody can edit or delete **their own** account from the Team list (no self-lockout).
-- Super Admin accounts cannot be deleted through the app.
+- Super Admin accounts cannot be deactivated or deleted through the app.
 - A Station Admin cannot grant a role above their own, and cannot assign a
   station they do not hold themselves — blocking privilege escalation.
-- Removing a user deletes their Firestore profile, which revokes access
-  instantly. Their Firebase Auth credential must be deleted from the Firebase
-  Console, since browsers cannot use the Admin SDK.
+- Permanent removal deletes the Firestore profile, the secure identity record,
+  the username reservation, **and** the Firebase Auth credential (server-side) —
+  access is revoked instantly.
 
-### Bootstrap Account
+### First-Time Setup
 
-The **first user to sign up becomes Super Admin**, recorded at `app/bootstrap`.
-Later self-signups become Staff with no station access until an admin assigns them.
+The **first Firebase Auth account to sign in with no matching profile becomes
+Super Admin**, recorded once at `app/bootstrap`. On a fresh deployment:
+
+1. Publish the rules and deploy Functions (above).
+2. Create the first user in Firebase Console → Authentication → Add user.
+3. Sign in with that email + password on the login screen (“Administrator
+   sign-in” station option). The app claims Super Admin automatically.
+4. Create your first station in Config → Stations, then issue 10-digit
+   Station Admin invites or create users directly in Config → Team.
 
 ## Deploy to GitHub Pages
 
@@ -193,7 +333,9 @@ Later self-signups become Staff with no station access until an admin assigns th
 4. Click **Save**
 5. Your app will be live at `https://<username>.github.io/<repo>/` in a few minutes
 
-No build step required — the repo is ready to serve as-is.
+No build step required — the repo is ready to serve as-is. Remember that GitHub
+Pages only hosts the static client; the Cloud Functions and Firestore rules
+must be deployed separately (see above).
 
 ## Local Development
 
@@ -219,7 +361,8 @@ Changes that keep the app quick on a phone:
   served as 192px and 512px; they are now correctly sized at ~21 KB.
 - **Cached data layer** (`js/store.js`). Queries are cached for 60s and
   identical concurrent requests are coalesced, so switching tabs re-renders
-  with no network round-trip.
+  with no network round-trip. Station security uses a 30s cache plus a live
+  listener on screens that need instant updates.
 - **Batched station reads.** Assigned stations load with one `in` query
   instead of one read per station.
 - **Persistent Firestore cache** (IndexedDB), so repeat visits paint from disk.
@@ -227,11 +370,13 @@ Changes that keep the app quick on a phone:
   each query in turn.
 - **In-memory filtering** on History, which is instant and needs no composite index.
 - **Skeleton screens** instead of a blank page while data loads.
+- **Module preloading** for the ES module graph in `index.html`.
 
 Accessibility:
 
 - Semantic landmarks, a skip link, and `aria-live` regions for async updates
 - Focus trapping in dialogs, Escape to close, focus restored to the trigger
+  (mandatory-action dialogs like forced password/PIN changes stay open until completed)
 - Non-blocking toasts and an accessible confirm dialog replace `alert()`/`confirm()`
 - Visible focus rings, 44px minimum targets, and `prefers-reduced-motion`,
   `prefers-contrast` and dark-mode support
@@ -241,21 +386,27 @@ Accessibility:
 
 ```
 users/{uid}
-  ├── email: string              // legacy accounts only; optional for username/PIN users
-  ├── fullName: string           // canonical display name for new identities
-  ├── username: string           // lowercase unique 4–6 character login name
+  ├── email: string              // absent on pre-v1.0 username-only accounts
+  ├── firstName: string
+  ├── lastName: string
+  ├── fullName: string           // canonical display name
+  ├── username: string           // lowercase unique 4–16 character login name
   ├── phoneNumber: string        // optional
+  ├── employeeId: string         // optional
+  ├── avatarUrl: string          // optional
   ├── role: "superadmin" | "stationadmin" | "staff"
-  ├── stationIds: string[]      // empty for Super Admin (implicit access to all)
-  ├── pumpIds: string[]         // staff only — empty means "all pumps at assigned stations"
+  ├── stationIds: string[]       // empty for Super Admin (implicit access to all)
+  ├── pumpIds: string[]          // staff only — empty means "all pumps at assigned stations"
   ├── status: "invited" | "active" | "disabled"
-  ├── pin_reset_required: boolean
+  ├── pin_reset_required: boolean       // forced Cloud PIN change at next sign-in
+  ├── password_reset_required: boolean  // forced password change at next sign-in
+  ├── pwaLoginAllowed: boolean
   ├── isAdmin: boolean
   ├── createdBy: string (uid | "system")
   ├── createdByAdmin: string (uid)
   ├── lastLogin: timestamp
   ├── createdAt: timestamp
-  ├── updatedAt: timestamp      // set when an admin edits the profile
+  ├── updatedAt: timestamp
   └── updatedBy: string (uid)
 
 usernames/{lowercaseUsername}
@@ -263,28 +414,60 @@ usernames/{lowercaseUsername}
 
 joiningCodes/{fiveDigitCode}
   ├── uid: string
-  ├── purpose: "activation" | "pin-reset" | "legacy-migration"
+  ├── purpose: "activation" | "pin-reset"
   └── expiresAt: timestamp       // client access denied
 
-staffSecrets/{uid}
-  ├── pinHash: string            // scrypt output; client access denied
-  ├── pinSalt: string            // client access denied
-  ├── joiningCode: string        // client access denied
+adminInvites/{tenDigitCode}
+  ├── purpose: "station-admin"
+  └── expiresAt: timestamp       // client access denied
+
+staffSecrets/{uid}               // client access denied — never readable
+  ├── pinHash: string            // scrypt output
+  ├── pinSalt: string
+  ├── pinAlgorithm: string       // "scrypt-N16384-r8-p1"
+  ├── pinLastChangedAt: timestamp  // drives station PIN-rotation policy
+  ├── joiningCode: string
   ├── joiningCodeExpiresAt: timestamp
   ├── failedAttempts: number
   └── lockedUntil: timestamp | null
 
-auditLogs/{id}
+auditLogs/{id}                   // readable by Super Admin only
   ├── actorUid: string | null
   ├── targetUid: string | null
-  ├── action: string
+  ├── action: string             // auth.login, auth.login_failed, auth.logout,
+  │                              // user.created, user.updated, user.deactivated,
+  │                              // user.removed, user.pin_changed, user.pin_reset,
+  │                              // user.password_changed, user.password_reset, …
   ├── metadata: map
   └── createdAt: timestamp
+
+rateLimits/{bucket_key}          // client access denied — server-side throttling
+  ├── attempts: number
+  └── windowStart: timestamp
 
 stations/{id}
   ├── name: string
   ├── address: string
   └── createdAt: timestamp
+
+stations/{id}/settings/security  // flags/policies only — public read, manager write
+  ├── enableEmailLogin: boolean
+  ├── enableUsernameLogin: boolean
+  ├── enablePasswordLogin: boolean
+  ├── enablePinLogin: boolean
+  ├── appLockEnabled: boolean
+  ├── appLockOnRefresh: boolean
+  ├── appLockOnPwaReopen: boolean
+  ├── appLockOnInactivity: boolean
+  ├── appLockTimeoutMinutes: number (1–120)
+  ├── minPasswordLength: number (6–64)
+  ├── minPinLength: number (4–8)
+  ├── passwordComplexity: "none" | "lettersNumbers" | "strong"
+  ├── pinComplexity: "digits" | "standard"
+  ├── pinRotationDays: number (0–365)
+  ├── settingsVersion: number
+  ├── updatedAt: timestamp
+  └── updatedBy: string (uid)
 
 stations/{id}/pumps/{id}
   ├── name: string
@@ -337,10 +520,14 @@ it does not backfill historical documents. Firestore retains data indefinitely
 until a manager explicitly uses **Config → Stations → Reset station data**, which
 deletes only shifts and pump session locks in batches (not pumps, rates, or team assignments).
 
+**Never stored anywhere:** plaintext Cloud PINs. **Never stored in Firebase:**
+App Lock PINs and security-question answers (device-localStorage only).
+
 ## Tech Stack
 
 - **Plain HTML/CSS/JS** — no bundlers, no frameworks, no webfonts
-- **Firebase Auth + Firestore** — free tier, no server needed
+- **Firebase Auth + Firestore** — authentication, data, and security rules
+- **Firebase Cloud Functions (Node 20)** — trusted identity and admin operations
 - **ES Modules** — loaded via `<script type="module">`
 - **Service Worker** — app shell caching for offline install
 - **PWA Manifest** — installable on mobile and desktop

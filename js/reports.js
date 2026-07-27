@@ -232,7 +232,6 @@ export async function renderReports(stationId) {
     }
     await loadReportData();
   } catch (err) {
-    console.error('Reports render error:', err);
     document.getElementById('page-content').innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
 }

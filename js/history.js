@@ -5,8 +5,9 @@ import { can, denyReason, formatFirebaseError } from './auth.js';
 import { getPumps, getShifts, invalidateStation } from './store.js';
 import {
   h, formatCurrency, formatVolume, formatDate, formatDateTime, getTodayDate,
-  openModal, closeModal, emptyState, toast, confirmDialog, setBusy, showSkeleton,
-  rangeStart, debounce, knownHours,
+  openModal, closeModal, emptyState, toastSuccess, toastError,
+  confirmDelete, confirmSave, setBusy, showSkeleton,
+  rangeStart, debounce, knownHours, ICONS,
 } from './components.js';
 
 let currentStationId = null;
@@ -93,7 +94,6 @@ export async function renderHistory(stationId, range = 'today') {
 
     paint(allShifts);
   } catch (err) {
-    console.error('History render error:', err);
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
 }
@@ -176,7 +176,7 @@ function paint(list) {
 // ── Edit ────────────────────────────────────────────────────────────────
 function showEditShiftForm(shift) {
   if (!can('shift.update', { stationId: currentStationId })) {
-    toast(denyReason('shift.update'), 'error');
+    toastError(denyReason('shift.update'));
     return;
   }
 
@@ -228,7 +228,7 @@ function showEditShiftForm(shift) {
       </div>
 
       <p class="form-error hidden" id="edit-shift-error" role="alert"></p>
-      <button type="submit" class="btn btn-primary btn-full mt-16">Save changes</button>
+      <button type="submit" class="btn btn-primary btn-full mt-16">Save ${ICONS.save}</button>
     </form>
   `;
   openModal('generic-modal');
@@ -260,6 +260,7 @@ function showEditShiftForm(shift) {
     if (rate <= 0) return fail('Enter a rate greater than zero.');
 
     err.classList.add('hidden');
+    if (!(await confirmSave('this shift record'))) return;
     setBusy(btn, true, 'Saving…');
     const volume = closing - opening;
 
@@ -273,11 +274,10 @@ function showEditShiftForm(shift) {
       });
       invalidateStation(currentStationId);
       closeModal('generic-modal');
-      toast('Shift record updated.', 'success');
+      toastSuccess('Changes Saved');
       renderHistory(currentStationId, currentRange);
     } catch (e2) {
-      console.error('Update shift error:', e2);
-      fail(formatFirebaseError(e2));
+      fail(`❌ ${formatFirebaseError(e2)}`);
       setBusy(btn, false);
     }
   });
@@ -286,26 +286,20 @@ function showEditShiftForm(shift) {
 // ── Delete ──────────────────────────────────────────────────────────────
 async function removeShift(shift) {
   if (!can('shift.delete', { stationId: currentStationId })) {
-    toast(denyReason('shift.delete'), 'error');
+    toastError(denyReason('shift.delete'));
     return;
   }
 
-  const ok = await confirmDialog({
-    title: 'Delete shift record?',
-    message: `${shift.pumpName || 'Pump'} · Shift ${shift.shiftLabel || '?'} on ${formatDate(shift.date)} (${formatCurrency(shift.sales)}) will be permanently deleted.`,
-    confirmLabel: 'Delete record',
-    danger: true,
-  });
+  const ok = await confirmDelete(`${shift.pumpName || 'Pump'} · Shift ${shift.shiftLabel || '?'} on ${formatDate(shift.date)} (${formatCurrency(shift.sales)}) will be permanently deleted.`);
   if (!ok) return;
 
   try {
     await deleteDoc(doc(getDb(), 'stations', currentStationId, 'shifts', shift.id));
     invalidateStation(currentStationId);
-    toast('Shift record deleted.', 'success');
+    toastSuccess('Shift Record Deleted');
     renderHistory(currentStationId, currentRange);
   } catch (err) {
-    console.error('Delete shift error:', err);
-    toast(formatFirebaseError(err), 'error');
+    toastError(formatFirebaseError(err));
   }
 }
 
@@ -336,5 +330,5 @@ function exportCSV(shifts) {
   a.download = `pumplog-shifts-${getTodayDate()}.csv`;
   a.click();
   URL.revokeObjectURL(url);
-  toast(`Exported ${shifts.length} record${shifts.length === 1 ? '' : 's'}.`, 'success');
+  toastSuccess(`Exported ${shifts.length} record${shifts.length === 1 ? '' : 's'}`);
 }

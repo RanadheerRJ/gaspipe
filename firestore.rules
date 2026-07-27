@@ -116,9 +116,11 @@ service cloud.firestore {
         && (request.resource.data.keys().hasAny(['email'])
             || request.resource.data.keys().hasAny(['username']))
         && request.resource.data.keys().hasOnly([
-             'email', 'fullName', 'username', 'phoneNumber', 'role', 'stationIds', 'pumpIds',
+             'email', 'firstName', 'lastName', 'fullName', 'username', 'phoneNumber',
+             'employeeId', 'avatarUrl', 'role', 'stationIds', 'pumpIds',
              'status', 'createdBy', 'createdByAdmin', 'createdAt', 'updatedAt', 'updatedBy',
-             'lastLogin', 'pin_reset_required', 'isAdmin'
+             'lastLogin', 'pin_reset_required', 'password_reset_required',
+             'pwaLoginAllowed', 'isAdmin'
            ])
         && request.resource.data.stationIds is list
         && request.resource.data.stationIds.size() <= 50
@@ -132,6 +134,10 @@ service cloud.firestore {
             || request.resource.data.status in ['invited', 'active', 'disabled'])
         && (!request.resource.data.keys().hasAny(['pin_reset_required'])
             || request.resource.data.pin_reset_required is bool)
+        && (!request.resource.data.keys().hasAny(['password_reset_required'])
+            || request.resource.data.password_reset_required is bool)
+        && (!request.resource.data.keys().hasAny(['pwaLoginAllowed'])
+            || request.resource.data.pwaLoginAllowed is bool)
         && (!request.resource.data.keys().hasAny(['isAdmin'])
             || request.resource.data.isAdmin is bool)
         && isValidRole(request.resource.data.role);
@@ -270,6 +276,11 @@ service cloud.firestore {
       allow write: if false;
     }
 
+    // Server-owned sign-in throttling counters; clients never touch them.
+    match /rateLimits/{key} {
+      allow read, write: if false;
+    }
+
     // ── Stations ────────────────────────────────────────────────────
     match /stations/{stationId} {
       allow get: if isSignedIn() && canAccessStation(stationId);
@@ -281,6 +292,16 @@ service cloud.firestore {
       allow list: if isSignedIn() && canAccessStation(stationId);
 
       allow create, update, delete: if isSuperAdmin();
+
+      // ── Station security settings ─────────────────────────────────
+      // Feature flags and policy numbers only — never secrets. The login
+      // screen reads them before sign-in, so reads are public; only station
+      // managers may change them. Cloud Functions re-enforce the same flags
+      // on every authentication call, so a spoofed UI cannot weaken sign-in.
+      match /settings/{docId} {
+        allow read: if true;
+        allow create, update, delete: if isSignedIn() && canManageStation(stationId);
+      }
 
       // ── Pumps ─────────────────────────────────────────────────────
       match /pumps/{pumpId} {

@@ -13,18 +13,16 @@
 import {
   FIREBASE_CONFIG,
   initMainApp,
-  getDb,
-  getAdminApp,
-  destroyAdminApp,
+  getAuthInstance,
   onAuthStateChanged,
   signInWithEmailAndPassword,
-  createUserWithEmailAndPassword,
   signOut,
+  updatePassword,
+  reauthenticateWithCredential,
+  EmailAuthProvider,
   doc,
   getDoc,
   setDoc,
-  updateDoc,
-  deleteDoc,
   serverTimestamp,
   writeBatch,
 } from './firebase.js';
@@ -62,7 +60,6 @@ export function initAuth() {
     try {
       currentUserData = user ? await loadOrCreateUserProfile(user, db) : null;
     } catch (err) {
-      console.error('Auth/profile setup error:', err);
       currentUserData = null;
       currentAuthError = err;
       authReady = true;
@@ -122,52 +119,71 @@ async function createBootstrapProfile(user, db, userRef) {
 }
 
 // ── Friendly errors ─────────────────────────────────────────────────────
+// Production rule: never show a raw stack or SDK message to end users. The
+// identity service sends curated messages; everything else maps to safe text.
 export function formatFirebaseError(err) {
   const code = err?.code || '';
-  const raw = err?.message || '';
+  const raw = String(err?.message || '');
 
   const map = {
-    'auth/email-already-in-use': 'An account with this email already exists. Use “Sign in” instead.',
+    'auth/email-already-in-use': 'Email already registered.',
     'auth/invalid-email': 'Please enter a valid email address.',
     'auth/missing-password': 'Please enter your password.',
-    'auth/weak-password': 'Password is too weak — use at least 6 characters.',
+    'auth/weak-password': 'Password does not meet the policy requirements.',
     'auth/invalid-credential': 'Email or password is incorrect.',
     'auth/wrong-password': 'Email or password is incorrect.',
-    'auth/user-not-found': 'Email or password is incorrect.',
-    'auth/user-disabled': 'This account has been disabled in Firebase Authentication.',
+    'auth/user-not-found': 'That account is not registered.',
+    'auth/user-disabled': 'This account has been disabled. Contact your admin.',
     'auth/too-many-requests': 'Too many attempts. Wait a few minutes and try again.',
+    'auth/requires-recent-login': 'For your security, sign in again and retry.',
     'auth/network-request-failed': 'Network error. Check your connection and try again.',
-    'auth/operation-not-allowed': 'Email/password sign-in is disabled. Enable it in Firebase Console → Authentication → Sign-in method.',
-    'permission-denied': 'Firestore denied this action. Publish the latest firestore.rules in Firebase Console → Firestore → Rules, then retry.',
-    'unavailable': 'Firestore is unreachable right now. Check your connection and retry.',
-    'failed-precondition': 'Firestore needs an index for this query. Open the browser console and follow the “create index” link.',
+    'auth/operation-not-allowed': 'This sign-in method is not available. Contact your admin.',
+    'permission-denied': 'You do not have permission to do that.',
+    'unavailable': 'The service is unreachable right now. Check your connection and retry.',
+    'failed-precondition': 'This action is not available in the current state.',
     'not-found': 'That record no longer exists — it may have been deleted already.',
     'already-exists': 'That record already exists.',
-    'functions/unauthenticated': 'Username or PIN is incorrect.',
+    'functions/unauthenticated': 'Invalid Cloud PIN or credentials.',
     'functions/permission-denied': 'You do not have permission to do that.',
-    'functions/invalid-argument': 'Check the highlighted details and try again.',
+    'functions/invalid-argument': 'Validation failed. Check the highlighted fields.',
     'functions/resource-exhausted': 'Too many attempts. Try again later.',
     'functions/deadline-exceeded': 'That joining code has expired. Ask an admin for a new one.',
     'functions/failed-precondition': 'Complete the required account setup before continuing.',
-    'functions/not-found': 'That joining code is invalid or has expired.',
-    'functions/already-exists': 'That username is already in use. Choose another.',
-    'functions/internal': 'The secure identity service is unavailable. Deploy the latest Firebase Functions and try again.',
+    'functions/not-found': 'That joining code or invite is invalid or has expired.',
+    'functions/already-exists': 'Username already exists.',
+    'functions/aborted': 'That action could not be completed. Try again.',
+    'functions/internal': 'The secure identity service is unavailable. Try again shortly.',
   };
 
+  // Trusted-service errors carry curated messages — prefer them word for word.
+  if (code.startsWith('functions/') && raw && !raw.toLowerCase().includes('internal')) {
+    return raw;
+  }
   if (map[code]) return map[code];
   if (raw.includes('Missing or insufficient permissions')) return map['permission-denied'];
-  if (raw.includes('requires an index')) return map['failed-precondition'];
-  return raw || 'Something went wrong. Please try again.';
+  if (raw.includes('requires an index')) return 'This view needs a Firestore index. Ask your Firebase admin to create it from the console link.';
+  return 'Something went wrong. Please try again.';
 }
 
 // ── Session ─────────────────────────────────────────────────────────────
 export const signIn = (email, password) =>
   signInWithEmailAndPassword(initMainApp().auth, email, password);
 
-export const signUp = (email, password) =>
-  createUserWithEmailAndPassword(initMainApp().auth, email, password);
-
 export const doSignOut = () => signOut(initMainApp().auth);
+
+/** Change the signed-in user's own password (reauthenticates first). */
+export async function changeMyPassword({ currentPassword, newPassword }) {
+  const auth = getAuthInstance();
+  const user = auth.currentUser;
+  if (!user?.email) {
+    const missing = new Error('This account has no password credential.');
+    missing.code = 'auth/operation-not-allowed';
+    throw missing;
+  }
+  const credential = EmailAuthProvider.credential(user.email, currentPassword);
+  await reauthenticateWithCredential(user, credential);
+  await updatePassword(user, newPassword);
+}
 
 // ── State accessors ─────────────────────────────────────────────────────
 export const getCurrentUser = () => currentUser;
@@ -341,65 +357,4 @@ export function denyReason(action, ctx = {}) {
   if (action.startsWith('station.')) return 'Only a Super Admin can manage stations.';
   if (action.startsWith('pumpSession.')) return 'Only the active staff member or a station manager can do this.';
   return 'Your role does not allow this action.';
-}
-
-// ── Admin user management ───────────────────────────────────────────────
-export async function createUserAsAdmin(email, password, role, stationIds, pumpIds = []) {
-  if (!can('user.create')) throw new Error('You do not have permission to create users.');
-  if (!can(`user.assignRole.${role}`)) throw new Error(`You cannot assign the ${ROLES[role] || role} role.`);
-
-  const db = getDb();
-  const admin = getAdminApp(FIREBASE_CONFIG);
-
-  try {
-    const cred = await createUserWithEmailAndPassword(admin.auth, email, password);
-    const profile = {
-      email,
-      role,
-      stationIds: stationIds || [],
-      createdBy: currentUser?.uid || 'unknown',
-      createdAt: serverTimestamp(),
-    };
-    // Only persist an explicit restriction (see updateUserAsAdmin note).
-    if (role === 'staff' && Array.isArray(pumpIds) && pumpIds.length > 0) {
-      profile.pumpIds = pumpIds;
-    }
-    await setDoc(doc(db, 'users', cred.user.uid), profile);
-    return cred.user.uid;
-  } finally {
-    await signOut(admin.auth).catch(() => {});
-    await destroyAdminApp();
-  }
-}
-
-export async function updateUserAsAdmin(target, { role, stationIds, pumpIds }) {
-  if (!can('user.update', { target })) {
-    throw new Error(denyReason('user.update', { target }));
-  }
-  if (role && role !== target.role && !can(`user.assignRole.${role}`)) {
-    throw new Error(`You cannot assign the ${ROLES[role] || role} role.`);
-  }
-
-  const patch = { updatedAt: serverTimestamp(), updatedBy: currentUser?.uid || 'unknown' };
-  if (role) patch.role = role;
-  if (Array.isArray(stationIds)) patch.stationIds = stationIds;
-  // Write pumpIds only when it carries meaning: a non-empty restriction, or
-  // clearing one that existed. Skipping the field otherwise keeps plain
-  // role/station edits working even before the updated rules are published.
-  if (Array.isArray(pumpIds) && (pumpIds.length > 0 || (target.pumpIds || []).length > 0)) {
-    patch.pumpIds = pumpIds;
-  }
-
-  await updateDoc(doc(getDb(), 'users', target.id), patch);
-}
-
-/* Removes the Firestore profile, which revokes all app access immediately
- * (every rule requires a profile document). The Firebase Auth credential
- * itself can only be removed with the Admin SDK or from the Firebase Console,
- * so the UI states this explicitly. */
-export async function deleteUserAsAdmin(target) {
-  if (!can('user.delete', { target })) {
-    throw new Error(denyReason('user.delete', { target }));
-  }
-  await deleteDoc(doc(getDb(), 'users', target.id));
 }
