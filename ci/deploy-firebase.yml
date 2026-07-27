@@ -1,0 +1,86 @@
+# Deploys the PumpLog backend (Cloud Functions + Firestore security rules)
+# automatically on every push to a deploy branch.
+#
+# INSTALL: create this file in your repository at
+#   .github/workflows/deploy-firebase.yml
+# (GitHub → repo → Add file → Create new file → paste this content → Commit).
+# GitHub restricts workflow-file creation to users with repo write access,
+# so this ready-made copy is provided here — see DEPLOYMENT.md.
+#
+# One-time setup (see DEPLOYMENT.md for click-by-click steps):
+#   add the FIREBASE_SERVICE_ACCOUNT repository secret containing your
+#   Firebase project's service-account JSON.
+#
+# Without the secret this workflow exits cleanly and does nothing, so it is
+# safe to keep in the repo even before setup.
+
+name: Deploy Firebase backend
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - dev
+      - 'arena/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firebase-backend-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Functions + Firestore rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for the service-account secret
+        id: secret_check
+        env:
+          SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$SA_JSON" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Secret not configured — nothing to do
+        if: steps.secret_check.outputs.configured != 'true'
+        run: |
+          echo "::notice title=Setup needed::Add the FIREBASE_SERVICE_ACCOUNT repository secret to enable automatic backend deploys. See DEPLOYMENT.md (one-time, ~2 minutes)."
+
+      - name: Check out the repository
+        if: steps.secret_check.outputs.configured == 'true'
+        uses: actions/checkout@v4
+
+      - name: Set up Node.js
+        if: steps.secret_check.outputs.configured == 'true'
+        uses: actions/setup-node@v4
+        with:
+          node-version: 20
+          cache: npm
+          cache-dependency-path: functions/package-lock.json
+
+      - name: Install Cloud Functions dependencies
+        if: steps.secret_check.outputs.configured == 'true'
+        run: npm ci --prefix functions --no-audit --no-fund
+
+      - name: Write service-account credentials
+        if: steps.secret_check.outputs.configured == 'true'
+        env:
+          SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: printf '%s' "$SA_JSON" > "${{ runner.temp }}/firebase-sa.json"
+
+      - name: Deploy Functions and Firestore rules
+        if: steps.secret_check.outputs.configured == 'true'
+        run: npx --yes firebase-tools@latest deploy --only "functions,firestore:rules" --non-interactive
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+
+      - name: Remove credentials
+        if: always()
+        run: rm -f "${{ runner.temp }}/firebase-sa.json"

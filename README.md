@@ -180,44 +180,45 @@ The Functions service provides:
   only manage staff they created at their own stations), and audit events for
   sign-ins, sign-outs, failures, and every account change.
 
-Install and deploy the trusted service separately (from a machine with Firebase
-CLI access):
+Deploy the trusted service automatically (recommended) or manually:
 
-```bash
-cd functions
-npm install
-cd ..
-firebase deploy --only functions
-```
+- **Automatic (recommended):** the repo ships a ready-to-install GitHub Actions
+  workflow at `ci/deploy-firebase.yml`. Drop it into `.github/workflows/` once
+  and add the one-time `FIREBASE_SERVICE_ACCOUNT` repository secret; afterwards
+  every push deploys **Functions and `firestore.rules`** together — nothing to
+  paste into the Firebase console. See **[DEPLOYMENT.md](DEPLOYMENT.md)** for
+  the 3-step setup.
+- **Manual:** from any machine with the Firebase CLI (`.firebaserc` already
+  pins project `gass-13462`):
 
-`firebase.json` points Functions at `functions/` and does not add a frontend
-build step. Deploying the static GitHub Pages app alone does not deploy these
-Functions.
+  ```bash
+  npx firebase-tools deploy --only "functions,firestore:rules"
+  ```
 
-> **⚠️ Mandatory for v1.0 — deploy BOTH backends.** Login-method enforcement,
-> temporary-credential forced changes, station security settings, and admin
-> user management all depend on the current Functions **and** the current
-> Firestore rules:
->
-> 1. `firebase deploy --only functions`
-> 2. **Re-publish `firestore.rules`** in Firebase Console → Firestore Database →
->    Rules → Publish (pushing to GitHub Pages never updates rules).
->
-> Until both are live, the app degrades gracefully — it falls back to default
-> security policies and administrator sign-in — but the new sign-in methods,
-> App Lock policy, and Team management will not be fully enforced.
+`firebase.json` points Functions at `functions/` and Firestore rules at
+`firestore.rules`; there is no frontend build step. Deploying the static
+GitHub Pages app alone does not deploy these backends.
+
+> **⚠️ Mandatory for v1.0 — the backend must be deployed.** Login-method
+> enforcement, temporary-credential forced changes, station security settings,
+> and admin user management all depend on the current Functions **and** the
+> current Firestore rules. Until they are live, the app degrades gracefully —
+> it falls back to default security policies and administrator sign-in — but
+> the new sign-in methods, App Lock policy, and Team management will not be
+> fully enforced.
 
 ### Firestore Security Rules
 
-Copy `firestore.rules` into Firebase Console → Firestore Database → Rules → **Publish**.
+The GitHub Action (above) deploys `firestore.rules` together with the
+Functions on every push. If you prefer the console: copy `firestore.rules`
+into Firebase Console → Firestore Database → Rules → **Publish**.
 
 > **Upgrading?** This release adds the `stations/{id}/settings/security`
 > subcollection, the server-owned `rateLimits` collection, and new user profile
 > fields (`firstName`, `lastName`, `employeeId`, `avatarUrl`, `pwaLoginAllowed`,
-> `password_reset_required`). If you deployed an older version, **manually
+> `password_reset_required`). If you deployed an older version, **re-deploy or
 > re-publish the latest `firestore.rules`** — otherwise station security writes
-> and admin edits will fail closed. Repeat this re-publish step for every
-> existing Firebase project using PumpLog.
+> and admin edits will fail closed.
 
 Rules are the source of truth. `js/auth.js` mirrors them in a `can()` helper that
 only decides what the UI renders — bypassing the UI still hits the server rules.
@@ -335,7 +336,8 @@ Super Admin**, recorded once at `app/bootstrap`. On a fresh deployment:
 
 No build step required — the repo is ready to serve as-is. Remember that GitHub
 Pages only hosts the static client; the Cloud Functions and Firestore rules
-must be deployed separately (see above).
+must be deployed separately (see above). **[DEPLOYMENT.md](DEPLOYMENT.md)**
+walks through the full go-live checklist in 3 steps.
 
 ## Local Development
 
