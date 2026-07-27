@@ -1,0 +1,191 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
+  <meta name="description" content="PumpLog — multi-station fuel shift tracker" />
+  <meta name="color-scheme" content="light dark" />
+
+  <title>PumpLog</title>
+
+  <link rel="manifest" href="manifest.json" />
+  <link rel="icon" href="icons/icon-192.png" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+
+  <!-- Warm up the Firebase origins early; no render-blocking font CDN. -->
+  <link rel="preconnect" href="https://www.gstatic.com" crossorigin />
+  <link rel="preconnect" href="https://firestore.googleapis.com" crossorigin />
+  <link rel="preconnect" href="https://identitytoolkit.googleapis.com" crossorigin />
+
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="modulepreload" href="js/app.js" />
+  <link rel="modulepreload" href="js/firebase.js" />
+  <link rel="modulepreload" href="js/auth.js" />
+  <link rel="modulepreload" href="js/store.js" />
+  <link rel="modulepreload" href="js/components.js" />
+</head>
+<body>
+  <a class="skip-link" href="#page-content">Skip to main content</a>
+
+  <!-- Boot screen -->
+  <div id="loading-screen" role="status" aria-live="polite">
+    <div class="spinner" aria-hidden="true"></div>
+    <p>Loading PumpLog…</p>
+  </div>
+
+  <!-- ── Auth ─────────────────────────────────────────────────────── -->
+  <div id="auth-screen" class="screen hidden">
+    <main class="auth-container">
+      <div class="auth-logo">
+        <div class="auth-icon" aria-hidden="true">⛽</div>
+        <h1>PumpLog</h1>
+        <p class="auth-tagline">Multi-station fuel tracker</p>
+      </div>
+      <div class="auth-card">
+        <h2 id="auth-title">Sign in</h2>
+        <p id="auth-error" class="auth-msg hidden" role="alert" aria-live="assertive"></p>
+        <form id="auth-form" novalidate>
+          <div class="field">
+            <label for="auth-email">Email</label>
+            <input type="email" id="auth-email" name="email" placeholder="you@example.com"
+                   required autocomplete="email" inputmode="email" autocapitalize="off" spellcheck="false" />
+          </div>
+          <div class="field">
+            <label for="auth-password">Password</label>
+            <div class="input-affix">
+              <input type="password" id="auth-password" name="password" placeholder="At least 6 characters"
+                     minlength="6" required autocomplete="current-password" />
+              <button type="button" id="auth-password-toggle" class="affix-btn"
+                      aria-label="Show password" aria-pressed="false">Show</button>
+            </div>
+          </div>
+          <button type="submit" id="auth-submit" class="btn btn-primary btn-full">Sign in</button>
+        </form>
+        <p class="auth-toggle">
+          <span id="auth-toggle-text">Don't have an account? </span>
+          <button type="button" id="auth-toggle-link" class="link-btn">Sign up</button>
+        </p>
+      </div>
+    </main>
+  </div>
+
+  <!-- ── App shell ────────────────────────────────────────────────── -->
+  <div id="app-shell" class="hidden">
+    <header id="top-bar">
+      <button id="station-selector" class="station-pill" aria-haspopup="dialog" aria-label="Switch station">
+        <span aria-hidden="true">⛽</span>
+        <span id="station-name-display">Select station</span>
+        <span class="chevron" aria-hidden="true">⌄</span>
+      </button>
+      <div class="top-right">
+        <button id="btn-refresh" class="icon-btn" title="Refresh data" aria-label="Refresh data">
+          <span class="icon" aria-hidden="true">↻</span>
+        </button>
+        <button id="btn-profile" class="icon-btn" title="Profile and sign out" aria-label="Profile and sign out" aria-haspopup="dialog">
+          <span class="icon" aria-hidden="true">👤</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Date-range filter, applies to Dashboard + History -->
+    <div id="quick-chips" class="chips-row" role="group" aria-label="Date range filter">
+      <button class="chip chip-active" data-range="today" aria-pressed="true">Today</button>
+      <button class="chip" data-range="week" aria-pressed="false">7 days</button>
+      <button class="chip" data-range="month" aria-pressed="false">30 days</button>
+      <button class="chip" data-range="all" aria-pressed="false">All time</button>
+    </div>
+
+    <main id="page-content" tabindex="-1" aria-live="polite" aria-busy="false"></main>
+
+    <!-- Floating refresh -->
+    <button id="fab-refresh" class="fab" aria-label="Refresh data">
+      <span class="fab-icon" aria-hidden="true">↻</span>
+    </button>
+
+    <nav id="tab-bar" aria-label="Primary">
+      <button class="tab tab-active" data-page="dashboard" aria-current="page">
+        <span class="tab-icon" aria-hidden="true">📊</span>
+        <span class="tab-label">Dashboard</span>
+      </button>
+      <button class="tab" data-page="pumps">
+        <span class="tab-icon" aria-hidden="true">⛽</span>
+        <span class="tab-label">Pumps</span>
+      </button>
+      <button class="tab" data-page="config" hidden>
+        <span class="tab-icon" aria-hidden="true">⚙️</span>
+        <span class="tab-label">Config</span>
+      </button>
+      <button class="tab" data-page="history">
+        <span class="tab-icon" aria-hidden="true">📋</span>
+        <span class="tab-label">History</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- ── Dialogs ──────────────────────────────────────────────────── -->
+  <div id="station-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="station-modal-title">
+    <div class="modal-overlay" data-close></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="station-modal-title">Switch station</h2>
+        <button class="modal-close icon-btn" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body" id="station-list"></div>
+    </div>
+  </div>
+
+  <div id="generic-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="modal-title">
+    <div class="modal-overlay" data-close></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="modal-title"></h2>
+        <button class="modal-close icon-btn" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <div id="confirm-modal" class="modal hidden" role="alertdialog" aria-modal="true"
+       aria-labelledby="confirm-title" aria-describedby="confirm-message">
+    <div class="modal-overlay" data-close></div>
+    <div class="modal-content modal-compact">
+      <div class="modal-header">
+        <h2 id="confirm-title">Are you sure?</h2>
+        <button class="modal-close icon-btn" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p id="confirm-message"></p>
+        <div class="confirm-actions">
+          <button type="button" id="confirm-cancel" class="btn btn-secondary btn-full">Cancel</button>
+          <button type="button" id="confirm-ok" class="btn btn-primary btn-full">Confirm</button>
+        </div>
+      </div>
+    </div>
+  </div>
+
+  <div id="profile-modal" class="modal hidden" role="dialog" aria-modal="true" aria-labelledby="profile-modal-title">
+    <div class="modal-overlay" data-close></div>
+    <div class="modal-content modal-compact">
+      <div class="modal-header">
+        <h2 id="profile-modal-title">Profile</h2>
+        <button class="modal-close icon-btn" aria-label="Close dialog">&times;</button>
+      </div>
+      <div class="modal-body">
+        <dl class="profile-list">
+          <dt>Email</dt><dd id="profile-email">—</dd>
+          <dt>Role</dt><dd id="profile-role">—</dd>
+          <dt>Stations</dt><dd id="profile-stations">—</dd>
+        </dl>
+        <button id="btn-signout" class="btn btn-secondary btn-full">Sign out</button>
+      </div>
+    </div>
+  </div>
+
+  <!-- Toasts -->
+  <div id="toast-region" class="toast-region" aria-live="polite" aria-atomic="false"></div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
