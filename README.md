@@ -156,7 +156,7 @@ const FIREBASE_CONFIG = {
 ### Trusted identity backend (Cloud Functions)
 
 Username + Cloud PIN authentication and all privileged account operations are
-implemented in `functions/` — Firebase Cloud Functions (Node 20, CommonJS).
+implemented in `functions/` — Firebase Cloud Functions (Node 22, CommonJS).
 The GitHub Pages app remains plain static HTML, CSS, and ES modules; Functions
 are the trusted server boundary for operations a browser cannot safely perform.
 
@@ -529,7 +529,7 @@ App Lock PINs and security-question answers (device-localStorage only).
 
 - **Plain HTML/CSS/JS** — no bundlers, no frameworks, no webfonts
 - **Firebase Auth + Firestore** — authentication, data, and security rules
-- **Firebase Cloud Functions (Node 20)** — trusted identity and admin operations
+- **Firebase Cloud Functions (Node 22)** — trusted identity and admin operations
 - **ES Modules** — loaded via `<script type="module">`
 - **Service Worker** — app shell caching for offline install
 - **PWA Manifest** — installable on mobile and desktop

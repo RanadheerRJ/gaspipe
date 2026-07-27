@@ -13,6 +13,9 @@
 #
 # Without the secret this workflow exits cleanly and does nothing, so it is
 # safe to keep in the repo even before setup.
+#
+# v2 (2026-07-27): validates the service-account JSON before deploying,
+# pins firebase-tools@15, and upgrades the Functions runtime to nodejs22.
 
 name: Deploy Firebase backend
 
@@ -61,7 +64,7 @@ jobs:
         if: steps.secret_check.outputs.configured == 'true'
         uses: actions/setup-node@v4
         with:
-          node-version: 20
+          node-version: 22
           cache: npm
           cache-dependency-path: functions/package-lock.json
 
@@ -75,11 +78,47 @@ jobs:
           SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
         run: printf '%s' "$SA_JSON" > "${{ runner.temp }}/firebase-sa.json"
 
+      # Catch the most common setup mistake (a malformed or truncated secret
+      # paste) here with a clear message, instead of a cryptic deploy failure.
+      - name: Validate service-account credentials
+        if: steps.secret_check.outputs.configured == 'true'
+        env:
+          SA_PATH: ${{ runner.temp }}/firebase-sa.json
+        run: |
+          node -e '
+            const fs = require("fs");
+            let sa;
+            try {
+              sa = JSON.parse(fs.readFileSync(process.env.SA_PATH, "utf8"));
+            } catch (err) {
+              console.error("::error title=Invalid FIREBASE_SERVICE_ACCOUNT::The secret is not valid JSON. Re-download the key from Firebase Console → Project settings → Service accounts → Generate new private key, and paste the ENTIRE file contents into the GitHub secret. (" + err.message + ")");
+              process.exit(1);
+            }
+            const missing = ["type", "project_id", "private_key", "client_email", "token_uri"].filter(k => !sa[k]);
+            if (missing.length) {
+              console.error("::error title=Incomplete FIREBASE_SERVICE_ACCOUNT::The secret JSON is missing field(s): " + missing.join(", ") + ". Re-copy the ENTIRE downloaded key file into the secret — it was truncated.");
+              process.exit(1);
+            }
+            if (sa.project_id !== "gass-13462") {
+              console.error("::error title=Wrong project::The key belongs to project \"" + sa.project_id + "\" but this repo deploys to \"gass-13462\". Generate the key from the gass-13462 project.");
+              process.exit(1);
+            }
+            console.log("Credentials OK — project: " + sa.project_id + ", service account: " + sa.client_email);
+          '
+
       - name: Deploy Functions and Firestore rules
         if: steps.secret_check.outputs.configured == 'true'
-        run: npx --yes firebase-tools@latest deploy --only "functions,firestore:rules" --non-interactive
         env:
           GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+        run: |
+          if ! npx --yes firebase-tools@15 deploy --only "functions,firestore:rules" --non-interactive; then
+            echo "::error title=Deploy failed::Read the red error line above. The most common fixes:"
+            echo '1) “Failed to authenticate” → delete and re-create the FIREBASE_SERVICE_ACCOUNT secret — Firebase Console → Project settings → Service accounts → Generate new private key, then paste the ENTIRE downloaded file into the GitHub secret.'
+            echo '2) “API … not enabled” → open the URL printed in the error and click Enable, then Re-run jobs.'
+            echo '3) “Billing”/“quota” → set the project to the Blaze plan: Firebase Console → ⚙️ Usage and billing.'
+            echo 'Full guide: DEPLOYMENT.md'
+            exit 1
+          fi
 
       - name: Remove credentials
         if: always()

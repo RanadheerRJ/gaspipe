@@ -36,6 +36,11 @@ for you to drop into place once:
 3. As the file name, type exactly: `.github/workflows/deploy-firebase.yml`
 4. Paste the content → **Commit changes** directly to your publish branch.
 
+> **Already installed an earlier copy?** Open `.github/workflows/deploy-firebase.yml`,
+> click the **pencil (edit)** icon, replace everything with the current content
+> of `ci/deploy-firebase.yml` (**v2** — validates your secret before deploying
+> and gives precise error messages), and commit.
+
 That push itself triggers the workflow. Go to **Actions → Deploy Firebase
 backend** and watch it turn green (~2–4 minutes). It deploys **both** the
 Cloud Functions and `firestore.rules` — you never need to paste rules into
@@ -44,11 +49,20 @@ the Firebase console.
 > From now on, **every push** to `main`, `dev`, or any `arena/**` branch
 > redeploys the backend automatically. Delete or edit `firestore.rules` /
 > `functions/` on any of those branches and CI keeps Firebase in sync.
->
-> If a run fails with "API … not enabled", open the link in the error once and
-> click **Enable**, then **Re-run jobs**. If it mentions the Blaze plan:
-> Firebase Console → ⚙️ Usage and billing → pay-as-you-go (this project already
-> ran Functions on it; still free within quota).
+
+### Troubleshooting the deploy run
+
+The **workflow v2** tells you exactly what to fix — check the error box under
+**Actions → Deploy Firebase backend → (failed run) → Deploy job**:
+
+| Error in the log | Fix |
+|---|---|
+| `Invalid FIREBASE_SERVICE_ACCOUNT – not valid JSON` | The secret was pasted incompletely. Re-download the key (Firebase Console → Service accounts → **Generate new private key**) and paste the **entire file** into the GitHub secret. |
+| `Incomplete FIREBASE_SERVICE_ACCOUNT – missing field(s)` | Same as above — the paste was truncated. |
+| `Wrong project` | The key belongs to a different Firebase project — generate it inside **gass-13462**. |
+| `Failed to authenticate` (deploy step) | The key was revoked or is stale — delete the secret and create it again from a fresh key file. |
+| `API … has not been used` / `not enabled` | Open the URL printed in the error, click **Enable** (one-time Google API activation), then **Re-run jobs**. |
+| `Billing` / `quota` errors | Firebase Console → ⚙️ Usage and billing → set the project to the **Blaze** plan (functions already ran on it; free within quota). |
 
 ## Step 3 — Point GitHub Pages at the v1.0 branch
 
