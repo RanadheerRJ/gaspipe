@@ -33,12 +33,13 @@ import {
 // Replace this object with your own Firebase project config from
 // https://console.firebase.google.com → Project Settings → General → Your apps → Web
 const FIREBASE_CONFIG = {
-  apiKey: 'YOUR_API_KEY',
-  authDomain: 'YOUR_PROJECT.firebaseapp.com',
-  projectId: 'YOUR_PROJECT_ID',
-  storageBucket: 'YOUR_PROJECT.appspot.com',
-  messagingSenderId: 'YOUR_SENDER_ID',
-  appId: 'YOUR_APP_ID',
+  apiKey: 'AIzaSyAAnNivgnZAFNsYkBEYEqYkA1t1o2_8ets',
+  authDomain: 'gass-13462.firebaseapp.com',
+  projectId: 'gass-13462',
+  storageBucket: 'gass-13462.firebasestorage.app',
+  messagingSenderId: '882056009263',
+  appId: '1:882056009263:web:5a15413cd2f2459825d8da',
+  measurementId: 'G-G8SNH63CKY',
 };
 
 // ── Init main app ───────────────────────────────────────────────────────
