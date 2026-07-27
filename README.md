@@ -50,7 +50,9 @@ The rules enforce:
 
 ### Bootstrap Account
 
-The **first user** to sign up automatically becomes **Super Admin**. Subsequent signups default to **Staff** until a Super Admin promotes them via the Config → Team page.
+The **first user** to sign up automatically becomes **Super Admin**. PumpLog records this in Firestore at `app/bootstrap`. Subsequent signups default to **Staff** until a Super Admin promotes them via the Config → Team page.
+
+If a signup creates a Firebase Auth account but gets stuck on the login screen, publish the included `firestore.rules` in Firebase Console → Firestore Database → Rules, then use **Sign In** with the same email/password.
 
 ## Deploy to GitHub Pages
 

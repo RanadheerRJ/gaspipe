@@ -1,6 +1,6 @@
 /* PumpLog — Firebase initialization (separate app instances for auth creation) */
 
-import { initializeApp, getApps } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
+import { initializeApp, getApps, deleteApp } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-app.js';
 import {
   getAuth,
   connectAuthEmulator,
@@ -72,9 +72,9 @@ function getAdminApp(config) {
   return { app: adminApp, auth: adminAuth, db: adminDb };
 }
 
-function destroyAdminApp() {
+async function destroyAdminApp() {
   if (adminApp) {
-    adminApp.delete();
+    await deleteApp(adminApp);
     adminApp = null;
     adminAuth = null;
     adminDb = null;

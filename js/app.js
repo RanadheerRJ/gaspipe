@@ -17,6 +17,7 @@ import {
   doSignOut,
   signIn,
   signUp,
+  formatFirebaseError,
 } from './auth.js';
 import {
   openModal,
@@ -37,6 +38,8 @@ let auth = null;
 let currentStationId = null;
 let userStations = [];
 let currentPage = 'dashboard';
+let authMode = 'signin';
+let authSubmitting = false;
 
 // ── DOM refs ────────────────────────────────────────────────────────────
 const $ = (id) => document.getElementById(id);
@@ -45,10 +48,20 @@ const $ = (id) => document.getElementById(id);
 document.addEventListener('DOMContentLoaded', () => {
   initAuth();
   setupAuthForm();
+
+  window.addEventListener('pumplog:stationsChanged', async (event) => {
+    if (!db) return;
+    await loadUserStations();
+    if (event.detail?.stationId) {
+      currentStationId = event.detail.stationId;
+    }
+    currentPage = 'config';
+    renderCurrentPage();
+  });
 });
 
 // ── Auth change handler ─────────────────────────────────────────────────
-onAuthChange(async (user, userData) => {
+onAuthChange(async (user, userData, authError) => {
   if (user && userData) {
     // User is signed in
     const { auth: a, db: d } = initMainApp(FIREBASE_CONFIG);
@@ -56,6 +69,8 @@ onAuthChange(async (user, userData) => {
     db = d;
 
     // Hide auth screen, show app
+    clearAuthMessage();
+    resetAuthSubmit();
     $('auth-screen').classList.add('hidden');
     $('app-shell').classList.remove('hidden');
     showLoading(false);
@@ -88,9 +103,9 @@ onAuthChange(async (user, userData) => {
       }
     }
 
-    // If Super Admin with no stations, still allow station creation
+    // If Super Admin has no stations yet, open Config so they can create one.
     if (!currentStationId && isSuperAdmin()) {
-      // Super Admin can still access config to create stations
+      currentPage = 'config';
     }
 
     // Render initial page
@@ -103,6 +118,12 @@ onAuthChange(async (user, userData) => {
     $('auth-screen').classList.remove('hidden');
     $('app-shell').classList.add('hidden');
     showLoading(false);
+    resetAuthSubmit();
+
+    if (authError) {
+      setAuthMode('signin');
+      showAuthMessage(formatFirebaseError(authError), 'error');
+    }
   }
 });
 
@@ -176,38 +197,128 @@ async function renderCurrentPage() {
   }
 }
 
+// ── Auth form helpers ──────────────────────────────────────────────────
+function showAuthMessage(message, type = 'error') {
+  const messageEl = $('auth-error');
+  if (!messageEl) return;
+  messageEl.textContent = message;
+  messageEl.classList.remove('hidden', 'auth-info', 'auth-success');
+  if (type === 'info') messageEl.classList.add('auth-info');
+  if (type === 'success') messageEl.classList.add('auth-success');
+}
+
+function clearAuthMessage() {
+  const messageEl = $('auth-error');
+  if (!messageEl) return;
+  messageEl.textContent = '';
+  messageEl.classList.add('hidden');
+  messageEl.classList.remove('auth-info', 'auth-success');
+}
+
+function authSubmitLabel() {
+  return authMode === 'signup' ? 'Sign Up' : 'Sign In';
+}
+
+function resetAuthSubmit() {
+  authSubmitting = false;
+  const submitBtn = $('auth-submit');
+  if (!submitBtn) return;
+  submitBtn.disabled = false;
+  submitBtn.textContent = authSubmitLabel();
+}
+
+function setAuthSubmitting(isSubmitting) {
+  authSubmitting = isSubmitting;
+  const submitBtn = $('auth-submit');
+  if (!submitBtn) return;
+  submitBtn.disabled = isSubmitting;
+  submitBtn.textContent = isSubmitting
+    ? (authMode === 'signup' ? 'Creating account…' : 'Signing in…')
+    : authSubmitLabel();
+}
+
+function setAuthMode(mode) {
+  authMode = mode;
+  const isSignUp = authMode === 'signup';
+  $('auth-title').textContent = isSignUp ? 'Create Account' : 'Sign In';
+  $('auth-submit').textContent = isSignUp ? 'Sign Up' : 'Sign In';
+  $('auth-password').autocomplete = isSignUp ? 'new-password' : 'current-password';
+  $('auth-toggle-text').textContent = isSignUp
+    ? 'Already have an account? '
+    : "Don't have an account? ";
+  $('auth-toggle-link').textContent = isSignUp ? 'Sign In' : 'Sign Up';
+}
+
 // ── Setup auth form (runs immediately on page load, before sign-in) ─────
 function setupAuthForm() {
-  let isSignUp = false;
   const toggleLink = $('auth-toggle-link');
   const authForm = $('auth-form');
 
+  setAuthMode('signin');
+
   toggleLink.addEventListener('click', (e) => {
     e.preventDefault();
-    isSignUp = !isSignUp;
-    $('auth-title').textContent = isSignUp ? 'Create Account' : 'Sign In';
-    $('auth-submit').textContent = isSignUp ? 'Sign Up' : 'Sign In';
-    toggleLink.textContent = isSignUp
-      ? 'Already have an account? Sign In'
-      : "Don't have an account? Sign Up";
+    if (authSubmitting) return;
+    clearAuthMessage();
+    setAuthMode(authMode === 'signup' ? 'signin' : 'signup');
+  });
+
+  ['auth-email', 'auth-password'].forEach((id) => {
+    $(id).addEventListener('input', () => {
+      if (!authSubmitting) clearAuthMessage();
+    });
   });
 
   authForm.addEventListener('submit', async (e) => {
     e.preventDefault();
+    if (authSubmitting) return;
+
     const email = $('auth-email').value.trim();
     const password = $('auth-password').value;
-    const errorEl = $('auth-error');
-    errorEl.classList.add('hidden');
+
+    if (!email || !password) {
+      showAuthMessage('Enter both email and password.', 'error');
+      return;
+    }
+
+    if (authMode === 'signup' && password.length < 6) {
+      showAuthMessage('Password must be at least 6 characters.', 'error');
+      return;
+    }
+
+    setAuthSubmitting(true);
+    showAuthMessage(
+      authMode === 'signup'
+        ? 'Creating your account… Please wait.'
+        : 'Signing you in… Please wait.',
+      'info'
+    );
 
     try {
-      if (isSignUp) {
+      if (authMode === 'signup') {
         await signUp(email, password);
+        showAuthMessage('Account created. Setting up your PumpLog profile…', 'success');
       } else {
         await signIn(email, password);
+        showAuthMessage('Signed in. Loading PumpLog…', 'success');
       }
+      // Keep the button disabled until the auth-state listener either opens the
+      // app or reports a profile/Firestore setup error. If Firebase never sends
+      // that follow-up event, unlock the form with a clear instruction.
+      window.setTimeout(() => {
+        const authScreenVisible = !$('auth-screen')?.classList.contains('hidden');
+        if (authSubmitting && authScreenVisible) {
+          showAuthMessage(
+            'Still waiting for Firebase profile setup. If this message stays, refresh the page and make sure the updated Firestore rules are published.',
+            'info'
+          );
+          resetAuthSubmit();
+        }
+      }, 12000);
     } catch (err) {
-      errorEl.textContent = err.message;
-      errorEl.classList.remove('hidden');
+      console.error('Auth submit error:', err);
+      showAuthMessage(formatFirebaseError(err), 'error');
+      resetAuthSubmit();
     }
   });
 }

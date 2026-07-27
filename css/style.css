@@ -127,7 +127,16 @@ body {
   padding: 10px 14px;
   border-radius: var(--radius-sm);
   font-size: 13px;
+  line-height: 1.45;
   margin-bottom: 16px;
+}
+.auth-error.auth-info {
+  background: var(--blue-bg);
+  color: var(--blue);
+}
+.auth-error.auth-success {
+  background: var(--green-bg);
+  color: var(--green);
 }
 .field {
   margin-bottom: 16px;
@@ -186,6 +195,11 @@ body {
   -webkit-tap-highlight-color: transparent;
 }
 .btn:active { transform: scale(0.97); }
+.btn:disabled {
+  opacity: 0.65;
+  cursor: not-allowed;
+  transform: none;
+}
 .btn-primary {
   background: var(--primary);
   color: #fff;

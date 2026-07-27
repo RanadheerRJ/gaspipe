@@ -19,6 +19,7 @@ import {
   isStationAdmin,
   hasRole,
   createUserAsAdmin,
+  formatFirebaseError,
 } from './auth.js';
 import {
   formatCurrency, formatDate, getTodayDate,
@@ -35,10 +36,6 @@ export function initConfig(firestore) {
 // ── Render ──────────────────────────────────────────────────────────────
 export async function renderConfig(stationId) {
   currentStationId = stationId;
-  if (!stationId) {
-    document.getElementById('page-content').innerHTML = emptyState('⚙️', 'Select a station to configure.');
-    return;
-  }
 
   const userData = getCurrentUserData();
   if (!hasRole('superadmin', 'stationadmin')) {
@@ -46,38 +43,47 @@ export async function renderConfig(stationId) {
     return;
   }
 
+  if (!stationId && !isSuperAdmin()) {
+    document.getElementById('page-content').innerHTML = emptyState('⚙️', 'Select a station to configure.');
+    return;
+  }
+
   try {
     let html = '<h2 style="font-size:22px;font-weight:700;margin-bottom:20px;">Settings</h2>';
+    const rates = [];
 
     // ── Rates Section ──────────────────────────────────────────────
-    html += `<div class="config-section"><h3>Rates <button id="add-rate-btn" class="btn btn-primary btn-small">+ Add Rate</button></h3>`;
-    const ratesQ = query(
-      collection(db, 'stations', stationId, 'rates'),
-      orderBy('effectiveDate', 'desc')
-    );
-    const ratesSnap = await getDocs(ratesQ);
-    const rates = [];
-    ratesSnap.forEach(d => rates.push({ id: d.id, ...d.data() }));
+    if (stationId) {
+      html += `<div class="config-section"><h3>Rates <button id="add-rate-btn" class="btn btn-primary btn-small">+ Add Rate</button></h3>`;
+      const ratesQ = query(
+        collection(db, 'stations', stationId, 'rates'),
+        orderBy('effectiveDate', 'desc')
+      );
+      const ratesSnap = await getDocs(ratesQ);
+      ratesSnap.forEach(d => rates.push({ id: d.id, ...d.data() }));
 
-    if (rates.length === 0) {
-      html += emptyState('💰', 'No rates configured. Add a rate to start tracking sales.');
+      if (rates.length === 0) {
+        html += emptyState('💰', 'No rates configured. Add a rate to start tracking sales.');
+      } else {
+        rates.forEach(r => {
+          html += `
+            <div class="config-item" data-rate-id="${r.id}">
+              <div class="item-info">
+                <div class="item-title">${r.product} — ${formatCurrency(r.rate)}/L</div>
+                <div class="item-meta">Effective: ${formatDate(r.effectiveDate)}</div>
+              </div>
+              <div class="item-actions">
+                <button class="icon-btn edit-rate" data-id="${r.id}" title="Edit">✏️</button>
+                <button class="icon-btn delete-rate" data-id="${r.id}" title="Delete">🗑️</button>
+              </div>
+            </div>
+          `;
+        });
+      }
+      html += `</div>`;
     } else {
-      rates.forEach(r => {
-        html += `
-          <div class="config-item" data-rate-id="${r.id}">
-            <div class="item-info">
-              <div class="item-title">${r.product} — ${formatCurrency(r.rate)}/L</div>
-              <div class="item-meta">Effective: ${formatDate(r.effectiveDate)}</div>
-            </div>
-            <div class="item-actions">
-              <button class="icon-btn edit-rate" data-id="${r.id}" title="Edit">✏️</button>
-              <button class="icon-btn delete-rate" data-id="${r.id}" title="Delete">🗑️</button>
-            </div>
-          </div>
-        `;
-      });
+      html += emptyState('🏪', 'Create your first station below, then select it from the top bar to add rates and pumps.');
     }
-    html += `</div>`;
 
     // ── Stations Section (Super Admin only) ────────────────────────
     if (isSuperAdmin()) {
@@ -288,9 +294,9 @@ async function showAddStationForm() {
     if (!name) return;
 
     try {
-      await addDoc(collection(db, 'stations'), { name, address, createdAt: serverTimestamp() });
+      const stationRef = await addDoc(collection(db, 'stations'), { name, address, createdAt: serverTimestamp() });
       closeModal('generic-modal');
-      renderConfig(currentStationId);
+      window.dispatchEvent(new CustomEvent('pumplog:stationsChanged', { detail: { stationId: stationRef.id } }));
     } catch (err) {
       console.error('Create station error:', err);
       alert('Failed to create station.');
@@ -360,6 +366,10 @@ async function showAddUserForm() {
 
   document.getElementById('user-form').addEventListener('submit', async (e) => {
     e.preventDefault();
+    const form = e.currentTarget;
+    const submitBtn = form.querySelector('button[type="submit"]');
+    if (submitBtn.disabled) return;
+
     const email = document.getElementById('new-email').value.trim();
     const password = document.getElementById('new-password').value;
     const role = document.getElementById('new-role').value;
@@ -369,6 +379,9 @@ async function showAddUserForm() {
 
     if (!email || !password) return;
 
+    submitBtn.disabled = true;
+    submitBtn.textContent = 'Creating account…';
+
     try {
       await createUserAsAdmin(email, password, role, stationIds);
       closeModal('generic-modal');
@@ -376,7 +389,9 @@ async function showAddUserForm() {
       alert(`Account created for ${email}. They can sign in immediately.`);
     } catch (err) {
       console.error('Create user error:', err);
-      alert('Failed to create user: ' + err.message);
+      alert('Failed to create user: ' + formatFirebaseError(err));
+      submitBtn.disabled = false;
+      submitBtn.textContent = 'Create Account';
     }
   });
 }
