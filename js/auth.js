@@ -12,7 +12,13 @@ import {
   doc,
   getDoc,
   setDoc,
+  collection,
+  query,
+  where,
+  getDocs,
   serverTimestamp,
+  auth as firebaseAuth,
+  db as firebaseDb,
 } from './firebase.js';
 
 let currentUser = null;
@@ -76,22 +82,19 @@ async function checkBootstrapSuperAdmin(user, db) {
 
 // ── Sign In ─────────────────────────────────────────────────────────────
 export async function signIn(email, password) {
-  const { auth } = await import('./firebase.js');
-  return signInWithEmailAndPassword(auth, email, password);
+  return signInWithEmailAndPassword(firebaseAuth, email, password);
 }
 
 // ── Sign Up ─────────────────────────────────────────────────────────────
 export async function signUp(email, password) {
-  const { auth, db } = await import('./firebase.js');
-  const cred = await createUserWithEmailAndPassword(auth, email, password);
+  const cred = await createUserWithEmailAndPassword(firebaseAuth, email, password);
   // The onAuthStateChanged handler will create the user doc via bootstrap check
   return cred;
 }
 
 // ── Sign Out ────────────────────────────────────────────────────────────
 export async function doSignOut() {
-  const { auth } = await import('./firebase.js');
-  await signOut(auth);
+  await signOut(firebaseAuth);
 }
 
 // ── Create User via Admin (without signing out current user) ────────────
@@ -108,8 +111,7 @@ export async function createUserAsAdmin(email, password, role, stationIds) {
     createdAt: serverTimestamp(),
   };
 
-  const { db } = await import('./firebase.js');
-  await setDoc(doc(db, 'users', cred.user.uid), userData);
+  await setDoc(doc(firebaseDb, 'users', cred.user.uid), userData);
 
   // Sign out of the admin instance
   await signOut(admin.auth);

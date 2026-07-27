@@ -3,23 +3,20 @@
 import {
   FIREBASE_CONFIG,
   initMainApp,
-  getAuth,
-  getFirestore,
   collection,
   doc,
   getDoc,
   getDocs,
-  query,
-  orderBy,
 } from './firebase.js';
 import {
   initAuth,
   onAuthChange,
-  getCurrentUser,
   getCurrentUserData,
   isSuperAdmin,
   isStationAdmin,
   doSignOut,
+  signIn,
+  signUp,
 } from './auth.js';
 import {
   openModal,
@@ -47,6 +44,7 @@ const $ = (id) => document.getElementById(id);
 // ── Init ────────────────────────────────────────────────────────────────
 document.addEventListener('DOMContentLoaded', () => {
   initAuth();
+  setupAuthForm();
 });
 
 // ── Auth change handler ─────────────────────────────────────────────────
@@ -178,7 +176,43 @@ async function renderCurrentPage() {
   }
 }
 
-// ── Setup UI interactions ───────────────────────────────────────────────
+// ── Setup auth form (runs immediately on page load, before sign-in) ─────
+function setupAuthForm() {
+  let isSignUp = false;
+  const toggleLink = $('auth-toggle-link');
+  const authForm = $('auth-form');
+
+  toggleLink.addEventListener('click', (e) => {
+    e.preventDefault();
+    isSignUp = !isSignUp;
+    $('auth-title').textContent = isSignUp ? 'Create Account' : 'Sign In';
+    $('auth-submit').textContent = isSignUp ? 'Sign Up' : 'Sign In';
+    toggleLink.textContent = isSignUp
+      ? 'Already have an account? Sign In'
+      : "Don't have an account? Sign Up";
+  });
+
+  authForm.addEventListener('submit', async (e) => {
+    e.preventDefault();
+    const email = $('auth-email').value.trim();
+    const password = $('auth-password').value;
+    const errorEl = $('auth-error');
+    errorEl.classList.add('hidden');
+
+    try {
+      if (isSignUp) {
+        await signUp(email, password);
+      } else {
+        await signIn(email, password);
+      }
+    } catch (err) {
+      errorEl.textContent = err.message;
+      errorEl.classList.remove('hidden');
+    }
+  });
+}
+
+// ── Setup app UI interactions (only runs after sign-in) ─────────────────
 function setupUI() {
   // ── Tab navigation ──────────────────────────────────────────────
   document.querySelectorAll('.tab').forEach(tab => {
@@ -305,35 +339,4 @@ function setupUI() {
     });
   });
 
-  // ── Auth screen toggle ──────────────────────────────────────────
-  let isSignUp = false;
-  $('auth-toggle-link').addEventListener('click', (e) => {
-    e.preventDefault();
-    isSignUp = !isSignUp;
-    $('auth-title').textContent = isSignUp ? 'Create Account' : 'Sign In';
-    $('auth-submit').textContent = isSignUp ? 'Sign Up' : 'Sign In';
-    $('auth-toggle-link').textContent = isSignUp
-      ? 'Already have an account? Sign In'
-      : "Don't have an account? Sign Up";
-  });
-
-  $('auth-form').addEventListener('submit', async (e) => {
-    e.preventDefault();
-    const email = $('auth-email').value.trim();
-    const password = $('auth-password').value;
-    const errorEl = $('auth-error');
-    errorEl.classList.add('hidden');
-
-    try {
-      const { signIn, signUp } = await import('./auth.js');
-      if (isSignUp) {
-        await signUp(email, password);
-      } else {
-        await signIn(email, password);
-      }
-    } catch (err) {
-      errorEl.textContent = err.message;
-      errorEl.classList.remove('hidden');
-    }
-  });
 }
