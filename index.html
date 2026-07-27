@@ -159,6 +159,11 @@
       </div>
       <div class="modal-body">
         <p id="confirm-message"></p>
+        <div id="confirm-input-wrap" class="field hidden">
+          <label for="confirm-input">Type to confirm</label>
+          <input type="text" id="confirm-input" autocomplete="off" />
+          <small id="confirm-input-hint" class="hint"></small>
+        </div>
         <div class="confirm-actions">
           <button type="button" id="confirm-cancel" class="btn btn-secondary btn-full">Cancel</button>
           <button type="button" id="confirm-ok" class="btn btn-primary btn-full">Confirm</button>

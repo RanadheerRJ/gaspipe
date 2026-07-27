@@ -122,11 +122,21 @@ export function toast(message, type = 'info', timeout = 4000) {
 }
 
 // ── Accessible confirm dialog (replaces blocking confirm()) ─────────────
-export function confirmDialog({ title, message, confirmLabel = 'Confirm', danger = false }) {
+export function confirmDialog({ title, message, confirmLabel = 'Confirm', danger = false, confirmationText = '' }) {
   return new Promise(resolve => {
     const modal = document.getElementById('confirm-modal');
     document.getElementById('confirm-title').textContent = title;
     document.getElementById('confirm-message').textContent = message;
+
+    const inputWrap = document.getElementById('confirm-input-wrap');
+    const input = document.getElementById('confirm-input');
+    const inputHint = document.getElementById('confirm-input-hint');
+    if (inputWrap && input && inputHint) {
+      inputWrap.classList.toggle('hidden', !confirmationText);
+      input.value = '';
+      inputHint.textContent = confirmationText ? `Type “${confirmationText}” to continue.` : '';
+      input.setAttribute('aria-required', confirmationText ? 'true' : 'false');
+    }
 
     const okBtn = document.getElementById('confirm-ok');
     const cancelBtn = document.getElementById('confirm-cancel');
@@ -140,7 +150,14 @@ export function confirmDialog({ title, message, confirmLabel = 'Confirm', danger
       closeModal('confirm-modal');
       resolve(result);
     }
-    function onOk() { cleanup(true); }
+    function onOk() {
+      if (confirmationText && input?.value.trim() !== confirmationText) {
+        if (inputHint) inputHint.textContent = `Type the station name exactly: ${confirmationText}`;
+        input?.focus();
+        return;
+      }
+      cleanup(true);
+    }
     function onCancel() { cleanup(false); }
 
     okBtn.addEventListener('click', onOk);
@@ -148,7 +165,7 @@ export function confirmDialog({ title, message, confirmLabel = 'Confirm', danger
     modal.addEventListener('pumplog:closed', onCancel, { once: true });
 
     openModal('confirm-modal');
-    requestAnimationFrame(() => cancelBtn.focus());
+    requestAnimationFrame(() => (confirmationText ? input : cancelBtn)?.focus());
   });
 }
 
@@ -208,6 +225,28 @@ export function formatDateTime(d) {
   const date = toDate(d);
   if (!date) return '';
   return `${formatDate(date)} ${formatTime(date)}`;
+}
+
+export function timestampToDate(value) {
+  return toDate(value);
+}
+
+export function formatTimeAgo(value) {
+  const date = toDate(value);
+  if (!date) return '';
+  const minutes = Math.max(0, Math.floor((Date.now() - date.getTime()) / 60000));
+  if (minutes < 1) return 'just now';
+  if (minutes < 60) return `${minutes} min ago`;
+  const hours = Math.floor(minutes / 60);
+  if (hours < 24) return `${hours}h ago`;
+  const days = Math.floor(hours / 24);
+  return `${days}d ago`;
+}
+
+export function knownHours(shift) {
+  return typeof shift?.hoursWorked === 'number' && Number.isFinite(shift.hoursWorked)
+    ? shift.hoursWorked
+    : null;
 }
 
 export function getGreeting() {

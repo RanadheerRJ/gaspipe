@@ -104,6 +104,29 @@ export function getPumps(stationId) {
   });
 }
 
+// ── Live pump session locks ─────────────────────────────────────────────
+// A missing session document is intentionally returned as idle by callers.
+// Keeping this separate from shifts prevents a stale history row from
+// pretending that a pump is currently occupied.
+export function getPumpSessions(stationId) {
+  if (!stationId) return Promise.resolve([]);
+  return cached(`station:${stationId}:pumpSessions`, async () => {
+    const snap = await getDocs(collection(getDb(), 'stations', stationId, 'pumpSessions'));
+    return snapToArray(snap);
+  });
+}
+
+export function watchPumpSessions(stationId, { onUpdate, onError } = {}) {
+  if (!stationId || !getCurrentUserData()) return () => {};
+  const q = collection(getDb(), 'stations', stationId, 'pumpSessions');
+  return onSnapshot(q, snap => {
+    onUpdate?.(snapToArray(snap), { fromCache: snap.metadata.fromCache, at: Date.now() });
+  }, err => {
+    console.warn('Pump session subscription error:', err);
+    onError?.(err);
+  });
+}
+
 // ── Rates ───────────────────────────────────────────────────────────────
 export function getRates(stationId) {
   if (!stationId) return Promise.resolve([]);

@@ -36,6 +36,7 @@ import {
   Timestamp,
   serverTimestamp,
   writeBatch,
+  runTransaction,
   onSnapshot,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-firestore.js';
 
@@ -62,7 +63,7 @@ function initMainApp(config = FIREBASE_CONFIG) {
   mainApp = getApps().length ? getApps()[0] : initializeApp(config);
   mainAuth = getAuth(mainApp);
 
-  // Keep the session across reloads without a network round-trip.
+  // Explicit local persistence keeps staff signed in across app restarts and tab closes.
   setPersistence(mainAuth, browserLocalPersistence).catch(() => {});
 
   try {
@@ -132,5 +133,6 @@ export {
   Timestamp,
   serverTimestamp,
   writeBatch,
+  runTransaction,
   onSnapshot,
 };

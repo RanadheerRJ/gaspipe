@@ -245,11 +245,26 @@ export function can(action, ctx = {}) {
     case 'pump.delete':
       return (superAdmin || stationAdmin) && stationOk;
 
-    // ── Shifts ─────────────────────────────────────────────────────
+    // ── Shifts and live pump sessions ──────────────────────────────
     case 'shift.create':
       return stationOk;
     case 'shift.update':
     case 'shift.delete':
+      return (superAdmin || stationAdmin) && stationOk;
+    case 'pumpSession.start':
+      return stationOk && (superAdmin || stationAdmin || canUsePump(ctx.pumpId));
+    case 'pumpSession.end':
+      return stationOk && (superAdmin || stationAdmin || canUsePump(ctx.pumpId));
+    case 'pumpSession.forceRelease':
+      return (superAdmin || stationAdmin) && stationOk;
+
+    // Reports deliberately allow Staff to access their own data. The page
+    // never offers them an employee picker, and Firestore scopes their reads.
+    case 'report.view':
+      return stationOk && (superAdmin || stationAdmin || isStaff());
+    case 'report.viewOthers':
+      return (superAdmin || stationAdmin) && stationOk;
+    case 'station.reset':
       return (superAdmin || stationAdmin) && stationOk;
 
     // ── Config page access ─────────────────────────────────────────
@@ -309,7 +324,10 @@ export function denyReason(action, ctx = {}) {
   }
   if (action.startsWith('rate.')) return 'Rates are controlled by Managers and Admins only.';
   if (action.startsWith('pump.')) return 'Only Managers and Admins can configure pumps.';
+  if (action === 'station.reset') return 'Only station managers can reset station data.';
+  if (action === 'report.viewOthers') return 'Staff can only view their own report card.';
   if (action.startsWith('station.')) return 'Only a Super Admin can manage stations.';
+  if (action.startsWith('pumpSession.')) return 'Only the active staff member or a station manager can do this.';
   return 'Your role does not allow this action.';
 }
 
