@@ -24,6 +24,18 @@ way around this, but you only fetch it once.
 4. Name: `FIREBASE_SERVICE_ACCOUNT` · Value: open the downloaded `.json` in a
    text editor and paste the **entire contents** → **Add secret**.
 
+**🔑 The service account needs a project role!** The Firebase console button
+above keys the built-in `firebase-adminsdk` account, which already carries the
+**Editor** role — nothing else to do. If you instead created your own service
+account in **Google Cloud Console → IAM & Admin → Service Accounts**, it starts
+with **no permissions at all** and the deploy fails with
+`403 Permission denied to get service …`. Grant it a role first:
+
+1. Open **Google Cloud Console → IAM & Admin → IAM**:
+   https://console.cloud.google.com/iam-admin/iam?project=gass-13462
+2. Find your service account in the list → click its **pencil (edit)** icon →
+   **Add another role** → choose **Editor** → **Save**.
+
 ## Step 2 — Add the deploy workflow file (≈1 minute)
 
 GitHub only lets *users with repo write access* create workflow files (a
@@ -61,6 +73,7 @@ The **workflow v2** tells you exactly what to fix — check the error box under
 | `Incomplete FIREBASE_SERVICE_ACCOUNT – missing field(s)` | Same as above — the paste was truncated. |
 | `Wrong project` | The key belongs to a different Firebase project — generate it inside **gass-13462**. |
 | `Failed to authenticate` (deploy step) | The key was revoked or is stale — delete the secret and create it again from a fresh key file. |
+| `403 Permission denied to get service …` | The service account has **no project role** — Cloud Console → [IAM](https://console.cloud.google.com/iam-admin/iam?project=gass-13462) → pencil on the service account → add role **Editor** → Save, then **Re-run jobs**. No new key or secret needed. |
 | `API … has not been used` / `not enabled` | Open the URL printed in the error, click **Enable** (one-time Google API activation), then **Re-run jobs**. |
 | `Billing` / `quota` errors | Firebase Console → ⚙️ Usage and billing → set the project to the **Blaze** plan (functions already ran on it; free within quota). |
 
@@ -102,8 +115,9 @@ npx firebase-tools deploy --only firestore:rules
 ## What NOT to do
 
 - **Don't commit the service-account JSON** into the repo — it belongs in the
-  GitHub secret store only. (The root `.gitignore` in this repo already blocks
-  common credential file names.)
+  GitHub secret store only. Google actively scans public repos and **revokes
+  leaked keys automatically**, which is another way a deploy suddenly breaks.
+  (The root `.gitignore` in this repo already blocks common credential file names.)
 - **Don't disable the GitHub Action** — it exits silently when the secret is
   missing, so it is harmless while unfinished.
 - **Don't put temporary passwords/PINs in chat or screenshots** — share the

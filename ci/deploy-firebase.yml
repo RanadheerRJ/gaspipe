@@ -113,9 +113,10 @@ jobs:
         run: |
           if ! npx --yes firebase-tools@15 deploy --only "functions,firestore:rules" --non-interactive; then
             echo "::error title=Deploy failed::Read the red error line above. The most common fixes:"
-            echo '1) “Failed to authenticate” → delete and re-create the FIREBASE_SERVICE_ACCOUNT secret — Firebase Console → Project settings → Service accounts → Generate new private key, then paste the ENTIRE downloaded file into the GitHub secret.'
-            echo '2) “API … not enabled” → open the URL printed in the error and click Enable, then Re-run jobs.'
-            echo '3) “Billing”/“quota” → set the project to the Blaze plan: Firebase Console → ⚙️ Usage and billing.'
+            echo '1) “403 Permission denied to get service” → the service account has NO project role. Google Cloud Console → IAM & Admin → IAM → pencil on the service account → add role “Editor” → Save, then Re-run jobs. No new key needed.'
+            echo '2) “Failed to authenticate” → delete and re-create the FIREBASE_SERVICE_ACCOUNT secret — Firebase Console → Project settings → Service accounts → Generate new private key, then paste the ENTIRE downloaded file into the GitHub secret.'
+            echo '3) “API … not enabled” → open the URL printed in the error and click Enable, then Re-run jobs.'
+            echo '4) “Billing”/“quota” → set the project to the Blaze plan: Firebase Console → ⚙️ Usage and billing.'
             echo 'Full guide: DEPLOYMENT.md'
             exit 1
           fi
