@@ -1024,3 +1024,99 @@ fieldset.is-disabled { opacity: .55; pointer-events: none; }
   #page-content { max-width: none; padding: 0; }
   .card, .shift-record, .config-item, .stat-card { box-shadow: none; border: 1px solid #ccc; }
 }
+
+/* ===== Clock-in / clock-out pump board ===== */
+.pump-grid {
+  list-style: none;
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(280px, 1fr));
+  gap: 14px;
+}
+.pump-card {
+  display: flex;
+  flex-direction: column;
+  min-height: 210px;
+  padding: 17px;
+  background: var(--surface);
+  border: 2px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.pump-card.mine { border-color: var(--green); }
+.pump-card.other { border-color: var(--amber); }
+.pump-card-head { display: flex; align-items: flex-start; gap: 11px; }
+.pump-card-icon {
+  flex: 0 0 44px; height: 44px; display: flex; align-items: center; justify-content: center;
+  border-radius: var(--radius-sm); background: var(--primary-light); font-size: 22px;
+}
+.pump-card-title { flex: 1; min-width: 0; }
+.pump-card-title h3 { font-size: 18px; line-height: 1.25; }
+.pump-card-title p { color: var(--text-secondary); font-size: 14px; }
+.pump-status { align-self: flex-start; max-width: 48%; white-space: normal; text-align: right; }
+.status-chip.idle { background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border-strong); }
+.status-chip.mine, .status-chip.active-mine { background: var(--green-bg); color: var(--green); }
+.status-chip.other, .status-chip.active-other { background: var(--amber-bg); color: var(--amber); }
+.pump-card-detail { flex: 1; padding: 16px 0 12px; color: var(--text-secondary); font-size: 14px; }
+.pump-action { width: 100%; min-height: 48px; border-radius: var(--radius-sm); font-size: 16px; }
+.pump-action:disabled { background: var(--surface-2); color: var(--text-secondary); border: 1px solid var(--border-strong); opacity: 1; }
+.modal-intro { margin: -4px 0 17px; color: var(--text-secondary); font-size: 14px; }
+.session-reference {
+  display: flex; flex-direction: column; gap: 2px; margin-bottom: 16px; padding: 12px 14px;
+  border-radius: var(--radius-sm); background: var(--green-bg); color: var(--green); font-size: 14px;
+}
+
+/* ===== Report Cards ===== */
+.report-filters {
+  display: grid; grid-template-columns: repeat(auto-fit, minmax(170px, 1fr)); gap: 10px;
+  margin-bottom: 18px; padding: 13px; background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius);
+}
+.report-range-field { grid-column: span 2; }
+.filter-label { font-size: 12px; font-weight: 600; color: var(--text-secondary); margin-bottom: 4px; }
+.report-range-chips { display: flex; flex-wrap: wrap; gap: 7px; }
+.report-range-chips .chip { min-height: 36px; padding: 7px 12px; }
+.report-actions { display: flex; gap: 8px; flex-wrap: wrap; }
+.report-printable { background: var(--surface); border: 1px solid var(--border); border-radius: var(--radius); box-shadow: var(--shadow); overflow: hidden; }
+.report-card-head {
+  display: flex; justify-content: space-between; gap: 14px; padding: 22px 20px;
+  background: linear-gradient(135deg, var(--primary-light), var(--surface)); border-bottom: 1px solid var(--border);
+}
+.eyebrow { color: var(--primary); font-size: 11px; font-weight: 800; letter-spacing: 1px; text-transform: uppercase; }
+.report-card-head h3 { margin-top: 3px; font-size: 24px; line-height: 1.2; }
+.report-card-sub { margin-top: 5px; color: var(--text-secondary); }
+.report-card-mark { font-size: 34px; }
+.report-stat-grid { display: grid; grid-template-columns: repeat(4, 1fr); gap: 1px; background: var(--border); }
+.report-stat-grid > div { display: flex; flex-direction: column; gap: 4px; padding: 16px 14px; background: var(--surface); }
+.report-stat-grid span { color: var(--text-muted); font-size: 12px; }
+.report-stat-grid strong { font-family: var(--mono); font-size: clamp(16px, 3vw, 21px); }
+.report-note { margin: 14px 18px 0; padding: 10px 12px; background: var(--amber-bg); color: var(--amber); border-radius: var(--radius-sm); font-size: 13px; }
+.report-breakdown-head { display: flex; align-items: center; justify-content: space-between; gap: 12px; padding: 20px 18px 9px; }
+.report-breakdown-head h4 { font-size: 16px; }
+.report-breakdown-head span { color: var(--text-muted); font-size: 13px; }
+.report-breakdown-wrap { overflow-x: auto; padding: 0 18px 18px; }
+.report-breakdown { width: 100%; border-collapse: collapse; min-width: 590px; font-size: 13px; }
+.report-breakdown th, .report-breakdown td { padding: 10px 8px; border-bottom: 1px solid var(--border); text-align: left; white-space: nowrap; }
+.report-breakdown th { color: var(--text-secondary); font-size: 11px; letter-spacing: .3px; text-transform: uppercase; }
+.report-breakdown td:nth-last-child(-n+3), .report-breakdown th:nth-last-child(-n+3) { text-align: right; }
+.sr-only { position: absolute; width: 1px; height: 1px; padding: 0; margin: -1px; overflow: hidden; clip: rect(0, 0, 0, 0); white-space: nowrap; border: 0; }
+
+@media (max-width: 560px) {
+  .pump-card-head { flex-wrap: wrap; }
+  .pump-status { order: 3; max-width: none; width: 100%; justify-content: flex-start; text-align: left; }
+  .report-range-field { grid-column: auto; }
+  .report-stat-grid { grid-template-columns: repeat(2, 1fr); }
+  .report-card-head h3 { font-size: 20px; }
+  .report-actions { width: 100%; }
+  .report-actions .btn { flex: 1; }
+}
+
+/* A report is the only printable surface; navigation and controls are app UI. */
+@media print {
+  @page { margin: 14mm; }
+  body { background: #fff; color: #111; }
+  #page-content { max-width: none; padding: 0; }
+  #page-content > .page-head, #page-content > .report-filters { display: none !important; }
+  .report-printable { border: none; box-shadow: none; overflow: visible; }
+  .report-card-head { background: #eef4ff; }
+  .report-breakdown-wrap { padding-left: 0; padding-right: 0; }
+  .report-breakdown { min-width: 0; }
+}

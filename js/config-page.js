@@ -1,7 +1,8 @@
 /* PumpLog — Config page (Rates, Pumps, Stations, Team) */
 
 import {
-  getDb, collection, doc, addDoc, updateDoc, deleteDoc, serverTimestamp,
+  getDb, collection, doc, addDoc, updateDoc, deleteDoc, getDocs, query, limit,
+  serverTimestamp, writeBatch,
 } from './firebase.js';
 import {
   getCurrentUserData, isSuperAdmin, isStationAdmin,
@@ -9,7 +10,7 @@ import {
   createUserAsAdmin, updateUserAsAdmin, deleteUserAsAdmin, formatFirebaseError,
 } from './auth.js';
 import {
-  getAllStations, getStationsByIds, getRates, getPumps, getAllUsers, getUsersCreatedBy,
+  getAllStations, getStationsByIds, getRates, getPumps, getPumpSessions, getAllUsers, getUsersCreatedBy,
   invalidateStation, invalidateStations, invalidateUsers,
 } from './store.js';
 import {
@@ -39,9 +40,10 @@ export async function renderConfig(stationId) {
 
   try {
     // Load every section in parallel instead of sequentially.
-    const [rates, pumps, stations, users] = await Promise.all([
+    const [rates, pumps, sessions, stations, users] = await Promise.all([
       stationId ? getRates(stationId) : [],
       stationId ? getPumps(stationId) : [],
+      stationId ? getPumpSessions(stationId) : [],
       isSuperAdmin() ? getAllStations() : getStationsByIds(me.stationIds || []),
       isSuperAdmin() ? getAllUsers() : getUsersCreatedBy(me.uid),
     ]);
@@ -49,13 +51,13 @@ export async function renderConfig(stationId) {
 
     const sections = [
       renderRatesSection(stationId, rates),
-      renderPumpsSection(stationId, pumps),
-      isSuperAdmin() ? renderStationsSection(stations) : '',
+      renderPumpsSection(stationId, pumps, sessions),
+      renderStationsSection(stations),
       renderTeamSection(users, me),
     ].filter(Boolean).join('');
 
     content.innerHTML = `<h2 class="page-title">Settings</h2>${sections}`;
-    wireHandlers(rates, pumps, stations, users);
+    wireHandlers(rates, pumps, sessions, stations, users);
   } catch (err) {
     console.error('Config render error:', err);
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
@@ -90,7 +92,7 @@ function renderRatesSection(stationId, rates) {
 }
 
 // ── Pumps ───────────────────────────────────────────────────────────────
-function renderPumpsSection(stationId, pumps) {
+function renderPumpsSection(stationId, pumps, sessions = []) {
   if (!stationId) return '';
   const mayEdit = can('pump.update', { stationId });
   const addBtn = can('pump.create', { stationId })
@@ -101,14 +103,20 @@ function renderPumpsSection(stationId, pumps) {
     return section('Pumps', addBtn, emptyState('⛽', 'No pumps configured for this station.'));
   }
 
-  const items = pumps.map(p => configItem({
-    title: h(p.name),
-    meta: h(p.product || 'No product set'),
-    actions: mayEdit ? [
+  const items = pumps.map(p => {
+    const session = sessions.find(s => s.id === p.id && s.status === 'active');
+    const actions = mayEdit ? [
       { cls: 'edit-pump', id: p.id, icon: '✏️', label: `Edit ${p.name}` },
       { cls: 'delete-pump', id: p.id, icon: '🗑️', label: `Delete ${p.name}` },
-    ] : [],
-  })).join('');
+    ] : [];
+    if (session && can('pumpSession.forceRelease', { stationId })) {
+      actions.push({ cls: 'force-release', id: p.id, icon: '🔓', label: `Force release ${p.name}` });
+    }
+    const active = session
+      ? ` · Active since ${formatDateTime(session.clockInAt) || 'just now'} · ${h(session.activeName || 'Staff member')}`
+      : '';
+    return configItem({ title: h(p.name), meta: `${h(p.product || 'No product set')}${active}`, actions });
+  }).join('');
 
   return section('Pumps', addBtn, items);
 }
@@ -123,16 +131,21 @@ function renderStationsSection(stations) {
     return section('Stations', addBtn, emptyState('🏪', 'No stations yet. Create your first one.'));
   }
 
-  const items = stations.map(s => configItem({
-    title: h(s.name),
-    meta: h(s.address || 'No address'),
-    actions: [
-      { cls: 'edit-station', id: s.id, icon: '✏️', label: `Edit ${s.name}` },
-      { cls: 'delete-station', id: s.id, icon: '🗑️', label: `Delete ${s.name}` },
-    ],
-  })).join('');
+  const items = stations.map(s => {
+    const actions = [];
+    if (can('station.update')) actions.push({ cls: 'edit-station', id: s.id, icon: '✏️', label: `Edit ${s.name}` });
+    if (can('station.delete')) actions.push({ cls: 'delete-station', id: s.id, icon: '🗑️', label: `Delete ${s.name}` });
+    if (can('station.reset', { stationId: s.id })) {
+      actions.push({ cls: 'reset-station', id: s.id, icon: '♻️', label: `Reset data for ${s.name}` });
+    }
+    return configItem({
+      title: h(s.name),
+      meta: `${h(s.address || 'No address')} · <span class="destructive-label">Reset removes shift history and live locks only</span>`,
+      actions,
+    });
+  }).join('');
 
-  return section('Stations', addBtn, items);
+  return section('Stations', addBtn, `<p class="section-hint">Reset station data keeps pumps, rates, and team assignments.</p>${items}`);
 }
 
 // ── Team ────────────────────────────────────────────────────────────────
@@ -221,7 +234,7 @@ const onEach = (sel, fn) => document.querySelectorAll(sel).forEach(el =>
   el.addEventListener('click', () => fn(el.dataset.id, el)));
 
 // ── Wiring ──────────────────────────────────────────────────────────────
-function wireHandlers(rates, pumps, stations, users) {
+function wireHandlers(rates, pumps, sessions, stations, users) {
   const sid = currentStationId;
 
   onClick('add-rate-btn', () => showRateForm(null));
@@ -231,10 +244,12 @@ function wireHandlers(rates, pumps, stations, users) {
   onClick('add-pump-btn-cfg', () => showPumpForm(null));
   onEach('.edit-pump', id => showPumpForm(pumps.find(p => p.id === id)));
   onEach('.delete-pump', id => deletePump(pumps.find(p => p.id === id)));
+  onEach('.force-release', id => forceReleasePump(pumps.find(p => p.id === id), sessions.find(s => s.id === id)));
 
   onClick('add-station-btn', () => showStationForm(null));
   onEach('.edit-station', id => showStationForm(stations.find(s => s.id === id)));
   onEach('.delete-station', id => deleteStation(stations.find(s => s.id === id)));
+  onEach('.reset-station', id => resetStationData(stations.find(s => s.id === id)));
 
   onClick('add-team-btn', () => showUserForm(null));
   onEach('.edit-user', id => showUserForm(users.find(u => u.id === id)));
@@ -450,6 +465,81 @@ async function deletePump(pump) {
     rerender();
   } catch (err) {
     console.error('Delete pump error:', err);
+    toast(formatFirebaseError(err), 'error');
+  }
+}
+
+// ── Live lock recovery ──────────────────────────────────────────────────
+async function forceReleasePump(pump, session) {
+  if (!pump || !session || !can('pumpSession.forceRelease', { stationId: currentStationId })) {
+    toast(denyReason('pumpSession.forceRelease'), 'error');
+    return;
+  }
+  const started = formatDateTime(session.clockInAt) || 'an unknown time';
+  const startedBy = session.activeName || 'an unknown staff member';
+  const ok = await confirmDialog({
+    title: 'Force-release pump?',
+    message: `Pump ${pump.name} has been active since ${started}, started by ${startedBy}. Force-release it without saving a shift record?`,
+    confirmLabel: 'Force release',
+    danger: true,
+  });
+  if (!ok) return;
+  try {
+    await updateDoc(doc(getDb(), 'stations', currentStationId, 'pumpSessions', pump.id), {
+      status: 'idle', activeUid: null, activeName: null, clockInAt: null, opening: null,
+      date: null, shiftLabel: null, updatedAt: serverTimestamp(),
+      updatedBy: getCurrentUserData()?.uid || 'unknown',
+    });
+    invalidateStation(currentStationId);
+    toast(`${pump.name} released. No shift record was saved.`, 'success');
+    window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId: currentStationId } }));
+  } catch (err) {
+    console.error('Force release error:', err);
+    toast(formatFirebaseError(err), 'error');
+  }
+}
+
+// Firestore has no client-side delete-collection operation. Delete in small
+// batches so this remains safe for a large station and does not touch config.
+async function deleteSubcollection(stationId, name) {
+  const path = collection(getDb(), 'stations', stationId, name);
+  let deleted = 0;
+  while (true) {
+    const snap = await getDocs(query(path, limit(500)));
+    if (snap.empty) break;
+    const batch = writeBatch(getDb());
+    snap.docs.forEach(item => batch.delete(item.ref));
+    await batch.commit();
+    deleted += snap.size;
+    if (snap.size < 500) break;
+  }
+  return deleted;
+}
+
+async function resetStationData(station) {
+  if (!station || !can('station.reset', { stationId: station.id })) {
+    toast(denyReason('station.reset'), 'error');
+    return;
+  }
+  const ok = await confirmDialog({
+    title: `Reset ${station.name}?`,
+    message: `This permanently deletes every shift record and pump session lock for ${station.name}. Pumps, rates, and team assignments will not be changed. This cannot be undone.`,
+    confirmLabel: 'Reset station data',
+    danger: true,
+    confirmationText: station.name,
+  });
+  if (!ok) return;
+  try {
+    const [shifts, sessions] = await Promise.all([
+      deleteSubcollection(station.id, 'shifts'),
+      deleteSubcollection(station.id, 'pumpSessions'),
+    ]);
+    invalidateStation(station.id);
+    toast(`Station reset — deleted ${shifts + sessions} data record${shifts + sessions === 1 ? '' : 's'}.`, 'success');
+    window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId: station.id } }));
+    rerender();
+  } catch (err) {
+    console.error('Station reset error:', err);
     toast(formatFirebaseError(err), 'error');
   }
 }

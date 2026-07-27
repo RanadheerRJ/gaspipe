@@ -3,7 +3,7 @@
 import { initMainApp } from './firebase.js';
 import {
   initAuth, onAuthChange, getCurrentUserData,
-  isSuperAdmin, can, ROLES,
+  isSuperAdmin, isStationAdmin, isStaff, can, ROLES,
   doSignOut, signIn, signUp, formatFirebaseError,
 } from './auth.js';
 import {
@@ -13,9 +13,10 @@ import {
   h, openModal, closeModal, closeAllModals, showLoading, toast, setBusy,
 } from './components.js';
 import { initDashboard, renderDashboard, stopLiveFeed } from './dashboard.js';
-import { initPumps, renderPumps } from './pumps.js';
+import { initPumps, renderPumps, stopPumpsLive } from './pumps.js';
 import { initConfig, renderConfig } from './config-page.js';
 import { initHistory, renderHistory } from './history.js';
+import { initReports, renderReports } from './reports.js';
 
 const $ = id => document.getElementById(id);
 const STORE_KEY = 'pumplog:lastStation';
@@ -60,6 +61,7 @@ onAuthChange(async (user, userData, authError) => {
     initPumps();
     initConfig();
     initHistory();
+    initReports();
 
     setupUI();
     applyRoleVisibility();
@@ -134,9 +136,11 @@ async function renderCurrentPage() {
   content.setAttribute('aria-busy', 'true');
 
   if (currentPage === 'config' && !can('config.view')) currentPage = 'dashboard';
+  if (currentPage === 'reports' && !can('report.view', { stationId: currentStationId })) currentPage = 'dashboard';
 
-  // The dashboard's Firestore listener runs only while the dashboard is open.
+  // Keep live listeners attached only to the screen currently using them.
   if (currentPage !== 'dashboard') stopLiveFeed();
+  if (currentPage !== 'pumps') stopPumpsLive();
 
   document.querySelectorAll('.tab').forEach(tab => {
     const active = tab.dataset.page === currentPage;
@@ -153,6 +157,7 @@ async function renderCurrentPage() {
       case 'pumps':   await renderPumps(currentStationId); break;
       case 'config':  await renderConfig(currentStationId); break;
       case 'history': await renderHistory(currentStationId, currentRange); break;
+      case 'reports': await renderReports(currentStationId); break;
       default:        await renderDashboard(currentStationId, currentRange);
     }
   } catch (err) {
@@ -166,6 +171,8 @@ async function renderCurrentPage() {
 function applyRoleVisibility() {
   const configTab = document.querySelector('[data-page="config"]');
   if (configTab) configTab.hidden = !can('config.view');
+  const reportsTab = document.querySelector('[data-page="reports"]');
+  if (reportsTab) reportsTab.hidden = !(isSuperAdmin() || isStationAdmin() || isStaff());
 }
 
 // ── Refresh ─────────────────────────────────────────────────────────────

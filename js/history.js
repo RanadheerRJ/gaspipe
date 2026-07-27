@@ -6,12 +6,13 @@ import { getPumps, getShifts, invalidateStation } from './store.js';
 import {
   h, formatCurrency, formatVolume, formatDate, formatDateTime, getTodayDate,
   openModal, closeModal, emptyState, toast, confirmDialog, setBusy, showSkeleton,
-  rangeStart, debounce,
+  rangeStart, debounce, knownHours,
 } from './components.js';
 
 let currentStationId = null;
 let allShifts = [];
 let currentRange = 'today';
+let filteredShifts = [];
 
 export function initHistory() {}
 
@@ -88,7 +89,7 @@ export async function renderHistory(stationId, range = 'today') {
     document.getElementById('filter-pump').addEventListener('change', applyFilters);
     document.getElementById('filter-shift').addEventListener('change', applyFilters);
     document.getElementById('filter-search').addEventListener('input', debounce(applyFilters, 200));
-    document.getElementById('export-csv-btn').addEventListener('click', () => exportCSV(allShifts));
+    document.getElementById('export-csv-btn').addEventListener('click', () => exportCSV(filteredShifts));
 
     paint(allShifts);
   } catch (err) {
@@ -99,15 +100,18 @@ export async function renderHistory(stationId, range = 'today') {
 
 // ── List rendering ──────────────────────────────────────────────────────
 function paint(list) {
+  filteredShifts = list;
   const container = document.getElementById('history-list');
   const summary = document.getElementById('history-summary');
   if (!container) return;
 
   const total = list.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
   const volume = list.reduce((sum, s) => sum + (Number(s.volume) || 0), 0);
+  const unknownHours = list.filter(s => knownHours(s) == null).length;
+  const hours = list.reduce((sum, s) => sum + (knownHours(s) ?? 0), 0);
   if (summary) {
     summary.textContent = list.length
-      ? `${list.length} record${list.length === 1 ? '' : 's'} · ${formatVolume(volume)} · ${formatCurrency(total)}`
+      ? `${list.length} record${list.length === 1 ? '' : 's'} · ${formatVolume(volume)} · ${formatCurrency(total)} · Hours: ${unknownHours ? '—' : `${hours.toFixed(2)} h`}${unknownHours ? ` (${unknownHours} older)` : ''}`
       : '';
   }
 
@@ -141,7 +145,7 @@ function paint(list) {
               <span class="shift-badge">S${h(s.shiftLabel || '?')}</span>
               <span class="shift-main">
                 <span class="pump-name">${h(s.pumpName || 'Pump')}</span>
-                <span class="shift-details">${formatVolume(s.volume)} · ${formatCurrency(s.rate)}/L</span>
+                <span class="shift-details">${formatVolume(s.volume)} · ${formatCurrency(s.rate)}/L · Hours: ${knownHours(s) == null ? '—' : h(Number(s.hoursWorked).toFixed(2) + ' h')}${s.clockInAt ? ` · In ${h(formatDateTime(s.clockInAt))}` : ''}</span>
               </span>
               <span class="shift-amount">${formatCurrency(s.sales)}</span>
               ${(mayEdit || mayDelete) ? `<span class="shift-actions">

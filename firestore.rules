@@ -54,6 +54,45 @@ service cloud.firestore {
       return isSuperAdmin() || (isStationAdmin() && stationId in myStations());
     }
 
+    // Staff pump restrictions are enforced here as well as in js/auth.js.
+    // Missing/empty pumpIds intentionally means every pump at an assigned
+    // station, preserving access for older profiles.
+    function canUsePump(stationId, pumpId) {
+      return canManageStation(stationId)
+        || (myRole() == 'staff'
+            && canAccessStation(stationId)
+            && (!me().keys().hasAny(['pumpIds'])
+                || me().pumpIds.size() == 0
+                || pumpId in me().pumpIds));
+    }
+
+    function sessionPath(stationId, pumpId) {
+      return /databases/$(database)/documents/stations/$(stationId)/pumpSessions/$(pumpId);
+    }
+
+    function sessionFieldsOk() {
+      return request.resource.data.keys().hasAll([
+          'status', 'activeUid', 'activeName', 'pumpName', 'product',
+          'clockInAt', 'opening', 'date', 'shiftLabel', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'status', 'activeUid', 'activeName', 'pumpName', 'product',
+          'clockInAt', 'opening', 'date', 'shiftLabel', 'updatedAt', 'updatedBy'
+        ])
+        && request.resource.data.status in ['idle', 'active'];
+    }
+
+    function writesActiveSession(stationId, pumpId) {
+      return sessionFieldsOk()
+        && request.resource.data.status == 'active'
+        && request.resource.data.activeUid == request.auth.uid
+        && canUsePump(stationId, pumpId);
+    }
+
+    function writesIdleSession() {
+      return sessionFieldsOk() && request.resource.data.status == 'idle';
+    }
+
     function bootstrapPath() {
       return /databases/$(database)/documents/app/bootstrap;
     }
@@ -224,6 +263,33 @@ service cloud.firestore {
         allow delete: if isSignedIn() && canManageStation(stationId);
       }
 
+      // ── Live pump session locks ──────────────────────────────────
+      match /pumpSessions/{pumpId} {
+        // Every signed-in station member needs this read for live lock UI.
+        allow read: if isSignedIn() && canAccessStation(stationId);
+
+        // A transaction may create a missing lock or claim an existing idle
+        // lock. It may never overwrite an active lock with another active one.
+        allow create: if isSignedIn()
+          && canAccessStation(stationId)
+          && writesActiveSession(stationId, pumpId)
+          && !exists(sessionPath(stationId, pumpId));
+
+        allow update: if isSignedIn()
+          && canAccessStation(stationId)
+          && (
+               (resource.data.status == 'idle'
+                && request.resource.data.status == 'active'
+                && writesActiveSession(stationId, pumpId))
+            || (resource.data.status == 'active'
+                && writesIdleSession()
+                && (resource.data.activeUid == request.auth.uid || canManageStation(stationId)))
+          );
+
+        // Station reset is the only bulk delete path and is manager-only.
+        allow delete: if isSignedIn() && canManageStation(stationId);
+      }
+
       // ── Shifts ────────────────────────────────────────────────────
       match /shifts/{shiftId} {
         // Managers (Super/Station Admin) read every record at the station.
@@ -239,6 +305,7 @@ service cloud.firestore {
         // themselves and only with sane numbers.
         allow create: if isSignedIn()
           && canAccessStation(stationId)
+          && canUsePump(stationId, request.resource.data.pumpId)
           && request.resource.data.createdBy == request.auth.uid
           && request.resource.data.volume is number
           && request.resource.data.volume >= 0

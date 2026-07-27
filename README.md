@@ -4,8 +4,11 @@ A lightweight, installable PWA for tracking fuel station shift readings, rates, 
 
 ## Features
 
-- **4 pages**: Dashboard, Pumps (shift entry), Config (rates/pumps/stations/team), History
-- **Live pump feed**: the dashboard shows real-time Active / Stopped status per pump via Firestore listeners — a reading logged on any device appears everywhere within a second
+- **5 pages**: Dashboard, Pumps (clock-in/out), Config (rates/pumps/stations/team), History, Reports
+- **Live pump locks**: clocking in claims a pump session transactionally; the dashboard and Pumps page update Active/Idle state on every device within a second
+- **Report Cards**: filter by station, employee, and date range, then export the visible breakdown as CSV or print it to PDF
+- **Station data reset**: managers can delete shift history and session locks after typing the station name; configuration is preserved
+- **Live pump feed**: the dashboard shows the current session state plus the last reading via Firestore listeners — a change on any device appears everywhere within a second
 - **Role-based access control**: Super Admin, Station Admin, Staff — enforced in Firestore rules and mirrored in the UI
 - **Per-pump staff assignment**: admins/managers assign one or more pumps to each staff account; staff see only their pumps and only their own readings
 - **Rates owned by management**: only Super Admin / Station Admin can create, edit or delete rates; staff log readings against the configured rate (read-only)
@@ -53,14 +56,25 @@ const FIREBASE_CONFIG = {
 
 Copy `firestore.rules` into Firebase Console → Firestore Database → Rules → **Publish**.
 
-> **Upgrading?** The rules in this repo now (a) allow the `pumpIds` field on user
-> profiles and (b) restrict staff to reading only their own shift records. If
-> you deployed an older version, **publish the latest `firestore.rules` again** —
-> until you do, team edits that include pump assignments will be rejected and
-> staff history queries will fail closed.
+> **Upgrading?** This release changes the rules for transactional pump locks,
+> staff pump assignments, session deletes, station resets, and the new report
+> fields. If you deployed an older version, **manually re-publish the latest
+> `firestore.rules` in Firebase Console → Firestore Database → Rules** — pushing
+> code to GitHub Pages does not update Firestore rules. Until you do, clock-in/out
+> and station reset operations will fail closed. Repeat this re-publish step for
+> every existing Firebase project using PumpLog.
 
 Rules are the source of truth. `js/auth.js` mirrors them in a `can()` helper that
 only decides what the UI renders — bypassing the UI still hits the server rules.
+
+| Capability | Super Admin | Station Admin | Staff |
+|---|:--:|:--:|:--:|
+| Pump session live status — read | ✅ all | ✅ assigned stations | ✅ assigned stations |
+| Start a pump session | ✅ | ✅ | ✅ assigned pumps |
+| End own session | ✅ | ✅ | ✅ own active session |
+| Force-release a session | ✅ | ✅ assigned stations | ❌ |
+| Report Card | ✅ any of their stations | ✅ assigned stations | ✅ own records only |
+| Reset station data (shifts + session locks) | ✅ | ✅ assigned stations | ❌ |
 
 | Capability | Super Admin | Station Admin | Staff |
 |---|:--:|:--:|:--:|
@@ -82,6 +96,9 @@ only decides what the UI renders — bypassing the UI still hits the server rule
 - Staff sign in to a scoped view: the Pumps page and the dashboard live feed
   show only their assigned pumps, and Dashboard/History totals include only
   readings they logged themselves. Managers keep the station-wide view.
+- Privacy default: Station Admins and Super Admins see the active staff member's
+  name in a lock; Staff see only **“In use — try again shortly”** for a colleague's
+  active pump. This is a deliberate UI choice, not a security boundary.
 - Leaving every pump unticked in the editor means **“all pumps at the assigned
   stations”** — this keeps older staff accounts (created before pump
   assignments existed) working unchanged until you restrict them.
@@ -185,6 +202,19 @@ stations/{id}/rates/{id}
   ├── rate: number
   └── effectiveDate: string (YYYY-MM-DD)
 
+stations/{id}/pumpSessions/{pumpId}
+  ├── status: "idle" | "active"
+  ├── activeUid: string | null
+  ├── activeName: string | null
+  ├── pumpName: string
+  ├── product: string
+  ├── clockInAt: timestamp | null
+  ├── opening: number | null
+  ├── date: string (YYYY-MM-DD) | null
+  ├── shiftLabel: "1" | "2" | "3" | null
+  ├── updatedAt: timestamp
+  └── updatedBy: string (uid, force-release/audit context)
+
 stations/{id}/shifts/{id}
   ├── pumpId: string
   ├── pumpName: string
@@ -196,9 +226,20 @@ stations/{id}/shifts/{id}
   ├── volume: number
   ├── rate: number
   ├── sales: number
+  ├── clockInAt: timestamp       // missing on pre-migration records
+  ├── clockOutAt: timestamp      // missing on pre-migration records
+  ├── hoursWorked: number        // missing on pre-migration records
+  ├── staffUid: string (uid)     // same person as createdBy
+  ├── staffName: string          // display name/email at clock-out
   ├── createdBy: string (uid)
   └── createdAt: timestamp
 ```
+
+Records written before clock-in/out do not have the new session fields. The app
+shows `—` for unknown hours/session times and excludes unknown hours from totals;
+it does not backfill historical documents. Firestore retains data indefinitely
+until a manager explicitly uses **Config → Stations → Reset station data**, which
+deletes only shifts and pump session locks in batches (not pumps, rates, or team assignments).
 
 ## Tech Stack
 
