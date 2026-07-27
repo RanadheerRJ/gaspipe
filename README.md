@@ -88,6 +88,12 @@ only decides what the UI renders — bypassing the UI still hits the server rule
 | Users — edit / remove | ✅ | ✅ own staff only | ❌ |
 | Config page | ✅ | ✅ | ❌ |
 
+**Role decision:** PumpLog intentionally keeps the existing three-role model. A
+`stationadmin` is both the station pump-board administrator and the station
+staff manager for their assigned station(s); there is no separate
+`stationmanager` role or migration. Super Admin has the same controls across
+all stations.
+
 ### Pump assignment & per-person data
 
 - In **Config → Team → Add/Edit**, admins tick the stations a staff member works

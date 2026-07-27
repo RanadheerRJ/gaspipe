@@ -1218,3 +1218,18 @@ fieldset.is-disabled { opacity: .55; pointer-events: none; }
   .dashboard-date-block, .dashboard-user-block { min-height: 72px; }
   .rate-active-hours { display: none; }
 }
+
+/* Pump-board assignment and read-only profile */
+.pump-assignment-line { display: block; margin-top: 3px; color: var(--text-muted); font-size: 12px; }
+.assignment-warning { margin: 0 0 12px; padding: 10px 12px; border: 1px solid var(--amber); border-radius: var(--radius-sm); background: var(--amber-bg); color: var(--amber); font-size: 13px; line-height: 1.45; }
+.profile-card-grid { display: grid; gap: 13px; }
+.profile-card-identity { display: flex; align-items: center; gap: 11px; padding: 12px; border: 1px solid var(--border); border-radius: var(--radius-sm); background: var(--surface-2); }
+.profile-avatar { display: grid; place-items: center; width: 42px; height: 42px; flex: 0 0 42px; border-radius: 12px; background: var(--primary-light); font-size: 21px; }
+.profile-card-identity strong, .profile-card-identity small { display: block; }
+.profile-card-identity strong { font-size: 15px; }
+.profile-card-identity small { color: var(--text-secondary); font-size: 13px; overflow-wrap: anywhere; }
+.profile-settings-list { display: grid; grid-template-columns: minmax(130px, .8fr) 1.2fr; gap: 8px 12px; margin: 0; padding: 2px 0; }
+.profile-settings-list dt { color: var(--text-muted); font-size: 12px; font-weight: 700; }
+.profile-settings-list dd { margin: 0; color: var(--text); font-size: 13px; overflow-wrap: anywhere; }
+.role-badge { display: inline-flex; align-items: center; gap: 4px; padding: 2px 8px; border-radius: var(--radius-pill); background: var(--primary-light); color: var(--primary); font-weight: 700; }
+.profile-readonly-note { color: var(--text-secondary); font-size: 12px; line-height: 1.45; }

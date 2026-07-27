@@ -9,12 +9,12 @@ import {
   getDb, collection, doc, runTransaction, serverTimestamp,
 } from './firebase.js';
 import {
-  getCurrentUserData, can, denyReason, formatFirebaseError,
-  hasPumpRestriction, canUsePump, filterMyPumps,
+  getCurrentUserData, isSuperAdmin, isStationAdmin, can, denyReason, formatFirebaseError,
+  hasPumpRestriction, canUsePump, filterMyPumps, updateUserAsAdmin,
 } from './auth.js';
 import {
-  getPumps, getCurrentRateMap, getPumpSessions, watchPumpSessions,
-  invalidateStation,
+  getPumps, getCurrentRateMap, getPumpSessions, getStaffForStation, watchPumpSessions,
+  invalidateStation, invalidateUsers,
 } from './store.js';
 import {
   h, formatCurrency, formatVolume, formatDateTime, formatTimeAgo,
@@ -47,6 +47,10 @@ function isMine(session) {
   return !!session && session.activeUid === getCurrentUserData()?.uid;
 }
 
+function isPumpManager() {
+  return isSuperAdmin() || isStationAdmin();
+}
+
 function sessionLabel(session) {
   if (!session || session.status !== 'active') return { text: 'Idle', cls: 'idle', icon: '○' };
   if (isMine(session)) return { text: 'Active — your shift', cls: 'mine', icon: '●' };
@@ -59,6 +63,7 @@ function sessionLabel(session) {
 }
 
 function actionFor(pump, session, mayLog) {
+  if (isPumpManager()) return { label: 'Assign pump to available staff member', disabled: false, mode: 'assign' };
   if (!mayLog) return { label: 'View only', disabled: true, mode: 'none' };
   if (!session) return { label: 'Start shift →', disabled: false, mode: 'start' };
   if (isMine(session)) return { label: 'End shift →', disabled: false, mode: 'end' };
@@ -70,11 +75,17 @@ function actionFor(pump, session, mayLog) {
   };
 }
 
-function pumpCardHTML(pump, rateMap, sessions, stationId) {
+function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
   const session = sessionFor(pump.id, sessions);
   const state = sessionLabel(session);
-  const mayLog = can('shift.create', { stationId }) && canUsePump(pump.id);
+  const mayLog = !isPumpManager() && can('shift.create', { stationId }) && canUsePump(pump.id);
   const action = actionFor(pump, session, mayLog);
+  const assigned = isPumpManager()
+    ? staff.filter(user => (user.pumpIds || []).includes(pump.id))
+    : [];
+  const assignmentLine = isPumpManager()
+    ? `<span class="pump-assignment-line">${assigned.length ? `Assigned to ${assigned.map(user => h(user.email || 'staff')).join(', ')}` : 'No staff assigned to this pump'}</span>`
+    : '';
   const rate = rateMap[pump.product];
   const detail = session
     ? `Started ${h(formatTimeAgo(session.clockInAt) || formatDateTime(session.clockInAt) || 'just now')}`
@@ -97,7 +108,7 @@ function pumpCardHTML(pump, rateMap, sessions, stationId) {
         </div>
         <span class="status-chip pump-status ${state.cls}" role="status">${state.icon} ${h(state.text)}</span>
       </div>
-      <p class="pump-card-detail">${detail}</p>
+      <p class="pump-card-detail">${detail}${assignmentLine}</p>
       <button type="button" class="btn pump-action ${action.mode === 'end' ? 'btn-danger' : 'btn-primary'}"
               data-pump-id="${h(pump.id)}" data-mode="${h(action.mode)}"
               ${action.disabled ? 'disabled' : ''}
@@ -114,8 +125,8 @@ function paintPumpBoard() {
   const board = document.getElementById('pump-board');
   if (!board || !content || currentStationId !== pumpContext.stationId) return;
 
-  const { stationId, pumps, rateMap, sessions } = pumpContext;
-  board.innerHTML = pumps.map(p => pumpCardHTML(p, rateMap, sessions, stationId)).join('');
+  const { stationId, pumps, rateMap, sessions, staff } = pumpContext;
+  board.innerHTML = pumps.map(p => pumpCardHTML(p, rateMap, sessions, stationId, staff)).join('');
   board.querySelectorAll('.pump-action').forEach(button => {
     button.addEventListener('click', () => {
       const pump = pumps.find(p => p.id === button.dataset.pumpId);
@@ -123,6 +134,7 @@ function paintPumpBoard() {
       const session = sessionFor(pump.id, sessions);
       if (button.dataset.mode === 'start') openClockInForm(stationId, pump, rateMap[pump.product]);
       if (button.dataset.mode === 'end') openClockOutForm(stationId, pump, rateMap[pump.product], session);
+      if (button.dataset.mode === 'assign') openPumpAssignmentForm(stationId, pump, staff);
     });
   });
 }
@@ -154,10 +166,11 @@ export async function renderPumps(stationId) {
   showSkeleton(3);
 
   try {
-    const [pumps, rateMap, sessions] = await Promise.all([
+    const [pumps, rateMap, sessions, staff] = await Promise.all([
       getPumps(stationId),
       getCurrentRateMap(stationId),
       getPumpSessions(stationId),
+      isPumpManager() ? getStaffForStation(stationId) : [],
     ]);
     const mayConfigure = can('pump.create', { stationId });
     const myPumps = filterMyPumps(pumps);
@@ -175,10 +188,12 @@ export async function renderPumps(stationId) {
       return;
     }
 
-    const mayLog = can('shift.create', { stationId });
-    const hint = hasPumpRestriction()
-      ? `Showing the ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} assigned to you.`
-      : mayLog ? 'Choose a pump to start or end your shift. Live locks update on every device.' : 'You have read-only access.';
+    const mayLog = !isPumpManager() && can('shift.create', { stationId });
+    const hint = isPumpManager()
+      ? 'Live status is shared across devices. Assign or remove staff directly from each pump.'
+      : hasPumpRestriction()
+        ? `Showing the ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} assigned to you.`
+        : mayLog ? 'Choose a pump to start or end your shift. Live locks update on every device.' : 'You have read-only access.';
 
     content.innerHTML = `
       <div class="page-head">
@@ -192,7 +207,7 @@ export async function renderPumps(stationId) {
       <ul id="pump-board" class="pump-grid"></ul>
     `;
 
-    pumpContext = { stationId, pumps: myPumps, rateMap, sessions };
+    pumpContext = { stationId, pumps: myPumps, rateMap, sessions, staff };
     paintPumpBoard();
     startSessionWatch(stationId);
   } catch (err) {
@@ -210,7 +225,62 @@ export function openShiftForm(stationId, pump, rate, session = null) {
   }
 }
 
+async function openPumpAssignmentForm(stationId, pump, staff) {
+  if (!isPumpManager()) {
+    toast('Only Station Admins and Super Admins can assign pumps.', 'error');
+    return;
+  }
+  const activeSession = sessionFor(pump.id, pumpContext?.sessions || []);
+  const activeUser = staff.find(user => user.id === activeSession?.activeUid);
+  const assignedIds = new Set(staff.filter(user => (user.pumpIds || []).includes(pump.id)).map(user => user.id));
+  const warning = activeSession
+    ? `<p class="assignment-warning" role="status">⚠️ ${h(activeUser?.email || activeSession.activeName || 'A staff member')} is currently active on this pump. Removing their assignment will not end the shift; the lock remains until clock-out or manager force-release.</p>`
+    : '';
+  const options = staff.length
+    ? `<div class="checkbox-list">${staff.map(user => `<div class="checkbox-item"><input type="checkbox" id="assign-pump-${h(user.id)}" value="${h(user.id)}" ${assignedIds.has(user.id) ? 'checked' : ''} /><label for="assign-pump-${h(user.id)}">${h(user.email || 'Staff member')}</label></div>`).join('')}</div>`
+    : '<p class="muted-note">No staff accounts are assigned to this station yet. Add staff from Config → Team first.</p>';
+  document.getElementById('modal-title').textContent = `Assign ${pump.name}`;
+  document.getElementById('modal-body').innerHTML = `<form id="pump-assignment-form" novalidate>
+    <p class="modal-intro">Choose the staff members who can use ${h(pump.name)}. This updates their existing pump assignment list.</p>
+    ${warning}${options}
+    <p id="pump-assignment-error" class="form-error hidden" role="alert"></p>
+    <button type="submit" class="btn btn-primary btn-full mt-16" ${staff.length ? '' : 'disabled'}>Save assignments</button>
+  </form>`;
+  openModal('generic-modal');
+  document.getElementById('pump-assignment-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const form = event.currentTarget;
+    const button = form.querySelector('button[type="submit"]');
+    const error = document.getElementById('pump-assignment-error');
+    const selected = new Set(Array.from(form.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value));
+    setBusy(button, true, 'Saving…');
+    try {
+      await Promise.all(staff.map(async user => {
+        const current = [...new Set(user.pumpIds || [])];
+        const next = selected.has(user.id)
+          ? [...new Set([...current, pump.id])]
+          : current.filter(id => id !== pump.id);
+        if (next.length === current.length && next.every((id, index) => id === current[index])) return;
+        await updateUserAsAdmin(user, { pumpIds: next });
+      }));
+      invalidateUsers();
+      closeModal('generic-modal');
+      toast(`${pump.name} assignments updated.`, 'success');
+      await renderPumps(stationId);
+    } catch (err) {
+      console.error('Pump assignment error:', err);
+      error.textContent = formatFirebaseError(err);
+      error.classList.remove('hidden');
+      setBusy(button, false);
+    }
+  });
+}
+
 function openClockInForm(stationId, pump, rate) {
+  if (isPumpManager()) {
+    toast('Station managers assign pumps from this page instead of starting staff shifts.', 'info');
+    return;
+  }
   if (!can('pumpSession.start', { stationId, pumpId: pump.id }) || !canUsePump(pump.id)) {
     toast(canUsePump(pump.id) ? denyReason('shift.create', { stationId }) : 'This pump is not assigned to you.', 'error');
     return;

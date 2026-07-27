@@ -248,3 +248,15 @@ export function getUsersCreatedBy(uid) {
     return snapToArray(snap).sort((a, b) => (a.email || '').localeCompare(b.email || ''));
   });
 }
+
+/** Staff records a Station Admin/Super Admin may assign from the Pumps board. */
+export async function getStaffForStation(stationId) {
+  const me = getCurrentUserData();
+  if (!stationId || !me || !can('config.view')) return [];
+  const users = me.role === 'superadmin'
+    ? await getAllUsers()
+    : await getUsersCreatedBy(me.uid);
+  return users
+    .filter(user => user.role === 'staff' && (user.stationIds || []).includes(stationId))
+    .sort((a, b) => (a.email || '').localeCompare(b.email || ''));
+}

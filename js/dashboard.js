@@ -7,7 +7,7 @@ import {
 } from './store.js';
 import {
   can, canUsePump, filterMyPumps, getCurrentUserData, formatFirebaseError,
-  isSuperAdmin, ROLES,
+  isSuperAdmin, isStationAdmin, ROLES,
 } from './auth.js';
 import { openShiftForm } from './pumps.js';
 import {
@@ -131,7 +131,7 @@ async function accessibleStationList(currentStationId, currentStation) {
 }
 
 async function loadQuickStartData(currentStationId, currentStation, currentPumps, currentRateMap, currentSessions) {
-  if (activeMine(currentSessions).length) return null;
+  if (isSuperAdmin() || isStationAdmin() || activeMine(currentSessions).length) return null;
   const stations = await accessibleStationList(currentStationId, currentStation);
   const rows = [];
   for (const station of stations) {
@@ -339,7 +339,7 @@ function paintFeed(meta = {}) {
 function openPumpDetail(pumpId) {
   if (!feedCtx) return; const { stationId, pumps, rateMap } = feedCtx; const pump = pumps.find(p => p.id === pumpId); if (!pump) return;
   const status = pumpStatus(pumpId, latestRows, latestSessions); const meta = STATUS_META[status.state]; const recent = latestRows.filter(s => s.pumpId === pumpId).slice(0, 5);
-  const mayLog = can('shift.create', { stationId }) && canUsePump(pump.id) && (!status.session || status.session.activeUid === getCurrentUserData()?.uid); const rate = rateMap[pump.product];
+  const mayLog = !isSuperAdmin() && !isStationAdmin() && can('shift.create', { stationId }) && canUsePump(pump.id) && (!status.session || status.session.activeUid === getCurrentUserData()?.uid); const rate = rateMap[pump.product];
   const recentList = recent.length ? `<ul class="feed-detail-list">${recent.map(s => `<li><span class="shift-badge">S${h(s.shiftLabel || '?')}</span><span class="feed-detail-main"><strong>${formatVolume(s.volume)}</strong> · ${formatCurrency(s.sales)}<small>${h(formatDate(s.date))}${formatTime(s.createdAt) ? ` · ${h(formatTime(s.createdAt))}` : ''}${s.hoursWorked != null ? ` · ${h(Number(s.hoursWorked).toFixed(2))} h` : ''}</small></span></li>`).join('')}</ul>` : '<p class="muted-note">No readings recorded for this pump yet.</p>';
   const sessionLine = status.session ? `Started ${formatDateTime(status.session.clockInAt) || 'just now'}${visibleActiveName(status.session) ? ` by ${visibleActiveName(status.session)}` : ''}` : 'No active shift';
   document.getElementById('modal-title').textContent = pump.name;

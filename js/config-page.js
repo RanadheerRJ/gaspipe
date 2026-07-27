@@ -7,7 +7,7 @@ import {
 import {
   getCurrentUserData, isSuperAdmin, isStationAdmin,
   can, denyReason, assignableRoles, ROLES, ROLE_BADGE,
-  createUserAsAdmin, updateUserAsAdmin, deleteUserAsAdmin, formatFirebaseError,
+  createUserAsAdmin, updateUserAsAdmin, deleteUserAsAdmin, doSignOut, formatFirebaseError,
 } from './auth.js';
 import {
   getAllStations, getStationsByIds, getRates, getPumps, getPumpSessions, getAllUsers, getUsersCreatedBy,
@@ -50,6 +50,7 @@ export async function renderConfig(stationId) {
     stationsCache = stations;
 
     const sections = [
+      renderProfileSection(me, stations, pumps),
       renderRatesSection(stationId, rates),
       renderPumpsSection(stationId, pumps, sessions),
       renderStationsSection(stations),
@@ -63,6 +64,24 @@ export async function renderConfig(stationId) {
     console.error('Config render error:', err);
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
+}
+
+// ── Profile ─────────────────────────────────────────────────────────────
+function renderProfileSection(me, stations, pumps) {
+  const stationText = isSuperAdmin()
+    ? 'All stations'
+    : (stations || []).filter(station => (me.stationIds || []).includes(station.id)).map(station => station.name).join(', ') || 'No stations assigned';
+  const pumpText = me.role === 'staff'
+    ? (me.pumpIds?.length ? `${me.pumpIds.length} assigned pump${me.pumpIds.length === 1 ? '' : 's'}` : 'All pumps at assigned stations')
+    : `${(pumps || []).length || 'All'} pumps visible at this station`;
+  const displayName = me.displayName || me.email || 'PumpLog user';
+  return section('Profile', '', `<div class="profile-card-grid">
+    <div class="profile-card-identity"><span class="profile-avatar" aria-hidden="true">👤</span><div><strong>${h(displayName)}</strong><small>${h(me.email || 'No email')}</small></div></div>
+    <dl class="profile-settings-list"><dt>Role</dt><dd><span class="role-badge">${ROLE_BADGE[me.role] || '⚪'} ${h(ROLES[me.role] || me.role || 'Staff')}</span></dd>
+      <dt>Assigned stations</dt><dd>${h(stationText)}</dd><dt>Pump access</dt><dd>${h(pumpText)}</dd></dl>
+    <p class="profile-readonly-note">This information is read-only here. Station and pump access changes are managed by an administrator.</p>
+    <button type="button" id="config-signout" class="btn btn-secondary btn-full">Sign out</button>
+  </div>`);
 }
 
 // ── Rates ───────────────────────────────────────────────────────────────
@@ -207,6 +226,7 @@ function renderTeamSection(users, me) {
 
 // ── Markup helpers ──────────────────────────────────────────────────────
 const SECTION_META = {
+  Profile: { icon: '👤', description: 'Your account, role, station, and pump access.' },
   Rates: { icon: '₹', description: 'Set the prices used to calculate each shift.' },
   Pumps: { icon: '⛽', description: 'Manage pumps, products, and stuck session locks.' },
   Stations: { icon: '🏪', description: 'Manage stations or safely reset station data.' },
@@ -217,7 +237,7 @@ const SECTION_META = {
 function section(title, actionHTML, bodyHTML) {
   const meta = SECTION_META[title] || { icon: '⚙️', description: 'Manage PumpLog settings.' };
   const key = title.toLowerCase().replace(/[^a-z0-9]+/g, '-');
-  const open = title === 'Rates';
+  const open = title === 'Profile';
   return `<section class="config-section ${open ? 'is-open' : ''}" data-config-section="${h(key)}">
     <button type="button" class="config-accordion-toggle" aria-expanded="${open}" aria-controls="config-body-${h(key)}">
       <span class="config-topic-icon" aria-hidden="true">${meta.icon}</span>
@@ -285,6 +305,10 @@ function wireConfigAccordion() {
 function wireHandlers(rates, pumps, sessions, stations, users) {
   const sid = currentStationId;
   wireConfigAccordion();
+  onClick('config-signout', async event => {
+    setBusy(event.currentTarget, true, 'Signing out…');
+    await doSignOut();
+  });
 
   onClick('add-rate-btn', () => showRateForm(null));
   onEach('.edit-rate', id => showRateForm(rates.find(r => r.id === id)));
