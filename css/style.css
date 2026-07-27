@@ -1268,3 +1268,7 @@ fieldset.is-disabled { opacity: .55; pointer-events: none; }
 .migration-code-row small { color: var(--text-secondary); }
 .migration-code-row output { color: var(--primary); font-family: var(--mono); font-weight: 800; letter-spacing: 1.5px; }
 @media (max-width: 420px) { .profile-account-actions { grid-template-columns: 1fr; } }
+
+.admin-invite-code { display: flex; flex-direction: column; gap: 4px; margin: 18px 0; padding: 17px; border: 1px solid var(--primary); border-radius: var(--radius-sm); background: var(--primary-light); }
+.admin-invite-code output { color: var(--primary); font-family: var(--mono); font-size: 27px; font-weight: 800; letter-spacing: 3px; }
+.admin-invite-code small { color: var(--text-secondary); font-size: 12px; }

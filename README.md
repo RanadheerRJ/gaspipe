@@ -85,6 +85,22 @@ firebase deploy --only functions
 `firebase.json` points Functions at `functions/` and does not add a frontend
 build step. Deploying the static GitHub Pages app alone does not deploy these
 Functions. Deploy Functions before enabling username/PIN sign-in in production.
+
+For the empty development project, configure the private developer bootstrap
+secret before deployment. Do not commit or share this value:
+
+```bash
+firebase functions:secrets:set PUMPLOG_DEV_BOOTSTRAP_CODE --project gass-13462
+firebase deploy --only functions --project gass-13462
+```
+
+The developer bootstrap function is restricted to the fixed developer UID
+`gVXWLjIIpXMa26kxdKuZUEGCAwj1` and the private 10-digit secret. Use the
+**Developer setup** link on the login screen, then use **Config → Security →
+Invite Station Admin** to issue a one-time 10-digit invite. Invite activation
+creates a Station Admin profile; assign its station access from the existing
+Super Admin controls before it can manage station data.
+
 Run **Config → Security → Prepare existing accounts for username + PIN** once
 as an admin, share each one-time code privately, and do not put codes in chat,
 logs, screenshots, or source control.
@@ -227,7 +243,7 @@ Accessibility:
 users/{uid}
   ├── email: string              // legacy accounts only; optional for username/PIN users
   ├── fullName: string           // canonical display name for new identities
-  ├── username: string           // lowercase unique login name
+  ├── username: string           // lowercase unique 4–6 character login name
   ├── phoneNumber: string        // optional
   ├── role: "superadmin" | "stationadmin" | "staff"
   ├── stationIds: string[]      // empty for Super Admin (implicit access to all)

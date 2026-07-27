@@ -17,7 +17,7 @@ import {
   h, formatCurrency, formatDate, formatDateTime, getTodayDate,
   openModal, closeModal, emptyState, toast, confirmDialog, setBusy, showSkeleton,
 } from './components.js';
-import { createStaff, checkUsername, resetStaffPin, prepareLegacyUsers, disableStaff } from './staff-auth.js';
+import { createStaff, checkUsername, resetStaffPin, prepareLegacyUsers, disableStaff, createAdminInvite } from './staff-auth.js';
 import { openChangePinForm } from './profile.js';
 
 let currentStationId = null;
@@ -257,12 +257,13 @@ function section(title, actionHTML, bodyHTML) {
 }
 
 function renderSecuritySection() {
+  const inviteButton = isSuperAdmin() ? '<button type="button" id="create-admin-invite" class="btn btn-primary btn-full mt-16">Invite Station Admin</button>' : '';
   return section('Security', '', `<div class="security-grid">
     <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔐</span><div><strong>Firebase Auth sign-in</strong><p>Each person stays signed in on their device until they choose Sign out. Firebase Auth and Firestore rules remain the authority.</p></div></article>
     <article class="security-card"><span class="security-card-icon" aria-hidden="true">🔒</span><div><strong>One pump, one active shift</strong><p>A live Firestore transaction locks a pump to one staff member. Clock-out releases it atomically with the saved shift record.</p></div></article>
     <article class="security-card"><span class="security-card-icon" aria-hidden="true">🛡️</span><div><strong>Role-based access</strong><p>Staff see their assigned pumps and records. Station Admins manage their stations. Super Admins manage every station. UI checks never replace server rules.</p></div></article>
   </div><p class="security-note">For recovery, managers can force-release an active lock from the Pumps section. This discards the unfinished reading and does not create a shift.</p>
-  <button type="button" id="prepare-legacy-users" class="btn btn-secondary btn-full mt-16">Prepare existing accounts for username + PIN</button>`);
+  ${inviteButton}<button type="button" id="prepare-legacy-users" class="btn btn-secondary btn-full mt-16">Prepare existing accounts for username + PIN</button>`);
 }
 
 function configItem({ title, meta, actions = [] }) {
@@ -317,6 +318,7 @@ function wireHandlers(rates, pumps, sessions, stations, users) {
   });
   onClick('config-change-pin', () => openChangePinForm());
   onClick('prepare-legacy-users', () => prepareExistingAccounts());
+  onClick('create-admin-invite', () => createStationAdminInvite());
 
   onClick('add-rate-btn', () => showRateForm(null));
   onEach('.edit-rate', id => showRateForm(rates.find(r => r.id === id)));
@@ -766,8 +768,8 @@ async function showUserForm(user) {
     <div class="field"><label for="new-full-name">Full name</label>
       <input type="text" id="new-full-name" placeholder="e.g. John Smith" maxlength="80" required autocomplete="name" /></div>
     <div class="field"><label for="new-username">Username</label>
-      <input type="text" id="new-username" placeholder="john.smith" minlength="4" maxlength="25" pattern="[a-zA-Z0-9_.]+" required autocomplete="username" autocapitalize="off" spellcheck="false" />
-      <small id="username-status" class="hint">4–25 characters: letters, numbers, underscore, or dot.</small></div>
+      <input type="text" id="new-username" placeholder="john.smith" minlength="4" maxlength="6" pattern="[a-zA-Z0-9_.]+" required autocomplete="username" autocapitalize="off" spellcheck="false" />
+      <small id="username-status" class="hint">4–6 characters: letters, numbers, underscore, or dot.</small></div>
     <div class="field"><label for="new-phone">Phone number <span class="optional">(optional)</span></label>
       <input type="tel" id="new-phone" placeholder="+1 555 123 4567" autocomplete="tel" inputmode="tel" /></div>`;
 
@@ -805,7 +807,7 @@ async function showUserForm(user) {
       const username = input.value.trim().toLowerCase();
       input.value = username;
       status.className = 'hint';
-      status.textContent = username.length < 4 ? '4–25 characters: letters, numbers, underscore, or dot.' : 'Checking availability…';
+      status.textContent = username.length < 4 ? '4–6 characters: letters, numbers, underscore, or dot.' : 'Checking availability…';
       input.dataset.available = 'false';
       clearTimeout(usernameCheckTimer);
       if (username.length < 4) return;
@@ -958,7 +960,7 @@ async function showUserForm(user) {
         const username = byId('new-username').value.trim().toLowerCase();
         const phoneNumber = byId('new-phone').value.trim();
         if (!fullName) return failInline(err, btn, 'Enter the staff member’s full name.');
-        if (!/^[a-z0-9_.]{4,25}$/.test(username)) return failInline(err, btn, 'Username must be 4–25 characters using letters, numbers, underscore, or dot.');
+        if (!/^[a-z0-9_.]{4,6}$/.test(username)) return failInline(err, btn, 'Username must be 4–6 characters using letters, numbers, underscore, or dot.');
         const availability = await checkUsername(username);
         if (!availability.available) return failInline(err, btn, 'That username is already in use. Choose another.');
         const result = await createStaff({ fullName, username, phoneNumber, stationIds });
@@ -983,6 +985,27 @@ async function showUserForm(user) {
       setBusy(btn, false);
     }
   });
+}
+
+async function createStationAdminInvite() {
+  const ok = await confirmDialog({
+    title: 'Invite a Station Admin?',
+    message: 'A one-time 10-digit invite will be generated. Share it privately; the invite expires in 30 days and is usable once.',
+    confirmLabel: 'Generate invite',
+  });
+  if (!ok) return;
+  try {
+    const result = await createAdminInvite(30);
+    byId('modal-title').textContent = 'Station Admin invite created';
+    byId('modal-body').innerHTML = `<div class="staff-created-success"><div class="success-check" aria-hidden="true">✓</div><h3>Share this code privately</h3><p class="muted-note">The new Station Admin will create their name, 4–6 character username, phone, and 4-digit PIN when they join.</p><div class="admin-invite-code"><output>${h(result.joiningCode)}</output><small>Expires in ${h(result.expiresInDays)} days · shown once</small></div><button type="button" id="copy-admin-invite" class="btn btn-primary btn-full">Copy 10-digit invite</button></div>`;
+    openModal('generic-modal');
+    byId('copy-admin-invite')?.addEventListener('click', async event => {
+      try { await navigator.clipboard.writeText(result.joiningCode); setBusy(event.currentTarget, true, 'Copied'); setTimeout(() => setBusy(event.currentTarget, false), 1200); }
+      catch { toast('Copy failed — write the invite down before closing.', 'error'); }
+    });
+  } catch (error) {
+    toast(formatFirebaseError(error), 'error');
+  }
 }
 
 async function prepareExistingAccounts() {

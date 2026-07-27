@@ -17,7 +17,10 @@ import { initPumps, renderPumps, stopPumpsLive } from './pumps.js';
 import { initConfig, renderConfig } from './config-page.js';
 import { initHistory, renderHistory } from './history.js';
 import { initReports, renderReports } from './reports.js';
-import { signInWithUsernamePin, previewJoiningCode, activateStaff, recordLogout } from './staff-auth.js';
+import {
+  signInWithUsernamePin, previewJoiningCode, activateStaff, bootstrapDeveloper,
+  previewAdminInvite, activateAdminInvite, recordLogout,
+} from './staff-auth.js';
 import { openChangePinForm } from './profile.js';
 
 const $ = id => document.getElementById(id);
@@ -226,6 +229,9 @@ const authSubmitLabel = () => ({
   signin: 'Sign in',
   join: 'Continue',
   joinPin: 'Activate account',
+  developer: 'Developer sign in',
+  adminJoin: 'Continue',
+  adminJoinPin: 'Create Station Admin',
   legacy: 'Sign in with email',
   forgot: 'Back to sign in',
 }[authMode] || 'Continue');
@@ -284,13 +290,15 @@ function renderAuthFields() {
   if (authMode === 'signin') {
     fields.innerHTML = `
       <div class="field"><label for="auth-username">Username</label>
-        <input type="text" id="auth-username" autocomplete="username" autocapitalize="off" spellcheck="false" minlength="4" maxlength="25" required /></div>
+        <input type="text" id="auth-username" autocomplete="username" autocapitalize="off" spellcheck="false" minlength="4" maxlength="6" required /></div>
       <div class="field"><label for="auth-pin">PIN</label><div class="input-affix">
         <input type="password" id="auth-pin" inputmode="numeric" autocomplete="current-password" pattern="[0-9]{4}" maxlength="4" required />
         <button type="button" class="affix-btn" data-password-toggle="auth-pin" aria-label="Show PIN" aria-pressed="false">Show</button></div></div>
       <label class="remember-row"><input type="checkbox" id="auth-remember" checked /> <span>Remember me on this device</span></label>`;
     links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="forgot">Forgot PIN?</button>
       <span class="auth-link-separator">·</span><button type="button" class="link-btn" data-auth-mode="join">Join with code</button>
+      <button type="button" class="link-btn" data-auth-mode="adminJoin">Join as Station Admin</button>
+      <button type="button" class="link-btn auth-legacy-link" data-auth-mode="developer">Developer setup</button>
       <button type="button" class="link-btn auth-legacy-link" data-auth-mode="legacy">Existing account sign in</button>`;
   } else if (authMode === 'join') {
     fields.innerHTML = `<p class="auth-step-note">Enter the 5-digit code your admin shared with you.</p>
@@ -303,6 +311,24 @@ function renderAuthFields() {
       <div class="field"><label for="auth-new-pin">Create PIN</label><div class="input-affix"><input type="password" id="auth-new-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /><button type="button" class="affix-btn" data-password-toggle="auth-new-pin" aria-label="Show PIN" aria-pressed="false">Show</button></div></div>
       <div class="field"><label for="auth-confirm-pin">Confirm PIN</label><input type="password" id="auth-confirm-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /></div>`;
     links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="join">Use a different code</button>`;
+  } else if (authMode === 'developer') {
+    fields.innerHTML = `<p class="auth-step-note">Enter the private 10-digit developer bootstrap code configured in Firebase Functions. The first setup also creates the developer PIN for username <strong>dev01</strong>.</p>
+      <div class="field"><label for="auth-developer-code">Developer code</label><input type="password" id="auth-developer-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{10}" maxlength="10" required /></div>
+      <div class="field"><label for="auth-developer-pin">Developer PIN</label><input type="password" id="auth-developer-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /></div>
+      <div class="field"><label for="auth-developer-confirm-pin">Confirm developer PIN</label><input type="password" id="auth-developer-confirm-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4}" maxlength="4" required /></div>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
+  } else if (authMode === 'adminJoin') {
+    fields.innerHTML = `<p class="auth-step-note">Enter the 10-digit invite code from your PumpLog Developer.</p>
+      <div class="field"><label for="auth-admin-code">Station Admin invite code</label><input type="text" id="auth-admin-code" inputmode="numeric" autocomplete="one-time-code" pattern="[0-9]{10}" maxlength="10" placeholder="0000000000" required /></div>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
+  } else if (authMode === 'adminJoinPin') {
+    fields.innerHTML = `<div class="join-welcome"><span class="join-welcome-icon" aria-hidden="true">🔷</span><p>Create your Station Admin profile</p><small>Invite verified · choose your own username and PIN</small></div>
+      <div class="field"><label for="admin-full-name">Full name</label><input type="text" id="admin-full-name" maxlength="80" autocomplete="name" required /></div>
+      <div class="field"><label for="admin-username">Username</label><input type="text" id="admin-username" minlength="4" maxlength="6" pattern="[a-zA-Z0-9_.]+" autocomplete="username" autocapitalize="off" required /></div>
+      <div class="field"><label for="admin-phone">Phone number <span class="optional">(optional)</span></label><input type="tel" id="admin-phone" autocomplete="tel" inputmode="tel" /></div>
+      <div class="field"><label for="admin-pin">Create 4-digit PIN</label><input type="password" id="admin-pin" inputmode="numeric" autocomplete="new-password" maxlength="4" required /></div>
+      <div class="field"><label for="admin-confirm-pin">Confirm PIN</label><input type="password" id="admin-confirm-pin" inputmode="numeric" autocomplete="new-password" maxlength="4" required /></div>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="adminJoin">Use a different invite</button>`;
   } else if (authMode === 'legacy') {
     fields.innerHTML = `<p class="auth-step-note">Use this temporary path while an existing account is migrated to username and PIN.</p>
       <div class="field"><label for="auth-email">Email</label><input type="email" id="auth-email" autocomplete="email" required /></div>
@@ -321,8 +347,8 @@ let pendingJoin = null;
 function setAuthMode(mode) {
   authMode = mode;
   if (mode !== 'joinPin') pendingJoin = null;
-  const titles = { signin: 'Sign in', join: 'Join organization', joinPin: 'Set your PIN', legacy: 'Existing account', forgot: 'Forgot PIN' };
-  const subtitles = { signin: 'Use your PumpLog username and PIN.', join: 'Activate your staff account securely.', joinPin: 'Your PIN stays private and is never stored in the browser.', legacy: 'Complete migration from the previous login.', forgot: 'Recover access without exposing your PIN.' };
+  const titles = { signin: 'Sign in', join: 'Join organization', joinPin: 'Set your PIN', developer: 'Developer setup', adminJoin: 'Join as Station Admin', adminJoinPin: 'Create your profile', legacy: 'Existing account', forgot: 'Forgot PIN' };
+  const subtitles = { signin: 'Use your PumpLog username and PIN.', join: 'Activate your staff account securely.', joinPin: 'Your PIN stays private and is never stored in the browser.', developer: 'Private developer bootstrap for an empty Firebase project.', adminJoin: 'Use the 10-digit invite from your developer.', adminJoinPin: 'Your new Station Admin account is secured by your PIN.', legacy: 'Complete migration from the previous login.', forgot: 'Recover access without exposing your PIN.' };
   $('auth-title').textContent = titles[mode] || 'Sign in';
   $('auth-subtitle').textContent = subtitles[mode] || '';
   renderAuthFields();
@@ -356,6 +382,29 @@ function setupAuthForm() {
         if (pin !== confirmation) { resetAuthSubmit(); return fail('PINs do not match.'); }
         showAuthMessage('Activating your account…', 'info');
         await activateStaff({ joiningCode: $('auth-joining-code')?.value || pendingJoin?.joiningCode || pendingJoin?.code, pin });
+      } else if (authMode === 'developer') {
+        const code = $('auth-developer-code').value.trim();
+        const pin = $('auth-developer-pin').value;
+        if (!/^\d{10}$/.test(code)) { resetAuthSubmit(); return fail('Enter the 10-digit developer code.'); }
+        if (!validPin(pin) || pin !== $('auth-developer-confirm-pin').value) { resetAuthSubmit(); return fail('Developer PINs must match and be exactly 4 digits.'); }
+        showAuthMessage('Securing developer session…', 'info');
+        await bootstrapDeveloper(code, pin);
+      } else if (authMode === 'adminJoin') {
+        const code = $('auth-admin-code').value.trim();
+        if (!/^\d{10}$/.test(code)) { resetAuthSubmit(); return fail('Enter the 10-digit Station Admin invite code.'); }
+        showAuthMessage('Checking your invite…', 'info');
+        pendingJoin = { ...(await previewAdminInvite(code)), joiningCode: code, kind: 'admin' };
+        setAuthMode('adminJoinPin');
+        showAuthMessage('Complete your Station Admin profile.', 'info');
+      } else if (authMode === 'adminJoinPin') {
+        const fullName = $('admin-full-name').value.trim();
+        const username = $('admin-username').value.trim().toLowerCase();
+        const phoneNumber = $('admin-phone').value.trim();
+        const pin = $('admin-pin').value;
+        if (!fullName || !/^[a-z0-9_.]{4,6}$/.test(username)) { resetAuthSubmit(); return fail('Enter a name and a valid 4–6 character username.'); }
+        if (!validPin(pin) || pin !== $('admin-confirm-pin').value) { resetAuthSubmit(); return fail('PINs must match and be exactly 4 digits.'); }
+        showAuthMessage('Creating your Station Admin profile…', 'info');
+        await activateAdminInvite({ joiningCode: pendingJoin?.joiningCode, fullName, username, phoneNumber, pin });
       } else if (authMode === 'legacy') {
         const email = $('auth-email').value.trim();
         const password = $('auth-password').value;

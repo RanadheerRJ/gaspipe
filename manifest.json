@@ -1,6 +1,7 @@
 {
   "name": "PumpLog — Fuel Tracker",
   "short_name": "PumpLog",
+  "version": "0.5.0",
   "description": "Multi-Station Fuel Shift Tracker",
   "id": "./",
   "start_url": "./",

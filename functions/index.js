@@ -23,7 +23,9 @@ const PIN_LENGTH = 4;
 const MAX_LOGIN_FAILURES = 5;
 const LOCKOUT_MS = 15 * 60 * 1000;
 const JOINING_CODE_TTL_MS = 7 * 24 * 60 * 60 * 1000;
-const USERNAME_RE = /^[a-z0-9_.]{4,25}$/;
+const ADMIN_INVITE_TTL_MS = 30 * 24 * 60 * 60 * 1000;
+const DEV_UID = 'gVXWLjIIpXMa26kxdKuZUEGCAwj1';
+const USERNAME_RE = /^[a-z0-9_.]{4,6}$/;
 const PHONE_RE = /^\+?[0-9 ()-]{7,20}$/;
 const PIN_SEQUENCE = '0123456789';
 
@@ -60,7 +62,7 @@ function normalizeUsername(value) {
 function validateUsername(value) {
   const username = normalizeUsername(value);
   if (!USERNAME_RE.test(username)) {
-    fail('invalid-argument', 'Username must be 4–25 characters using only lowercase letters, numbers, underscores, or dots.');
+    fail('invalid-argument', 'Username must be 4–6 characters using only lowercase letters, numbers, underscores, or dots.');
   }
   return username;
 }
@@ -100,11 +102,22 @@ function randomJoiningCode() {
   return String(crypto.randomInt(10000, 100000));
 }
 
+function randomAdminInviteCode() {
+  return String(crypto.randomInt(1000000000, 10000000000));
+}
+
+function verifyDeveloperCode(value) {
+  const expected = String(process.env.PUMPLOG_DEV_BOOTSTRAP_CODE || '');
+  const actual = String(value || '').trim();
+  if (!/^\d{10}$/.test(expected) || !/^\d{10}$/.test(actual)) return false;
+  return crypto.timingSafeEqual(Buffer.from(actual), Buffer.from(expected));
+}
+
 function generatedUsername(profile, uid) {
   const source = normalizeUsername(profile.fullName || profile.email?.split('@')[0] || `staff${uid.slice(0, 8)}`)
     .replace(/[^a-z0-9_.]/g, '');
-  const base = (source.length >= 4 ? source : `staff${source}`).slice(0, 20);
-  return `${base}${uid.slice(0, Math.max(0, 25 - base.length))}`.slice(0, 25);
+  const base = (source.length >= 4 ? source : `staff${source}`).slice(0, 4);
+  return `${base}${uid.slice(0, 2)}`.slice(0, 6);
 }
 
 function hashPin(pin) {
@@ -196,10 +209,7 @@ async function createStaffIdentity({ uid, manager, fullName, username, phoneNumb
     const joiningRef = db.doc(`joiningCodes/${joiningCode}`);
     try {
       await db.runTransaction(async transaction => {
-        const [usernameSnap, joiningSnap] = await Promise.all([
-          transaction.get(usernameRef),
-          transaction.get(joiningRef),
-        ]);
+        const [usernameSnap, joiningSnap] = await transaction.getAll(usernameRef, joiningRef);
         if (usernameSnap.exists || joiningSnap.exists) throw new IdentityCollision();
         const now = FieldValue.serverTimestamp();
         transaction.set(usernameRef, {
@@ -249,8 +259,8 @@ async function createStaffIdentity({ uid, manager, fullName, username, phoneNumb
 async function prepareLegacyIdentity(profile, managerUid) {
   const base = generatedUsername(profile, profile.uid);
   for (let attempt = 0; attempt < 12; attempt += 1) {
-    const suffix = attempt ? String(attempt) : '';
-    const username = `${base.slice(0, 25 - suffix.length)}${suffix}`.slice(0, 25);
+    const suffix = attempt ? crypto.randomInt(10, 100).toString() : base.slice(4, 6);
+    const username = `${base.slice(0, 6 - suffix.length)}${suffix}`.slice(0, 6);
     const joiningCode = randomJoiningCode();
     const usernameRef = db.doc(`usernames/${username}`);
     const joiningRef = db.doc(`joiningCodes/${joiningCode}`);
@@ -258,9 +268,7 @@ async function prepareLegacyIdentity(profile, managerUid) {
     const secretRef = db.doc(`staffSecrets/${profile.uid}`);
     try {
       await db.runTransaction(async transaction => {
-        const [usernameSnap, joiningSnap, userSnap, secretSnap] = await Promise.all([
-          transaction.get(usernameRef), transaction.get(joiningRef), transaction.get(userRef), transaction.get(secretRef),
-        ]);
+        const [usernameSnap, joiningSnap, userSnap, secretSnap] = await transaction.getAll(usernameRef, joiningRef, userRef, secretRef);
         if ((usernameSnap.exists && usernameSnap.data().uid !== profile.uid) || joiningSnap.exists) throw new IdentityCollision();
         const oldCode = secretSnap.data()?.joiningCode;
         const now = FieldValue.serverTimestamp();
@@ -311,6 +319,44 @@ exports.prepareLegacyUsers = onCall(async request => {
   return { migrated };
 });
 
+exports.bootstrapDeveloper = onCall({ secrets: ['PUMPLOG_DEV_BOOTSTRAP_CODE'] }, async request => {
+  if (!verifyDeveloperCode(request.data?.code)) fail('permission-denied', 'Developer bootstrap code is invalid.');
+  let developer;
+  const existingSecretSnap = await db.doc(`staffSecrets/${DEV_UID}`).get();
+  const initialPin = existingSecretSnap.exists && existingSecretSnap.data().pinHash
+    ? null
+    : validatePin(request.data?.pin);
+  const initialPinSecret = initialPin ? await hashPin(initialPin) : null;
+  try {
+    developer = await auth.getUser(DEV_UID);
+    if (developer.disabled) developer = await auth.updateUser(DEV_UID, { disabled: false, displayName: 'PumpLog Developer' });
+  } catch (error) {
+    if (error.code !== 'auth/user-not-found') throw error;
+    developer = await auth.createUser({ uid: DEV_UID, displayName: 'PumpLog Developer', disabled: false });
+  }
+  const userRef = db.doc(`users/${DEV_UID}`);
+  const usernameRef = db.doc('usernames/dev01');
+  const secretRef = db.doc(`staffSecrets/${DEV_UID}`);
+  await db.runTransaction(async transaction => {
+    const [usernameSnap, secretSnap] = await transaction.getAll(usernameRef, secretRef);
+    if (usernameSnap.exists && usernameSnap.data().uid !== DEV_UID) fail('already-exists', 'The developer username is already reserved.');
+    if (!secretSnap.exists || !secretSnap.data().pinHash) {
+      if (!initialPinSecret) fail('failed-precondition', 'Create a 4-digit developer PIN during first setup.');
+      transaction.set(secretRef, { ...initialPinSecret, failedAttempts: 0, lockedUntil: null, createdAt: FieldValue.serverTimestamp(), updatedAt: FieldValue.serverTimestamp() }, { merge: true });
+    }
+    const now = FieldValue.serverTimestamp();
+    transaction.set(usernameRef, { uid: DEV_UID, username: 'dev01', createdAt: now, updatedAt: now }, { merge: true });
+    transaction.set(userRef, {
+      fullName: 'PumpLog Developer', username: 'dev01', phoneNumber: '', role: 'superadmin',
+      stationIds: [], status: 'active', createdBy: 'system', createdByAdmin: 'system',
+      isAdmin: true, pin_reset_required: false, updatedAt: now, lastLogin: now,
+    }, { merge: true });
+  });
+  await writeAudit({ actorUid: DEV_UID, action: 'developer.bootstrap', targetUid: DEV_UID });
+  const token = await auth.createCustomToken(DEV_UID);
+  return { token, profile: safeProfile({ uid: DEV_UID, fullName: 'PumpLog Developer', username: 'dev01', role: 'superadmin', stationIds: [], status: 'active', isAdmin: true }) };
+});
+
 exports.checkUsername = onCall(async request => {
   const username = validateUsername(request.data?.username);
   const snap = await db.doc(`usernames/${username}`).get();
@@ -329,6 +375,83 @@ exports.previewJoiningCode = onCall(async request => {
     fail('failed-precondition', 'That joining code is no longer active.');
   }
   return { staffId: invite.uid, fullName: profile.fullName || 'Staff member', username: profile.username || '' };
+});
+
+exports.createAdminInvite = onCall(async request => {
+  const creatorUid = requireAuth(request);
+  const creator = await profileFor(creatorUid);
+  if (creator.role !== 'superadmin') fail('permission-denied', 'Only a Super Admin can invite Station Admins.');
+  const expiresInDays = Math.min(30, Math.max(1, Number(request.data?.expiresInDays) || 30));
+  for (let attempt = 0; attempt < 8; attempt += 1) {
+    const code = randomAdminInviteCode();
+    const inviteRef = db.doc(`adminInvites/${code}`);
+    try {
+      await db.runTransaction(async transaction => {
+        const existing = await transaction.get(inviteRef);
+        if (existing.exists) throw new IdentityCollision();
+        transaction.set(inviteRef, {
+          purpose: 'stationadmin', createdBy: creatorUid, used: false,
+          expiresAt: Timestamp.fromMillis(Date.now() + expiresInDays * 24 * 60 * 60 * 1000),
+          createdAt: FieldValue.serverTimestamp(),
+        });
+      });
+      await writeAudit({ actorUid: creatorUid, action: 'stationadmin.invite_created', metadata: { expiresInDays } });
+      return { joiningCode: code, expiresInDays };
+    } catch (error) {
+      if (error?.code === 'identity-collision') continue;
+      throw error;
+    }
+  }
+  fail('aborted', 'Could not generate a unique Station Admin invite. Try again.');
+});
+
+exports.previewAdminInvite = onCall(async request => {
+  const code = String(request.data?.joiningCode || '').trim();
+  if (!/^\d{10}$/.test(code)) fail('invalid-argument', 'Enter the 10-digit Station Admin invite code.');
+  const snap = await db.doc(`adminInvites/${code}`).get();
+  if (!snap.exists || snap.data().used || snap.data().expiresAt.toMillis() <= Date.now()) fail('not-found', 'That Station Admin invite is invalid or expired.');
+  return { joiningCode: code, expiresAt: snap.data().expiresAt.toMillis() };
+});
+
+exports.activateAdminInvite = onCall(async request => {
+  const code = String(request.data?.joiningCode || '').trim();
+  if (!/^\d{10}$/.test(code)) fail('invalid-argument', 'Enter the 10-digit Station Admin invite code.');
+  const fullName = validateFullName(request.data?.fullName);
+  const username = validateUsername(request.data?.username);
+  const phoneNumber = validatePhone(request.data?.phoneNumber);
+  const pin = validatePin(request.data?.pin);
+  const secret = await hashPin(pin);
+  const inviteRef = db.doc(`adminInvites/${code}`);
+  let authUser;
+  try {
+    authUser = await auth.createUser({ displayName: fullName, disabled: false });
+    const userRef = db.doc(`users/${authUser.uid}`);
+    const secretRef = db.doc(`staffSecrets/${authUser.uid}`);
+    const usernameRef = db.doc(`usernames/${username}`);
+    await db.runTransaction(async transaction => {
+      const [inviteSnap, usernameSnap] = await transaction.getAll(inviteRef, usernameRef);
+      if (!inviteSnap.exists || inviteSnap.data().used || inviteSnap.data().expiresAt.toMillis() <= Date.now()) fail('not-found', 'That Station Admin invite is invalid or expired.');
+      if (usernameSnap.exists) throw new IdentityCollision();
+      const now = FieldValue.serverTimestamp();
+      transaction.set(usernameRef, { uid: authUser.uid, username, createdAt: now, updatedAt: now });
+      transaction.set(userRef, {
+        fullName, username, phoneNumber, role: 'stationadmin', stationIds: [], status: 'active',
+        createdBy: inviteSnap.data().createdBy, createdByAdmin: inviteSnap.data().createdBy,
+        isAdmin: true, pin_reset_required: false, createdAt: now, updatedAt: now, lastLogin: now,
+      });
+      transaction.set(secretRef, { ...secret, failedAttempts: 0, lockedUntil: null, createdAt: now, updatedAt: now });
+      transaction.update(inviteRef, { used: true, usedBy: authUser.uid, usedAt: now });
+    });
+    await writeAudit({ actorUid: authUser.uid, action: 'stationadmin.activated', targetUid: authUser.uid });
+    const token = await auth.createCustomToken(authUser.uid);
+    return { token, profile: safeProfile({ uid: authUser.uid, fullName, username, phoneNumber, role: 'stationadmin', stationIds: [], status: 'active', isAdmin: true, pin_reset_required: false }) };
+  } catch (error) {
+    if (authUser?.uid) await auth.deleteUser(authUser.uid).catch(cleanupError => console.error('Admin Auth cleanup failed', cleanupError));
+    if (error?.code === 'identity-collision') fail('already-exists', 'That username is already in use. Choose another.');
+    if (error instanceof HttpsError) throw error;
+    console.error('Station Admin activation failed', error);
+    fail('internal', 'Station Admin activation failed. Try again.');
+  }
 });
 
 exports.createStaff = onCall(async request => {
@@ -372,9 +495,7 @@ exports.activateStaff = onCall(async request => {
   const userRef = db.doc(`users/${invite.uid}`);
   const secretRef = db.doc(`staffSecrets/${invite.uid}`);
   await db.runTransaction(async transaction => {
-    const [freshCode, freshSecret, freshUser] = await Promise.all([
-      transaction.get(codeRef), transaction.get(secretRef), transaction.get(userRef),
-    ]);
+    const [freshCode, freshSecret, freshUser] = await transaction.getAll(codeRef, secretRef, userRef);
     const codeData = freshCode.data();
     const userData = freshUser.data();
     if (!freshCode.exists || !freshSecret.exists || !freshUser.exists
@@ -403,7 +524,7 @@ exports.loginWithUsernamePin = onCall(async request => {
   const userRef = db.doc(`users/${uid}`);
   const secretRef = db.doc(`staffSecrets/${uid}`);
   const outcome = await db.runTransaction(async transaction => {
-    const [userSnap, secretSnap] = await Promise.all([transaction.get(userRef), transaction.get(secretRef)]);
+    const [userSnap, secretSnap] = await transaction.getAll(userRef, secretRef);
     if (!userSnap.exists || !secretSnap.exists) return { ok: false };
     const user = userSnap.data();
     const secret = secretSnap.data();
@@ -467,7 +588,7 @@ exports.resetStaffPin = onCall(async request => {
     const codeRef = db.doc(`joiningCodes/${code}`);
     try {
       await db.runTransaction(async transaction => {
-        const [secretSnap, codeSnap] = await Promise.all([transaction.get(secretRef), transaction.get(codeRef)]);
+        const [secretSnap, codeSnap] = await transaction.getAll(secretRef, codeRef);
         if (codeSnap.exists) throw new IdentityCollision();
         const oldCode = secretSnap.data()?.joiningCode;
         const now = FieldValue.serverTimestamp();

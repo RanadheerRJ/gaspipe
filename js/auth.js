@@ -150,6 +150,8 @@ export function formatFirebaseError(err) {
     'functions/deadline-exceeded': 'That joining code has expired. Ask an admin for a new one.',
     'functions/failed-precondition': 'Complete the required account setup before continuing.',
     'functions/not-found': 'That joining code is invalid or has expired.',
+    'functions/already-exists': 'That username is already in use. Choose another.',
+    'functions/internal': 'The secure identity service is unavailable. Deploy the latest Firebase Functions and try again.',
   };
 
   if (map[code]) return map[code];

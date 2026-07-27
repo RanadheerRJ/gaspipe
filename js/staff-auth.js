@@ -23,6 +23,26 @@ export async function checkUsername(username) {
   return callStaffFunction('checkUsername', { username: normalizeUsername(username) });
 }
 
+export async function bootstrapDeveloper(code, pin) {
+  const result = await callStaffFunction('bootstrapDeveloper', { code: String(code || '').trim(), pin });
+  await signInWithFunctionToken(result);
+  return result.profile || null;
+}
+
+export function createAdminInvite(expiresInDays = 30) {
+  return callStaffFunction('createAdminInvite', { expiresInDays });
+}
+
+export function previewAdminInvite(joiningCode) {
+  return callStaffFunction('previewAdminInvite', { joiningCode: String(joiningCode || '').trim() });
+}
+
+export async function activateAdminInvite({ joiningCode, fullName, username, phoneNumber = '', pin }) {
+  const result = await callStaffFunction('activateAdminInvite', { joiningCode: String(joiningCode || '').trim(), fullName, username: normalizeUsername(username), phoneNumber, pin });
+  await signInWithFunctionToken(result);
+  return result.profile || null;
+}
+
 export function previewJoiningCode(joiningCode) {
   return callStaffFunction('previewJoiningCode', { joiningCode: String(joiningCode || '').trim() });
 }

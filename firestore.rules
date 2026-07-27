@@ -261,6 +261,10 @@ service cloud.firestore {
       allow read, write: if false;
     }
 
+    match /adminInvites/{code} {
+      allow read, write: if false;
+    }
+
     match /auditLogs/{auditId} {
       allow read: if isSuperAdmin();
       allow write: if false;
