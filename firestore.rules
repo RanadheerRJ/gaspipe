@@ -1,0 +1,82 @@
+rules_version = '2';
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Helper functions ────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function getUserData() {
+      return get(/databases/$(database)/documents/users/$(request.auth.uid)).data;
+    }
+
+    function isSuperAdmin() {
+      return isSignedIn() && getUserData().role == 'superadmin';
+    }
+
+    function isStationAdmin() {
+      return isSignedIn() && getUserData().role == 'stationadmin';
+    }
+
+    function isStaff() {
+      return isSignedIn() && getUserData().role == 'staff';
+    }
+
+    function hasAccessToStation(stationId) {
+      // Super Admin has access to everything
+      if (isSuperAdmin()) return true;
+      // Others must have the station in their stationIds
+      return isSignedIn() && stationId in getUserData().stationIds;
+    }
+
+    // ── Users collection ────────────────────────────────────────────
+    match /users/{uid} {
+      // Users can read their own document
+      // Super Admin can read/write all user documents
+      allow read: if isSignedIn() && (request.auth.uid == uid || isSuperAdmin());
+      allow create: if isSignedIn() && isSuperAdmin();
+      allow update: if isSignedIn() && isSuperAdmin();
+      allow delete: if isSignedIn() && isSuperAdmin();
+    }
+
+    // ── Stations collection ─────────────────────────────────────────
+    match /stations/{stationId} {
+      // Any authenticated user with access can read a station
+      allow read: if isSignedIn() && hasAccessToStation(stationId);
+      // Only Super Admin can create/update/delete stations
+      allow create: if isSignedIn() && isSuperAdmin();
+      allow update: if isSignedIn() && isSuperAdmin();
+      allow delete: if isSignedIn() && isSuperAdmin();
+
+      // ── Pumps subcollection ─────────────────────────────────────
+      match /pumps/{pumpId} {
+        // Station Admin and Staff can read (with station access)
+        allow read: if isSignedIn() && hasAccessToStation(stationId);
+        // Station Admin and Super Admin can create/update/delete
+        allow create: if isSignedIn() && (isSuperAdmin() || isStationAdmin()) && hasAccessToStation(stationId);
+        allow update: if isSignedIn() && (isSuperAdmin() || isStationAdmin()) && hasAccessToStation(stationId);
+        allow delete: if isSignedIn() && (isSuperAdmin() || isStationAdmin()) && hasAccessToStation(stationId);
+      }
+
+      // ── Rates subcollection ─────────────────────────────────────
+      match /rates/{rateId} {
+        allow read: if isSignedIn() && hasAccessToStation(stationId);
+        allow create: if isSignedIn() && (isSuperAdmin() || isStationAdmin()) && hasAccessToStation(stationId);
+        allow update: if isSignedIn() && (isSuperAdmin() || isStationAdmin()) && hasAccessToStation(stationId);
+        allow delete: if isSignedIn() && (isSuperAdmin() || isStationAdmin()) && hasAccessToStation(stationId);
+      }
+
+      // ── Shifts subcollection ────────────────────────────────────
+      match /shifts/{shiftId} {
+        // Any user with station access can read shifts
+        allow read: if isSignedIn() && hasAccessToStation(stationId);
+        // Any user with station access can create shifts (Staff can log readings)
+        allow create: if isSignedIn() && hasAccessToStation(stationId);
+        // Only Super Admin and Station Admin can update/delete shifts
+        allow update: if isSignedIn() && (isSuperAdmin() || isStationAdmin()) && hasAccessToStation(stationId);
+        allow delete: if isSignedIn() && (isSuperAdmin() || isStationAdmin()) && hasAccessToStation(stationId);
+      }
+    }
+  }
+}

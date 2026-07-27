@@ -1,0 +1,151 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1.0, viewport-fit=cover" />
+  <meta name="theme-color" content="#ffffff" />
+  <meta name="description" content="PumpLog — Multi-Station Fuel Tracker" />
+  <link rel="manifest" href="manifest.json" />
+  <link rel="apple-touch-icon" href="icons/icon-192.png" />
+  <title>PumpLog</title>
+  <link rel="preconnect" href="https://fonts.googleapis.com" />
+  <link rel="preconnect" href="https://fonts.gstatic.com" crossorigin />
+  <link href="https://fonts.googleapis.com/css2?family=Inter:opsz,wght@14..32,300;14..32,400;14..32,500;14..32,600;14..32,700;14..32,800&family=JetBrains+Mono:wght@400;500;600&display=swap" rel="stylesheet" />
+  <link rel="stylesheet" href="css/style.css" />
+</head>
+<body>
+  <!-- Loading Spinner -->
+  <div id="loading-screen">
+    <div class="spinner"></div>
+    <p>Loading PumpLog…</p>
+  </div>
+
+  <!-- Auth Screen -->
+  <div id="auth-screen" class="screen hidden">
+    <div class="auth-container">
+      <div class="auth-logo">
+        <div class="auth-icon">⛽</div>
+        <h1>PumpLog</h1>
+        <p class="auth-tagline">Multi-Station Fuel Tracker</p>
+      </div>
+      <div class="auth-card">
+        <h2 id="auth-title">Sign In</h2>
+        <div id="auth-error" class="auth-error hidden"></div>
+        <form id="auth-form">
+          <div class="field">
+            <label for="auth-email">Email</label>
+            <input type="email" id="auth-email" placeholder="you@example.com" required autocomplete="email" />
+          </div>
+          <div class="field">
+            <label for="auth-password">Password</label>
+            <input type="password" id="auth-password" placeholder="••••••••" required autocomplete="current-password" />
+          </div>
+          <button type="submit" id="auth-submit" class="btn btn-primary btn-full">Sign In</button>
+        </form>
+        <p class="auth-toggle">
+          Don't have an account? <a href="#" id="auth-toggle-link">Sign Up</a>
+        </p>
+      </div>
+    </div>
+  </div>
+
+  <!-- Main App Shell -->
+  <div id="app-shell" class="hidden">
+    <!-- Top Bar -->
+    <header id="top-bar">
+      <div class="top-left">
+        <button id="station-selector" class="station-pill">
+          <span id="station-name-display">Select Station</span>
+          <span class="chevron">⌄</span>
+        </button>
+      </div>
+      <div class="top-right">
+        <button id="btn-add-reading" class="icon-btn" title="Quick Add Reading">
+          <span class="icon">➕</span>
+        </button>
+        <button id="btn-profile" class="icon-btn" title="Profile">
+          <span class="icon">👤</span>
+        </button>
+        <button id="btn-notifications" class="icon-btn" title="Alerts">
+          <span class="icon">🔔</span>
+        </button>
+      </div>
+    </header>
+
+    <!-- Quick Action Chips -->
+    <div id="quick-chips" class="chips-row">
+      <button class="chip chip-active" data-view="today">Today</button>
+      <button class="chip" data-view="week">This Week</button>
+      <button class="chip" data-view="all-pumps">All Pumps</button>
+      <button class="chip" data-view="alerts">⚠ Low Alerts</button>
+    </div>
+
+    <!-- Page Content Area -->
+    <main id="page-content"></main>
+
+    <!-- Bottom Tab Bar -->
+    <nav id="tab-bar">
+      <button class="tab tab-active" data-page="dashboard">
+        <span class="tab-icon">📊</span>
+        <span class="tab-label">Dashboard</span>
+      </button>
+      <button class="tab" data-page="pumps">
+        <span class="tab-icon">⛽</span>
+        <span class="tab-label">Pumps</span>
+      </button>
+      <button class="tab" data-page="config">
+        <span class="tab-icon">⚙️</span>
+        <span class="tab-label">Config</span>
+      </button>
+      <button class="tab" data-page="history">
+        <span class="tab-icon">📋</span>
+        <span class="tab-label">History</span>
+      </button>
+    </nav>
+  </div>
+
+  <!-- Station Switcher Modal -->
+  <div id="station-modal" class="modal hidden">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Switch Station</h2>
+        <button class="modal-close icon-btn">&times;</button>
+      </div>
+      <div class="modal-body" id="station-list"></div>
+    </div>
+  </div>
+
+  <!-- Generic Modal -->
+  <div id="generic-modal" class="modal hidden">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2 id="modal-title"></h2>
+        <button class="modal-close icon-btn">&times;</button>
+      </div>
+      <div class="modal-body" id="modal-body"></div>
+    </div>
+  </div>
+
+  <!-- Profile Modal -->
+  <div id="profile-modal" class="modal hidden">
+    <div class="modal-overlay"></div>
+    <div class="modal-content">
+      <div class="modal-header">
+        <h2>Profile</h2>
+        <button class="modal-close icon-btn">&times;</button>
+      </div>
+      <div class="modal-body">
+        <p><strong>Email:</strong> <span id="profile-email"></span></p>
+        <p><strong>Role:</strong> <span id="profile-role"></span></p>
+        <p><strong>Station(s):</strong> <span id="profile-stations"></span></p>
+        <hr />
+        <button id="btn-signout" class="btn btn-secondary btn-full">Sign Out</button>
+      </div>
+    </div>
+  </div>
+
+  <script type="module" src="js/app.js"></script>
+</body>
+</html>
