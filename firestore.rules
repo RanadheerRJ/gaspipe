@@ -72,11 +72,60 @@ service cloud.firestore {
         ? me().pumpIds : [];
     }
 
+    // Daily roster: stations/{id}/assignments/{date}_{pumpId}
+    function assignmentPath(stationId, date, pumpId) {
+      return /databases/$(database)/documents/stations/$(stationId)/assignments/$(date + '_' + pumpId);
+    }
+
+    function rosteredOn(stationId, date, pumpId) {
+      return exists(assignmentPath(stationId, date, pumpId))
+        && get(assignmentPath(stationId, date, pumpId)).data.staffUids is list
+        && request.auth.uid in get(assignmentPath(stationId, date, pumpId)).data.staffUids;
+    }
+
+    // True when the board rosters the caller onto this pump for the shift
+    // date carried by the document being written.
+    //
+    // The date is taken from the request rather than from request.time
+    // because board dates are the station's LOCAL calendar day while
+    // request.time is UTC — the two disagree for part of every day in any
+    // non-UTC zone (a 01:00 IST shift is still "yesterday" in UTC). Both the
+    // session lock and the shift record carry a validated `date` string, and
+    // being rostered on a pump is a genuine assignment whichever day it is,
+    // so this stays accurate without a timezone guess. The atomic pump-lock
+    // transaction remains the real authority over who holds a pump.
+    function rosteredForRequest(stationId, pumpId) {
+      return request.resource.data.keys().hasAny(['date'])
+        && request.resource.data.date is string
+        && request.resource.data.date.size() == 10
+        && rosteredOn(stationId, request.resource.data.date, pumpId);
+    }
+
+    // A staff member may use a pump when the daily board rosters them onto it,
+    // OR their standing pumpIds list includes it, OR they have no restriction
+    // at all (empty standing list). The last case keeps brand-new accounts
+    // working before anyone has touched the roster.
     function canUsePump(stationId, pumpId) {
       return canManageStation(stationId)
         || (myRole() == 'staff'
             && canAccessStation(stationId)
-            && (myPumps().size() == 0 || pumpId in myPumps()));
+            && (myPumps().size() == 0
+                || pumpId in myPumps()
+                || rosteredForRequest(stationId, pumpId)));
+    }
+
+    function assignmentFieldsOk() {
+      return request.resource.data.keys().hasAll(['date', 'pumpId', 'staffUids'])
+        && request.resource.data.keys().hasOnly([
+             'date', 'pumpId', 'pumpName', 'product', 'staffUids', 'staffNames',
+             'note', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy'
+           ])
+        && request.resource.data.date is string
+        && request.resource.data.pumpId is string
+        && request.resource.data.staffUids is list
+        && request.resource.data.staffUids.size() <= 20
+        && (!request.resource.data.keys().hasAny(['note'])
+            || (request.resource.data.note is string && request.resource.data.note.size() <= 300));
     }
 
     function sessionPath(stationId, pumpId) {
@@ -231,6 +280,28 @@ service cloud.firestore {
         && userFieldsOk();
     }
 
+    // Team management is station-scoped, not creator-scoped: a Station Admin
+    // must be able to roster and edit staff that one of their Managers
+    // created (and vice versa), otherwise the daily board can only ever show
+    // half the team. Role escalation is still blocked — the target stays
+    // 'staff' and may only hold stations the caller holds.
+    function targetIsMyStationStaff() {
+      return resource.data.role == 'staff'
+        && resource.data.stationIds is list
+        && resource.data.stationIds.hasAny(myStations());
+    }
+
+    function overseerUpdatingStationStaff() {
+      return (isStationAdmin() || isManager())
+        && targetIsMyStationStaff()
+        && request.resource.data.role == 'staff'
+        && ((!resource.data.keys().hasAny(['email']) && !request.resource.data.keys().hasAny(['email']))
+            || request.resource.data.email == resource.data.email)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.stationIds.hasOnly(myStations())
+        && userFieldsOk();
+    }
+
     function stationAdminDeletingOwnStaff() {
       return isStationAdmin()
         && resource.data.role == 'staff'
@@ -281,14 +352,23 @@ service cloud.firestore {
           || isSuperAdmin()
           || (isStationAdmin() && resource.data.createdBy == request.auth.uid)
           || (isManager() && resource.data.createdBy == request.auth.uid)
+          // Anyone sharing a station with the caller, so the roster board can
+          // resolve names for staff someone else created.
+          || ((isStationAdmin() || isManager())
+              && resource.data.stationIds is list
+              && resource.data.stationIds.hasAny(myStations()))
         );
 
-      // Super Admin lists everyone. A Station Admin's query must be scoped to
-      // the staff they created; an unscoped list returns a doc that fails this
-      // condition, so Firestore rejects the whole query.
+      // Super Admin lists everyone. Managers and Station Admins must scope
+      // their query — either to the accounts they created, or to one of their
+      // own stations (array-contains). An unscoped list returns a doc that
+      // fails this condition, so Firestore rejects the whole query.
       allow list: if isSuperAdmin()
         || (isStationAdmin() && resource.data.createdBy == request.auth.uid)
-        || (isManager() && resource.data.createdBy == request.auth.uid);
+        || (isManager() && resource.data.createdBy == request.auth.uid)
+        || ((isStationAdmin() || isManager())
+            && resource.data.stationIds is list
+            && resource.data.stationIds.hasAny(myStations()));
 
       allow create: if isSignedIn() && (
            (isSuperAdmin() && userFieldsOk())
@@ -304,6 +384,7 @@ service cloud.firestore {
            (isSuperAdmin() && request.auth.uid != uid && userFieldsOk())
         || stationAdminUpdatingOwnStaff()
         || managerUpdatingOwnStaff()
+        || overseerUpdatingStationStaff()
         || selfUpdatingRuntimeFields(uid)
       );
 
@@ -372,6 +453,20 @@ service cloud.firestore {
       match /pumps/{pumpId} {
         allow read: if isSignedIn() && canAccessStation(stationId);
         allow create, update, delete: if isSignedIn() && canManageStation(stationId);
+      }
+
+      // ── Daily pump assignments (Kanban roster) ────────────────────
+      // Every station member reads the board so staff can see where they are
+      // rostered; only managers and admins change it.
+      match /assignments/{assignmentId} {
+        allow read: if isSignedIn() && canAccessStation(stationId);
+
+        allow create, update: if isSignedIn()
+          && canManageStation(stationId)
+          && assignmentFieldsOk()
+          && assignmentId == request.resource.data.date + '_' + request.resource.data.pumpId;
+
+        allow delete: if isSignedIn() && canManageStation(stationId);
       }
 
       // ── Rates ─────────────────────────────────────────────────────

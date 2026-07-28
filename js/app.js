@@ -9,7 +9,7 @@
 import { initMainApp, setAuthPersistence } from './firebase.js';
 import {
   initAuth, onAuthChange, getCurrentUser, getCurrentUserData,
-  isSuperAdmin, isStationAdmin, isStaff, can,
+  isSuperAdmin, can,
   doSignOut, formatFirebaseError,
 } from './auth.js';
 import {
@@ -29,6 +29,7 @@ import {
 } from './app-lock.js';
 import { initDashboard, renderDashboard, stopLiveFeed } from './dashboard.js';
 import { initPumps, renderPumps, stopPumpsLive } from './pumps.js';
+import { initBoard, renderBoard, stopBoardLive, primeMyDailyPumps } from './board.js';
 import { initConfig, renderConfig } from './config-page.js';
 import { initHistory, renderHistory } from './history.js';
 import { initReports, renderReports } from './reports.js';
@@ -131,6 +132,7 @@ onAuthChange(async (user, userData, authError) => {
     resetAuthSubmit();
     stopLiveFeed();
     stopPumpsLive();
+    stopBoardLive();
     currentStationId = null;
     userStations = [];
     currentPage = 'dashboard';
@@ -195,15 +197,23 @@ async function enterApp(user, policy) {
 
   initDashboard();
   initPumps();
+  initBoard();
   initConfig();
   initHistory();
   initReports();
 
   setupUI();
-  applyRoleVisibility();
 
   await loadUserStations();
   restoreStation(userData);
+
+  // Tab visibility depends on the selected station, so apply it after the
+  // station is restored rather than before.
+  applyRoleVisibility();
+
+  // Load today's roster before the first paint so a staff member rostered by
+  // their manager can start a shift immediately, without opening the board.
+  await primeMyDailyPumps(currentStationId);
 
   if (!currentStationId && isSuperAdmin()) currentPage = 'config';
   renderCurrentPage();
@@ -279,10 +289,12 @@ async function renderCurrentPage() {
 
   if (currentPage === 'config' && !can('config.view')) currentPage = 'dashboard';
   if (currentPage === 'reports' && !can('report.view', { stationId: currentStationId })) currentPage = 'dashboard';
+  if (currentPage === 'board' && !can('assignment.view', { stationId: currentStationId })) currentPage = 'dashboard';
 
   // Keep live listeners attached only to the screen currently using them.
   if (currentPage !== 'dashboard') stopLiveFeed();
   if (currentPage !== 'pumps') stopPumpsLive();
+  if (currentPage !== 'board') stopBoardLive();
 
   document.querySelectorAll('.tab').forEach(tab => {
     const active = tab.dataset.page === currentPage;
@@ -297,6 +309,7 @@ async function renderCurrentPage() {
   try {
     switch (currentPage) {
       case 'pumps':   await renderPumps(currentStationId); break;
+      case 'board':   await renderBoard(currentStationId); break;
       case 'config':  await renderConfig(currentStationId); break;
       case 'history': await renderHistory(currentStationId, currentRange); break;
       case 'reports': await renderReports(currentStationId); break;
@@ -312,8 +325,16 @@ async function renderCurrentPage() {
 function applyRoleVisibility() {
   const configTab = document.querySelector('[data-page="config"]');
   if (configTab) configTab.hidden = !can('config.view');
+
+  // Managers were missing from this list, so the Reports tab stayed hidden
+  // for them even though can('report.view') allows it.
   const reportsTab = document.querySelector('[data-page="reports"]');
-  if (reportsTab) reportsTab.hidden = !(isSuperAdmin() || isStationAdmin() || isStaff());
+  if (reportsTab) reportsTab.hidden = !can('report.view', { stationId: currentStationId });
+
+  // The roster board is readable by every station member; only overseers can
+  // rearrange it.
+  const boardTab = document.querySelector('[data-page="board"]');
+  if (boardTab) boardTab.hidden = !can('assignment.view', { stationId: currentStationId });
 }
 
 // ── Refresh ─────────────────────────────────────────────────────────────
@@ -562,6 +583,15 @@ function setupUI() {
   // the current page in place, whatever it is.
   window.addEventListener('pumplog:dataChanged', () => renderCurrentPage());
 
+  // The signed-in user's own profile changed under them — a manager altered
+  // their role, stations, or pump assignments. Re-apply tab visibility and
+  // repaint so the new permissions take effect without a reload.
+  window.addEventListener('pumplog:profileChanged', async () => {
+    applyRoleVisibility();
+    await primeMyDailyPumps(currentStationId);
+    renderCurrentPage();
+  });
+
   $('station-selector').addEventListener('click', openStationPicker);
 
   $('btn-profile').addEventListener('click', () => {
@@ -627,9 +657,13 @@ function openStationPicker() {
   openModal('station-modal');
 
   document.querySelectorAll('.station-option').forEach(opt => {
-    opt.addEventListener('click', () => {
+    opt.addEventListener('click', async () => {
       if (opt.dataset.id !== currentStationId) {
         setStation(opt.dataset.id);
+        // Pump access is per station, so reload this station's roster before
+        // rendering — otherwise the previous station's grants leak across.
+        await primeMyDailyPumps(currentStationId);
+        applyRoleVisibility();
         renderCurrentPage();
       }
       closeModal('station-modal');

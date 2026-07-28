@@ -13,35 +13,38 @@
  */
 
 import {
-  getDb, collection, doc, runTransaction, serverTimestamp,
+  getDb, collection, doc, setDoc, deleteDoc, runTransaction, serverTimestamp,
 } from './firebase.js';
 import {
-  getCurrentUserData, isSuperAdmin, isStationAdmin, isManager, isStationOverseer,
-  can, canManageStation, denyReason, formatFirebaseError,
-  hasPumpRestriction, canUsePump, filterMyPumps, userDisplayName,
+  getCurrentUserData, isStationOverseer,
+  can, denyReason, formatFirebaseError,
+  canUsePump, filterMyPumps, userDisplayName,
+  pumpAccessMode, setMyDailyPumps,
 } from './auth.js';
-import { updateUserAccount } from './staff-auth.js';
 import {
   getPumps, getCurrentRateMap, getPumpSessions, getStaffForStation, watchPumpSessions,
-  getShifts, invalidateStation, invalidateUsers,
+  getShifts, invalidateStation,
+  getAssignments, watchAssignments, pumpIdsForUser,
 } from './store.js';
 import {
   h, formatCurrency, formatVolume, formatDateTime, formatTimeAgo,
-  getTodayDate, openModal, closeModal, emptyState, toast, toastSuccess, toastError,
-  confirmSave, confirmDialog, setBusy, showSkeleton,
+  getTodayDate, openModal, closeModal, emptyState, toastSuccess, toastError,
+  confirmDialog, setBusy, showSkeleton,
 } from './components.js';
 
 let currentStationId = null;
 let pumpContext = null;
 let sessionUnsub = null;
+let assignmentUnsub = null;
 
 export function initPumps() {}
 
 export function stopPumpsLive() {
-  if (sessionUnsub) {
-    try { sessionUnsub(); } catch { /* already closed */ }
-  }
+  [sessionUnsub, assignmentUnsub].forEach(unsub => {
+    if (unsub) { try { unsub(); } catch { /* already closed */ } }
+  });
   sessionUnsub = null;
+  assignmentUnsub = null;
   pumpContext = null;
 }
 
@@ -52,6 +55,18 @@ function stopSessionWatch() {
 function sessionFor(pumpId, rows = pumpContext?.sessions || []) {
   return rows.find(s => s.id === pumpId && s.status === 'active') || null;
 }
+
+function closeAllPumpMenus() {
+  document.querySelectorAll('.pump-menu-dropdown:not([hidden])').forEach(d => { d.hidden = true; });
+  document.querySelectorAll('.pump-menu-trigger[aria-expanded="true"]')
+    .forEach(t => t.setAttribute('aria-expanded', 'false'));
+}
+
+// Registered once at module load, not on every repaint — the old code added a
+// fresh document listener each time the board painted, which accumulated
+// hundreds of handlers over a long shift.
+document.addEventListener('click', closeAllPumpMenus);
+document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAllPumpMenus(); });
 
 function isMine(session) {
   return !!session && session.activeUid === getCurrentUserData()?.uid;
@@ -89,11 +104,20 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
   const mayLog = !isStationOverseer() && can('shift.create', { stationId })
     && (canUsePump(pump.id) || isMine(session));
   const action = actionFor(pump, session, mayLog);
-  const assigned = isStationOverseer()
-    ? staff.filter(user => (user.pumpIds || []).includes(pump.id))
-    : [];
+  // Who is rostered on this pump today, per the board. Falls back to the
+  // standing pumpIds list so stations that never open the board still see
+  // their assignments here.
+  const roster = (pumpContext?.assignments || []).find(row => row.pumpId === pump.id);
+  const rosterNames = (roster?.staffUids || []).map(uid =>
+    userDisplayName(staff.find(user => user.id === uid)) || roster.staffNames?.[uid] || 'Staff');
+  const standingNames = staff
+    .filter(user => (user.pumpIds || []).includes(pump.id))
+    .map(user => userDisplayName(user));
+  const names = rosterNames.length ? rosterNames : standingNames;
   const assignmentLine = isStationOverseer()
-    ? `<span class="pump-assignment-line">${assigned.length ? `Assigned to ${assigned.map(user => h(userDisplayName(user))).join(', ')}` : 'No staff assigned to this pump'}</span>`
+    ? `<span class="pump-assignment-line">${names.length
+        ? `${rosterNames.length ? 'Rostered today' : 'Assigned'}: ${names.map(h).join(', ')}`
+        : 'Nobody rostered — assign from the Roster tab'}</span>`
     : '';
   const rate = rateMap[pump.product];
   const detail = session
@@ -107,14 +131,17 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
       ? 'This pump is locked by another staff member.'
       : '';
 
-  // For overseers, show both a primary action button and a secondary "⋮" menu
+  // For overseers, show both a primary action button and a secondary "⋮" menu.
+  // The menu is always available (not only while someone else holds the pump)
+  // so rostering is reachable from the pump card at any time.
   const isOverseer = isStationOverseer();
-  const secondaryMenu = isOverseer && session && session.activeUid !== getCurrentUserData()?.uid
-    ? `<div class="pump-menu" style="position:relative;display:inline-block;">
-        <button type="button" class="icon-btn pump-menu-trigger" data-pump-id="${h(pump.id)}" aria-label="More actions" title="More actions">⋮</button>
+  const heldByOther = session && session.activeUid !== getCurrentUserData()?.uid;
+  const secondaryMenu = isOverseer
+    ? `<div class="pump-menu">
+        <button type="button" class="icon-btn pump-menu-trigger" data-pump-id="${h(pump.id)}" aria-label="More actions for ${h(pump.name || 'pump')}" title="More actions" aria-haspopup="true" aria-expanded="false">⋮</button>
         <div class="pump-menu-dropdown" hidden>
-          <button type="button" class="pump-menu-item" data-action="force-release" data-pump-id="${h(pump.id)}">Force release (no shift record)</button>
-          <button type="button" class="pump-menu-item" data-action="assign" data-pump-id="${h(pump.id)}">Assign to staff</button>
+          <button type="button" class="pump-menu-item" data-action="assign" data-pump-id="${h(pump.id)}">👥 Assign staff for today</button>
+          ${heldByOther ? `<button type="button" class="pump-menu-item" data-action="force-release" data-pump-id="${h(pump.id)}">🔓 Force release (no shift record)</button>` : ''}
         </div>
       </div>`
     : '';
@@ -169,13 +196,13 @@ function paintPumpBoard() {
     trigger.addEventListener('click', e => {
       e.stopPropagation();
       const dropdown = trigger.parentElement.querySelector('.pump-menu-dropdown');
-      if (dropdown) dropdown.hidden = !dropdown.hidden;
+      if (!dropdown) return;
+      const open = dropdown.hidden;
+      closeAllPumpMenus();
+      dropdown.hidden = !open;
+      trigger.setAttribute('aria-expanded', String(open));
     });
   });
-  // Close menus on outside click
-  document.addEventListener('click', () => {
-    document.querySelectorAll('.pump-menu-dropdown:not([hidden])').forEach(d => { d.hidden = true; });
-  }, { once: false });
   // Menu item actions
   board.querySelectorAll('.pump-menu-item').forEach(item => {
     item.addEventListener('click', e => {
@@ -183,12 +210,9 @@ function paintPumpBoard() {
       const pump = pumps.find(p => p.id === item.dataset.pumpId);
       if (!pump) return;
       const session = sessionFor(pump.id, sessions);
+      item.closest('.pump-menu-dropdown').hidden = true;
       if (item.dataset.action === 'assign') openPumpAssignmentForm(stationId, pump, staff);
-      if (item.dataset.action === 'force-release') {
-        import('./config-page.js').then(mod => mod.forceReleasePump ? null : null).catch(() => {});
-        // Use the existing force-release logic inline
-        forceReleasePumpAtStation(stationId, pump, session);
-      }
+      if (item.dataset.action === 'force-release') forceReleasePumpAtStation(stationId, pump, session);
     });
   });
 }
@@ -236,6 +260,35 @@ async function forceReleasePumpAtStation(stationId, pump, session) {
   }
 }
 
+/**
+ * Watch today's roster so a manager rostering someone from the board unlocks
+ * Start shift on that person's device within a second, with no refresh.
+ */
+function startAssignmentWatch(stationId, date) {
+  assignmentUnsub = watchAssignments(stationId, date, {
+    onUpdate: (rows) => {
+      if (!pumpContext || pumpContext.stationId !== stationId) return;
+      pumpContext.assignments = rows;
+      const me = getCurrentUserData();
+      if (!me) return;
+
+      if (!isStationOverseer()) {
+        const all = pumpContext.allPumps || pumpContext.pumps;
+        const before = filterMyPumps(all).map(p => p.id).join(',');
+        setMyDailyPumps(pumpIdsForUser(rows, me.uid), date);
+        // A roster change can add or remove whole pumps from this page, which
+        // paintPumpBoard() alone cannot express — re-render in that case.
+        if (filterMyPumps(all).map(p => p.id).join(',') !== before) {
+          renderPumps(stationId);
+          return;
+        }
+      }
+      paintPumpBoard();
+    },
+    onError: () => { /* roster is advisory here; the lock still governs */ },
+  });
+}
+
 function startSessionWatch(stationId) {
   sessionUnsub = watchPumpSessions(stationId, {
     onUpdate: (sessions) => {
@@ -262,17 +315,28 @@ export async function renderPumps(stationId) {
 
   showSkeleton(3);
 
+  const today = getTodayDate();
+
   try {
-    const [pumps, rateMap, sessions, staff] = await Promise.all([
+    const [pumps, rateMap, sessions, staff, assignments] = await Promise.all([
       getPumps(stationId),
       getCurrentRateMap(stationId),
       getPumpSessions(stationId),
-      isStationOverseer() ? getStaffForStation(stationId) : [],
+      isStationOverseer() ? getStaffForStation(stationId).catch(() => []) : [],
+      getAssignments(stationId, today).catch(() => []),
     ]);
+
+    // Publish today's roster to the RBAC layer before any permission check
+    // runs — this is what makes Start shift work for a rostered staff member.
+    const me = getCurrentUserData();
+    if (me && !isStationOverseer()) {
+      setMyDailyPumps(pumpIdsForUser(assignments, me.uid), today);
+    }
+
     const mayConfigure = can('pump.create', { stationId });
     const assignedPumps = filterMyPumps(pumps);
     const activeMineIds = new Set(sessions
-      .filter(session => session.status === 'active' && session.activeUid === getCurrentUserData()?.uid)
+      .filter(session => session.status === 'active' && session.activeUid === me?.uid)
       .map(session => session.id));
     // Keep an in-progress pump visible to its owner if a manager removes the
     // assignment mid-shift. The owner may still end it, but cannot start it
@@ -288,16 +352,19 @@ export async function renderPumps(stationId) {
 
     if (myPumps.length === 0) {
       content.innerHTML = `<h2 class="page-title">Pumps</h2>${emptyState('🔒',
-        'No pumps are assigned to you at this station. Ask your admin or manager to assign pumps from Config → Team.')}`;
+        'No pumps are rostered to you at this station today. Ask your manager to place you on the Roster board.')}`;
       return;
     }
 
     const mayLog = !isStationOverseer() && can('shift.create', { stationId });
+    const mode = pumpAccessMode();
     const hint = isStationOverseer()
-      ? 'Live status is shared across devices. Start/end shifts on any pump, or assign staff from the pump menu.'
-      : hasPumpRestriction()
-        ? `Showing the ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} assigned to you.`
-        : mayLog ? 'Choose a pump to start or end your shift. Live locks update on every device.' : 'You have read-only access.';
+      ? 'Live status is shared across devices. Start/end shifts on any pump, or open the Roster tab to plan the day.'
+      : mode === 'daily'
+        ? `Rostered to ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} today. Tap one to start your shift.`
+        : mode === 'standing'
+          ? `Showing the ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} assigned to you.`
+          : mayLog ? 'Choose a pump to start or end your shift. Live locks update on every device.' : 'You have read-only access.';
 
     content.innerHTML = `
       <div class="page-head">
@@ -311,9 +378,13 @@ export async function renderPumps(stationId) {
       <ul id="pump-board" class="pump-grid"></ul>
     `;
 
-    pumpContext = { stationId, pumps: myPumps, rateMap, sessions, staff };
+    pumpContext = {
+      stationId, pumps: myPumps, allPumps: pumps, rateMap, sessions, staff,
+      assignments, date: today,
+    };
     paintPumpBoard();
     startSessionWatch(stationId);
+    startAssignmentWatch(stationId, today);
   } catch (err) {
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
@@ -335,49 +406,78 @@ export function openShiftForm(stationId, pump, rate, session = null) {
   }
 }
 
+/**
+ * Roster staff onto a pump for TODAY.
+ *
+ * This writes the day's assignment document rather than editing each staff
+ * member's standing `pumpIds`, so yesterday's roster never silently governs
+ * today. The Roster tab is the full board; this is the single-pump shortcut.
+ */
 async function openPumpAssignmentForm(stationId, pump, staff) {
-  if (!isStationOverseer()) {
-    toastError('Only Station Admins, Managers, and Super Admins can assign pumps.');
+  if (!can('assignment.manage', { stationId })) {
+    toastError(denyReason('assignment.manage'));
     return;
   }
+
+  const date = pumpContext?.date || getTodayDate();
   const activeSession = sessionFor(pump.id, pumpContext?.sessions || []);
   const activeUser = staff.find(user => user.id === activeSession?.activeUid);
-  const assignedIds = new Set(staff.filter(user => (user.pumpIds || []).includes(pump.id)).map(user => user.id));
+  const row = (pumpContext?.assignments || []).find(r => r.pumpId === pump.id);
+  const assignedIds = new Set(row?.staffUids || []);
+
   const warning = activeSession
-    ? `<p class="assignment-warning" role="status">⚠️ ${h(activeUser ? userDisplayName(activeUser) : activeSession.activeName || 'A staff member')} is currently active on this pump. Removing their assignment will not end the shift; the lock remains until clock-out or manager force-release.</p>`
+    ? `<p class="assignment-warning" role="status">⚠️ ${h(activeUser ? userDisplayName(activeUser) : activeSession.activeName || 'A staff member')} is currently clocked in on this pump. Changing the roster does not end that shift — the lock stays until clock-out or a manager ends it.</p>`
     : '';
   const options = staff.length
     ? `<div class="checkbox-list">${staff.map(user => `<div class="checkbox-item"><input type="checkbox" id="assign-pump-${h(user.id)}" value="${h(user.id)}" ${assignedIds.has(user.id) ? 'checked' : ''} /><label for="assign-pump-${h(user.id)}">${h(userDisplayName(user))}</label></div>`).join('')}</div>`
     : '<p class="muted-note">No staff accounts are assigned to this station yet. Add staff from Config → Team first.</p>';
+
   document.getElementById('modal-title').textContent = `Assign ${pump.name}`;
   document.getElementById('modal-body').innerHTML = `<form id="pump-assignment-form" novalidate>
-    <p class="modal-intro">Choose the staff members who can use ${h(pump.name)}. This updates their existing pump assignment list.</p>
+    <p class="modal-intro">Who works ${h(pump.name)} on ${h(date)}? Rostered staff can start a shift on this pump straight away.</p>
     ${warning}${options}
     <p id="pump-assignment-error" class="form-error hidden" role="alert"></p>
-    <button type="submit" class="btn btn-primary btn-full mt-16" ${staff.length ? '' : 'disabled'}>Save assignments</button>
+    <button type="submit" class="btn btn-primary btn-full mt-16" ${staff.length ? '' : 'disabled'}>Save roster</button>
   </form>`;
   openModal('generic-modal');
+
   document.getElementById('pump-assignment-form').addEventListener('submit', async event => {
     event.preventDefault();
     const form = event.currentTarget;
-    const button = form.querySelector('button[type=\"submit\"]');
+    const button = form.querySelector('button[type="submit"]');
     const error = document.getElementById('pump-assignment-error');
-    const selected = new Set(Array.from(form.querySelectorAll('input[type=\"checkbox\"]:checked')).map(input => input.value));
+    const selected = Array.from(form.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value);
     error.classList.add('hidden');
-    if (!(await confirmSave(`the pump assignments for ${pump.name}`))) return;
     setBusy(button, true, 'Saving…');
+
     try {
-      await Promise.all(staff.map(async user => {
-        const current = [...new Set(user.pumpIds || [])];
-        const next = selected.has(user.id)
-          ? [...new Set([...current, pump.id])]
-          : current.filter(id => id !== pump.id);
-        if (next.length === current.length && next.every((id, index) => id === current[index])) return;
-        await updateUserAccount(user.id, { pumpIds: next });
-      }));
-      invalidateUsers();
+      const names = {};
+      for (const uid of selected) {
+        names[uid] = userDisplayName(staff.find(user => user.id === uid)) || 'Staff member';
+      }
+      const ref = doc(getDb(), 'stations', stationId, 'assignments', `${date}_${pump.id}`);
+      const me = getCurrentUserData();
+
+      if (selected.length === 0) {
+        await deleteDoc(ref).catch(err => { if (err?.code !== 'not-found') throw err; });
+      } else {
+        await setDoc(ref, {
+          date,
+          pumpId: pump.id,
+          pumpName: pump.name || 'Pump',
+          product: pump.product || '',
+          staffUids: selected,
+          staffNames: names,
+          createdAt: serverTimestamp(),
+          createdBy: me?.uid || 'unknown',
+          updatedAt: serverTimestamp(),
+          updatedBy: me?.uid || 'unknown',
+        }, { merge: true });
+      }
+
+      invalidateStation(stationId);
       closeModal('generic-modal');
-      toastSuccess('Changes Saved — pump assignments updated');
+      toastSuccess(`Roster saved — ${pump.name}`);
       await renderPumps(stationId);
     } catch (err) {
       error.textContent = `❌ ${formatFirebaseError(err)}`;

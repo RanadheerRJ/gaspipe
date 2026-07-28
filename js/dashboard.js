@@ -11,12 +11,12 @@
 import {
   getStation, getShifts, getCurrentRateMap, getRates, getPumps, getPumpSessions,
   getAllStations, getStationsByIds, watchShifts, watchPumpSessions,
-  invalidateStation,
+  getAssignments, pumpIdsForUser,
 } from './store.js';
 import {
   can, canUsePump, filterMyPumps, getCurrentUserData, formatFirebaseError,
-  isSuperAdmin, isStationAdmin, isStationOverseer, ROLES, userDisplayName,
-  isStaff,
+  isSuperAdmin, isStationOverseer, userDisplayName,
+  setMyDailyPumps,
 } from './auth.js';
 import { openShiftForm } from './pumps.js';
 import {
@@ -343,11 +343,19 @@ export async function renderDashboard(stationId, range = 'today') {
       from = rangeStart(range);
     }
 
-    const [station, shifts, rateMap, rates, allPumps, sessions] = await Promise.all([
+    const [station, shifts, rateMap, rates, allPumps, sessions, assignments] = await Promise.all([
       getStation(stationId), getShifts(stationId, { from }), getCurrentRateMap(stationId), getRates(stationId),
       getPumps(stationId), getPumpSessions(stationId),
+      getAssignments(stationId, getTodayDate()).catch(() => []),
     ]);
     if (!station) { content.innerHTML = emptyState('⚠️', 'Station not found. It may have been deleted.'); return; }
+
+    // Refresh today's pump grants before filtering, so a staff member rostered
+    // while the app was open sees their pumps here too.
+    const meNow = getCurrentUserData();
+    if (meNow && !isStationOverseer()) {
+      setMyDailyPumps(pumpIdsForUser(assignments, meNow.uid), getTodayDate());
+    }
 
     const assignedPumps = filterMyPumps(allPumps);
     const activeMineIds = new Set(sessions
