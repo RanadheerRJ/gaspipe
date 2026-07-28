@@ -1173,8 +1173,7 @@ function showUserCreated(result, credentials) {
       `PumpLog account for ${result.fullName}`,
       `Sign in: ${result.email}`,
       `Cloud PIN: ${credentials.temporaryCloudPin}`,
-    ].join('
-');
+    ].join('\n');
     try {
       await navigator.clipboard.writeText(text);
       setBusy(event.currentTarget, true, 'Copied ✅');

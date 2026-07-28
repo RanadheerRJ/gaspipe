@@ -22,3 +22,7 @@ ui-debug.log
 # OS / editor noise
 .DS_Store
 Thumbs.db
+
+# Generated at deploy time by .github/workflows/deploy-pages.yml — never
+# hand-edited or committed. See js/app.js DEV-ONLY block for how it's used.
+/version.json
