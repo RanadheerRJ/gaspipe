@@ -1,5 +1,6 @@
 # PumpLog — Multi-Station Fuel Tracker PWA
 
+
 A production-ready, installable PWA for tracking fuel station shift readings, rates, and sales across multiple stations. Built with plain HTML/CSS/JS + ES modules — no build step required — plus a trusted Firebase Cloud Functions identity service.
 
 ## Features
