@@ -1,4 +1,12 @@
-/* PumpLog — Dashboard with live pump sessions and staff-friendly status board */
+/* PumpLog — Dashboard with live pump sessions and staff-friendly status board
+ *
+ * Clean, simple design:
+ *   - Greeting with Full Name, Date, time, Day + emoji (☕ morning / 🍵 afternoon / 🥤 evening)
+ *   - Profile pic in header
+ *   - Station info card: Today's rates + last updated, personal volume/sales
+ *   - Filter bar: Today / Yesterday / This Week + date picker for historical view
+ *   - Live pump status feed below
+ */
 
 import {
   getStation, getShifts, getCurrentRateMap, getRates, getPumps, getPumpSessions,
@@ -7,7 +15,8 @@ import {
 } from './store.js';
 import {
   can, canUsePump, filterMyPumps, getCurrentUserData, formatFirebaseError,
-  isSuperAdmin, isStationAdmin, ROLES,
+  isSuperAdmin, isStationAdmin, isStationOverseer, ROLES, userDisplayName,
+  isStaff,
 } from './auth.js';
 import { openShiftForm } from './pumps.js';
 import {
@@ -15,8 +24,23 @@ import {
   formatTimeAgo, getGreeting, getTodayDate, emptyState, showSkeleton, setBusy,
   rangeStart, openModal, closeModal, timestampToDate,
 } from './components.js';
+import { avatarHTML } from './profile.js';
 
-const RANGE_LABEL = { today: 'Today', week: 'Last 7 days', month: 'Last 30 days', all: 'All time' };
+// ── Time-of-day emoji ─────────────────────────────────────────────────
+function timeEmoji() {
+  const hour = new Date().getHours();
+  if (hour < 5) return '🌙';   // late night
+  if (hour < 12) return '☕';   // morning coffee
+  if (hour < 17) return '🍵';   // afternoon tea
+  if (hour < 21) return '🥤';   // evening
+  return '🌙';                   // night
+}
+
+function dayName(date) {
+  return date.toLocaleDateString('en-IN', { weekday: 'long' });
+}
+
+const RANGE_LABEL = { today: 'Today', yesterday: 'Yesterday', week: 'This week', all: 'All time' };
 const RATE_COLLAPSED_KEY = 'pumplog:dashboard:ratesCollapsed';
 let feedCtx = null;
 let shiftUnsub = null;
@@ -52,8 +76,6 @@ function todayRateMap(rates) {
   const today = getTodayDate();
   const map = {};
   for (const rate of rates || []) {
-    // Future-dated rates are not today's rate. Older documents without an
-    // effectiveDate remain safely absent instead of being treated as current.
     if (!rate.effectiveDate || rate.effectiveDate > today) continue;
     if (!map[rate.product] || (rate.effectiveDate || '') > (map[rate.product].effectiveDate || '')) {
       map[rate.product] = rate;
@@ -74,64 +96,136 @@ function activeMine(sessions) {
   return (sessions || []).filter(session => session.status === 'active' && session.activeUid === uid);
 }
 
-function localLongDate() {
-  return new Date().toLocaleDateString('en-IN', { weekday: 'long', day: 'numeric', month: 'short', year: 'numeric' });
-}
-
-function headerHTML(station, sessions, accessibleStations) {
+// ── Greeting header ───────────────────────────────────────────────────
+function greetingHTML(station, sessions, accessibleStations) {
   const me = getCurrentUserData() || {};
   const mine = activeMine(sessions);
+  const now = new Date();
+  const emoji = timeEmoji();
+  const name = userDisplayName(me);
+  const greetingText = getGreeting();
+  const dateStr = now.toLocaleDateString('en-IN', { day: 'numeric', month: 'short', year: 'numeric' });
+  const dayStr = dayName(now);
+  const timeStr = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
   const stationNames = (accessibleStations || []).map(s => s.name).filter(Boolean);
   const assignedText = stationNames.length ? stationNames.join(', ') : station?.name || 'No station assigned';
   const activeText = mine.length
     ? `${formatElapsedHours(mine[0].clockInAt)} · ${mine.length} pump${mine.length === 1 ? '' : 's'}`
-    : 'No active shift';
-  return `<section class="dashboard-header-strip" aria-label="Today and active shift">
-    <div class="dashboard-date-block"><span class="eyebrow">Today</span><strong>${h(localLongDate())}</strong>
-      <time id="dashboard-clock" datetime="${new Date().toISOString()}">${h(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))}</time></div>
-    <div class="dashboard-user-block"><div class="dashboard-user-icon" aria-hidden="true">👤</div><div>
-      <span class="eyebrow">My active shift</span><strong id="dashboard-active-hours">${h(activeText)}</strong>
-      <span class="dashboard-user-meta">${h(me.displayName || me.email || 'Signed-in user')} · ${h(ROLES[me.role] || me.role || 'Staff')}</span>
-      <span class="dashboard-user-meta">${h(assignedText)}</span>
-    </div></div>
+    : null;
+
+  return `<section class="dashboard-greeting" aria-label="Greeting">
+    <div class="greeting-row">
+      ${avatarHTML(me, 'medium')}
+      <div class="greeting-text">
+        <h2 class="welcome-greeting">${emoji} ${h(greetingText)}, ${h(name.split(' ')[0])}</h2>
+        <p class="greeting-date">${h(dateStr)} · ${h(dayStr)} · ${h(timeStr)}</p>
+        <p class="greeting-station">⛽ ${h(station?.name || assignedText)}</p>
+      </div>
+    </div>
+    ${activeText ? `<div class="greeting-active"><span class="status-chip active-mine">● Active: ${h(activeText)}</span></div>` : ''}
   </section>`;
 }
 
-function updateHeaderClock() {
-  const clock = document.getElementById('dashboard-clock');
+function updateGreetingClock() {
+  // Update just the time portion without re-rendering everything
+  const clock = document.getElementById('greeting-time');
   if (clock) {
-    const now = new Date();
-    clock.textContent = now.toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' });
-    clock.dateTime = now.toISOString();
+    clock.textContent = new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit' });
   }
+  // Update active hours
   const active = activeMine(latestSessions);
-  const hours = document.getElementById('dashboard-active-hours');
-  if (hours) hours.textContent = active.length
-    ? `${formatElapsedHours(active[0].clockInAt)} · ${active.length} pump${active.length === 1 ? '' : 's'}`
-    : 'No active shift';
-  const rateHours = document.getElementById('rate-active-hours');
-  if (rateHours) rateHours.textContent = active.length ? `${formatElapsedHours(active[0].clockInAt)} active` : 'No active shift';
-}
-
-function startHeaderClock() {
-  updateHeaderClock();
-  clockTimer = window.setInterval(updateHeaderClock, 1000);
-}
-
-async function accessibleStationList(currentStationId, currentStation) {
-  try {
-    const stations = isSuperAdmin()
-      ? await getAllStations()
-      : await getStationsByIds(getCurrentUserData()?.stationIds || []);
-    if (!stations.some(s => s.id === currentStationId) && currentStation) stations.unshift(currentStation);
-    return stations;
-  } catch {
-    return currentStation ? [currentStation] : [];
+  const hours = document.getElementById('greeting-active-hours');
+  if (hours) {
+    hours.textContent = active.length
+      ? `${formatElapsedHours(active[0].clockInAt)} · ${active.length} pump${active.length === 1 ? '' : 's'}`
+      : '';
   }
 }
 
+function startGreetingClock() {
+  updateGreetingClock();
+  clockTimer = window.setInterval(updateGreetingClock, 10000);
+}
+
+// ── Filter bar for dashboard ──────────────────────────────────────────
+function filterBarHTML(selectedRange, selectedDate) {
+  const chips = [
+    ['today', 'Today'],
+    ['yesterday', 'Yesterday'],
+    ['week', 'This week'],
+    ['all', 'All time'],
+  ];
+  const isCustom = selectedRange === 'custom';
+  return `<div class="dash-filter-bar" role="group" aria-label="Filter data">
+    ${chips.map(([value, label]) =>
+      `<button type="button" class="chip ${selectedRange === value ? 'chip-active' : ''}" data-dash-range="${value}" aria-pressed="${selectedRange === value}">${label}</button>`
+    ).join('')}
+    <div class="dash-date-picker">
+      <input type="date" id="dash-date-picker" class="dash-date-input" value="${h(selectedDate || '')}" max="${getTodayDate()}" title="Pick a date" />
+    </div>
+  </div>`;
+}
+
+// ── Station info card (Robinhood-style widget) ────────────────────────
+function stationInfoCardHTML(station, rateMap, shifts, ownShifts, stationId, range, myPumps, sessions) {
+  // Today's rates with last effective date
+  const rateEntries = Object.entries(rateMap || {});
+  const ratesBody = rateEntries.length
+    ? rateEntries.map(([product, rate]) =>
+        `<div class="info-rate-row"><span class="info-rate-product">${h(product)}</span><span class="info-rate-value">${formatCurrency(rate.rate)}/L</span><small>${h(formatDate(rate.effectiveDate) || 'today')}</small></div>`
+      ).join('')
+    : '<p class="muted-note">No rates configured</p>';
+
+  // Personal totals for the selected range
+  const me = getCurrentUserData();
+  const myShifts = ownShifts || shifts.filter(s => (s.staffId || s.staffUid || s.createdBy) === me?.uid);
+  const myVolume = myShifts.reduce((sum, s) => sum + (Number(s.volume) || 0), 0);
+  const mySales = myShifts.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
+  const myCount = myShifts.length;
+  const myHours = myShifts.reduce((sum, s) => sum + (Number(s.hoursWorked) || 0), 0);
+  const rangeLabel = RANGE_LABEL[range] || 'Today';
+
+  // Pending approval
+  const pendingShifts = shifts.filter(s => s.status === 'pending');
+  const pendingSales = pendingShifts.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
+  const pendingCount = pendingShifts.length;
+  const pendingLine = pendingCount > 0 && isStationOverseer()
+    ? `<p class="pending-approval-line">⏳ ${pendingCount} shift${pendingCount === 1 ? '' : 's'} pending — ${formatCurrency(pendingSales)}</p>`
+    : '';
+
+  // Active session count
+  const activeCount = (sessions || []).filter(s => s.status === 'active').length;
+
+  return `<section class="station-info-card" aria-label="Station information">
+    <div class="info-columns">
+      <div class="info-block info-rates">
+        <h4 class="info-title">💰 Rates</h4>
+        <div class="info-rates-list">${ratesBody}</div>
+      </div>
+      <div class="info-block info-personal">
+        <h4 class="info-title">📊 My ${h(rangeLabel)}</h4>
+        <div class="info-personal-grid">
+          <div class="info-stat"><span class="info-stat-label">Entries</span><strong>${myCount}</strong></div>
+          <div class="info-stat"><span class="info-stat-label">Volume</span><strong>${formatVolume(myVolume)}</strong></div>
+          <div class="info-stat"><span class="info-stat-label">Sales</span><strong>${formatCurrency(mySales)}</strong></div>
+          <div class="info-stat"><span class="info-stat-label">Hours</span><strong>${myHours.toFixed(1)} h</strong></div>
+        </div>
+      </div>
+      <div class="info-block info-station">
+        <h4 class="info-title">⛽ Station</h4>
+        <div class="info-station-grid">
+          <div class="info-stat"><span class="info-stat-label">Active pumps</span><strong>${activeCount} / ${myPumps.length}</strong></div>
+          <div class="info-stat"><span class="info-stat-label">Total shifts</span><strong>${shifts.length}</strong></div>
+        </div>
+      </div>
+    </div>
+    ${pendingLine}
+  </section>`;
+}
+
+// ── Quick start (staff with no active shift) ──────────────────────────
 async function loadQuickStartData(currentStationId, currentStation, currentPumps, currentRateMap, currentSessions) {
-  if (isSuperAdmin() || isStationAdmin() || activeMine(currentSessions).length) return null;
+  if (isStationOverseer() || activeMine(currentSessions).length) return null;
   const stations = await accessibleStationList(currentStationId, currentStation);
   const rows = [];
   for (const station of stations) {
@@ -159,7 +253,7 @@ function quickStartHTML(quick) {
       `<option value="${h(row.station.id)}" ${row.station.id === quick.selected ? 'selected' : ''}>${h(row.station.name)}</option>`).join('')}</select>` : '';
   return `<section class="quick-start-card" aria-labelledby="quick-start-title"><div class="quick-start-copy">
     <span class="quick-start-icon" aria-hidden="true">☀️</span><div><h3 id="quick-start-title">Start my day</h3>
-    <p>No active pump session. Choose a pump to clock in and reserve it for your shift.</p></div></div>
+    <p>No active pump session. Choose a pump to clock in.</p></div></div>
     <div class="quick-start-controls">${stationSelect}<div id="quick-start-pumps">${quickPumpButtons(quick.stations[0])}</div></div></section>`;
 }
 
@@ -192,13 +286,26 @@ function wireQuickStart(quick) {
   paint();
 }
 
+async function accessibleStationList(currentStationId, currentStation) {
+  try {
+    const stations = isSuperAdmin()
+      ? await getAllStations()
+      : await getStationsByIds(getCurrentUserData()?.stationIds || []);
+    if (!stations.some(s => s.id === currentStationId) && currentStation) stations.unshift(currentStation);
+    return stations;
+  } catch {
+    return currentStation ? [currentStation] : [];
+  }
+}
+
+// ── Rate card (collapsible) ───────────────────────────────────────────
 function rateCardHTML(rateMap) {
   const collapsed = localStorage.getItem(RATE_COLLAPSED_KEY) === 'true';
   const rows = Object.entries(rateMap || {}).map(([product, rate]) => `<div class="daily-rate-row"><span>${h(product)}</span><strong>${h(formatCurrency(rate.rate))}/L</strong><small>Effective ${h(formatDate(rate.effectiveDate) || 'today')}</small></div>`).join('');
   return `<section class="daily-rates-card ${collapsed ? 'is-collapsed' : ''}" aria-labelledby="daily-rates-title">
     <div class="daily-rates-head"><button type="button" class="daily-rates-toggle" id="daily-rates-toggle" aria-expanded="${!collapsed}" aria-controls="daily-rates-body">
       <span><span class="daily-rates-icon" aria-hidden="true">₹</span><span><strong id="daily-rates-title">Daily rates</strong><small>Current station prices</small></span></span><span class="chevron" aria-hidden="true">⌄</span></button>
-      <span id="rate-active-hours" class="rate-active-hours">No active shift</span><button type="button" id="daily-rates-refresh" class="icon-btn" title="Refresh today's rates" aria-label="Refresh today's rates">↻</button></div>
+      <span id="rate-active-hours" class="rate-active-hours"></span></div>
     <div id="daily-rates-body" class="daily-rates-body" ${collapsed ? 'hidden' : ''}>${rows || '<p class="muted-note">No rate is configured for today.</p>'}</div></section>`;
 }
 
@@ -208,28 +315,13 @@ function wireRateCard(stationId) {
   toggle?.addEventListener('click', () => {
     const collapsed = body.hidden;
     body.hidden = !collapsed;
-    toggle.setAttribute('aria-expanded', String(collapsed));
+    toggle.setAttribute('aria-expanded', String(!collapsed));
     toggle.closest('.daily-rates-card')?.classList.toggle('is-collapsed', !collapsed);
     localStorage.setItem(RATE_COLLAPSED_KEY, String(!collapsed));
   });
-  document.getElementById('daily-rates-refresh')?.addEventListener('click', async e => {
-    const button = e.currentTarget;
-    setBusy(button, true, '↻');
-    try {
-      invalidateStation(stationId);
-      const rates = await getRates(stationId);
-      const next = todayRateMap(rates);
-      const nextBody = document.getElementById('daily-rates-body');
-      if (nextBody) nextBody.innerHTML = Object.entries(next).map(([product, rate]) => `<div class="daily-rate-row"><span>${h(product)}</span><strong>${h(formatCurrency(rate.rate))}/L</strong><small>Effective ${h(formatDate(rate.effectiveDate) || 'today')}</small></div>`).join('') || '<p class="muted-note">No rate is configured for today.</p>';
-    } catch (err) {
-      const nextBody = document.getElementById('daily-rates-body');
-      if (nextBody) nextBody.innerHTML = `<p class="form-error" role="alert">${h(formatFirebaseError(err))}</p>`;
-    } finally {
-      setBusy(button, false, '↻');
-    }
-  });
 }
 
+// ── Main render ───────────────────────────────────────────────────────
 export async function renderDashboard(stationId, range = 'today') {
   const content = document.getElementById('page-content');
   stopLiveFeed();
@@ -239,44 +331,77 @@ export async function renderDashboard(stationId, range = 'today') {
   }
   showSkeleton(4);
   try {
-    const from = rangeStart(range);
+    let from;
+    let customDate = '';
+    if (range === 'yesterday') {
+      from = getTodayDate(-1);
+    } else if (range === 'custom') {
+      // Will be passed from the date picker
+      from = localStorage.getItem('pumplog:dashCustomDate') || getTodayDate();
+      customDate = from;
+    } else {
+      from = rangeStart(range);
+    }
+
     const [station, shifts, rateMap, rates, allPumps, sessions] = await Promise.all([
       getStation(stationId), getShifts(stationId, { from }), getCurrentRateMap(stationId), getRates(stationId),
       getPumps(stationId), getPumpSessions(stationId),
     ]);
     if (!station) { content.innerHTML = emptyState('⚠️', 'Station not found. It may have been deleted.'); return; }
+
     const assignedPumps = filterMyPumps(allPumps);
     const activeMineIds = new Set(sessions
       .filter(session => session.status === 'active' && session.activeUid === getCurrentUserData()?.uid)
       .map(session => session.id));
-    // An owner keeps seeing an active pump long enough to close it if a
-    // manager removes its assignment during the shift.
     const pumps = allPumps.filter(pump => assignedPumps.includes(pump) || activeMineIds.has(pump.id));
     const ownOnly = !can('shift.update', { stationId });
-    const volume = shifts.reduce((sum, s) => sum + (Number(s.volume) || 0), 0);
-    const sales = shifts.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
-    const label = RANGE_LABEL[range] || 'Today';
-    const entryWord = `${shifts.length} ${ownOnly ? 'of your ' : ''}entr${shifts.length === 1 ? 'y' : 'ies'}`;
     const accessibleStations = await accessibleStationList(stationId, station);
     const quick = await loadQuickStartData(stationId, station, pumps, rateMap, sessions);
 
-    content.innerHTML = `${headerHTML(station, sessions, accessibleStations)}
-      <div class="welcome-section"><h2 class="welcome-greeting">${getGreeting()}</h2><p class="welcome-sub">${h(station.name)} · ${h(label)}</p></div>
+    content.innerHTML = `${greetingHTML(station, sessions, accessibleStations)}
+      ${filterBarHTML(range, customDate)}
+      ${stationInfoCardHTML(station, rateMap, shifts, null, stationId, range, pumps, sessions)}
       ${quickStartHTML(quick)}
-      <div class="stats-grid"><article class="stat-card"><div class="stat-card-icon blue" aria-hidden="true">📊</div><h3 class="stat-card-label">Volume</h3><p class="stat-card-value">${formatVolume(volume)}</p><p class="stat-card-sub">${h(label)}</p></article>
-        <article class="stat-card"><div class="stat-card-icon green" aria-hidden="true">💰</div><h3 class="stat-card-label">Sales</h3><p class="stat-card-value">${formatCurrency(sales)}</p><p class="stat-card-sub">${h(entryWord)}</p></article></div>
-      ${rateCardHTML(todayRateMap(rates))}
       <div class="live-head"><h3 class="section-title">Live pump status</h3><span class="live-badge" role="status"><span class="live-dot" aria-hidden="true"></span>LIVE</span></div>
       <p class="feed-summary" id="feed-summary"></p><div id="feed-list">${feedListHTML(pumps, shifts, sessions, stationId)}</div><p class="feed-updated" id="feed-updated"></p>`;
     startLiveFeed(stationId, pumps, rateMap, shifts, sessions);
-    startHeaderClock();
-    wireRateCard(stationId);
+    startGreetingClock();
+    wireFilterBar(range);
     if (quick) wireQuickStart(quick);
   } catch (err) {
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
 }
 
+function wireFilterBar(currentRange) {
+  document.querySelectorAll('[data-dash-range]').forEach(btn => {
+    btn.addEventListener('click', () => {
+      const range = btn.dataset.dashRange;
+      // Update chips
+      document.querySelectorAll('[data-dash-range]').forEach(c => {
+        c.classList.remove('chip-active');
+        c.setAttribute('aria-pressed', 'false');
+      });
+      btn.classList.add('chip-active');
+      btn.setAttribute('aria-pressed', 'true');
+      // Re-render with the new range
+      window.dispatchEvent(new CustomEvent('pumplog:dashRangeChange', { detail: { range } }));
+    });
+  });
+
+  const datePicker = document.getElementById('dash-date-picker');
+  if (datePicker) {
+    datePicker.addEventListener('change', () => {
+      const val = datePicker.value;
+      if (val) {
+        localStorage.setItem('pumplog:dashCustomDate', val);
+        window.dispatchEvent(new CustomEvent('pumplog:dashRangeChange', { detail: { range: 'custom' } }));
+      }
+    });
+  }
+}
+
+// ── Live feed ─────────────────────────────────────────────────────────
 const byNewest = (a, b) => {
   const d = (b.date || '').localeCompare(a.date || '');
   return d !== 0 ? d : (b.createdAt?.seconds || 0) - (a.createdAt?.seconds || 0);
@@ -290,7 +415,7 @@ function startLiveFeed(stationId, pumps, rateMap, seedRows, seedSessions) {
   latestSessions = seedSessions || [];
   paintFeed({ at: Date.now(), fromCache: true });
   shiftUnsub = watchShifts(stationId, { onUpdate: (rows, meta) => { if (!feedCtx || feedCtx.token !== token) return; rows.forEach(row => known.set(row.id, row)); latestRows = [...known.values()].sort(byNewest); paintFeed(meta); }, onError: err => { const el = document.getElementById('feed-updated'); if (el) el.textContent = 'Live updates paused — pull ↻ to refresh.'; } });
-  sessionUnsub = watchPumpSessions(stationId, { onUpdate: (sessions, meta) => { if (!feedCtx || feedCtx.token !== token) return; latestSessions = sessions; paintFeed(meta); updateHeaderClock(); }, onError: () => {} });
+  sessionUnsub = watchPumpSessions(stationId, { onUpdate: (sessions, meta) => { if (!feedCtx || feedCtx.token !== token) return; latestSessions = sessions; paintFeed(meta); updateGreetingClock(); }, onError: () => {} });
 }
 
 function getSession(pumpId, sessions = latestSessions) { return sessions.find(s => s.id === pumpId && s.status === 'active') || null; }
@@ -312,7 +437,7 @@ function shiftTime(createdAt, date) {
   if (minutes < 1) return 'just now'; if (minutes < 60) return `${minutes} min ago`; if (minutes < 1440) return `${Math.floor(minutes / 60)}h ago`; return formatDate(at);
 }
 
-function visibleActiveName(session) { return ['superadmin', 'stationadmin'].includes(getCurrentUserData()?.role) ? session?.activeName : ''; }
+function visibleActiveName(session) { return isStationOverseer() ? session?.activeName : ''; }
 
 function pumpVisual(pump, status) {
   const level = Number(pump.tankLevel ?? pump.level ?? pump.tank?.level);
@@ -344,9 +469,11 @@ function paintFeed(meta = {}) {
 function openPumpDetail(pumpId) {
   if (!feedCtx) return; const { stationId, pumps, rateMap } = feedCtx; const pump = pumps.find(p => p.id === pumpId); if (!pump) return;
   const status = pumpStatus(pumpId, latestRows, latestSessions); const meta = STATUS_META[status.state]; const recent = latestRows.filter(s => s.pumpId === pumpId).slice(0, 5);
-  const mayLog = !isSuperAdmin() && !isStationAdmin() && can('shift.create', { stationId })
-    && (canUsePump(pump.id) || status.session?.activeUid === getCurrentUserData()?.uid)
-    && (!status.session || status.session.activeUid === getCurrentUserData()?.uid); const rate = rateMap[pump.product];
+  const mayLog = (isStationOverseer() && can('shift.create', { stationId }))
+    || (!isStationOverseer() && can('shift.create', { stationId })
+      && (canUsePump(pump.id) || status.session?.activeUid === getCurrentUserData()?.uid)
+      && (!status.session || status.session.activeUid === getCurrentUserData()?.uid));
+  const rate = rateMap[pump.product];
   const recentList = recent.length ? `<ul class="feed-detail-list">${recent.map(s => `<li><span class="shift-badge">S${h(s.shiftLabel || '?')}</span><span class="feed-detail-main"><strong>${formatVolume(s.volume)}</strong> · ${formatCurrency(s.sales)}<small>${h(formatDate(s.date))}${formatTime(s.createdAt) ? ` · ${h(formatTime(s.createdAt))}` : ''}${s.hoursWorked != null ? ` · ${h(Number(s.hoursWorked).toFixed(2))} h` : ''}</small></span></li>`).join('')}</ul>` : '<p class="muted-note">No readings recorded for this pump yet.</p>';
   const sessionLine = status.session ? `Started ${formatDateTime(status.session.clockInAt) || 'just now'}${visibleActiveName(status.session) ? ` by ${visibleActiveName(status.session)}` : ''}` : 'No active shift';
   document.getElementById('modal-title').textContent = pump.name;

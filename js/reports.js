@@ -7,7 +7,7 @@
 
 import { getAllStations, getStationsByIds, getStation, getShifts, getAllUsers, getUsersCreatedBy } from './store.js';
 import {
-  getCurrentUserData, isSuperAdmin, isStationAdmin, isStaff, can, formatFirebaseError,
+  getCurrentUserData, isSuperAdmin, isStationAdmin, isManager, isStationOverseer, isStaff, can, formatFirebaseError,
 } from './auth.js';
 import {
   h, formatCurrency, formatVolume, formatDate, formatDateTime, knownHours,
@@ -140,9 +140,16 @@ function paintReport() {
   const range = stationDateRange();
   const unknownNote = summary.unknownHours
     ? `${summary.unknownHours} older record${summary.unknownHours === 1 ? '' : 's'} do not have hours worked, so the hours total is shown as —.` : '';
+  // Part D: Pending approval breakdown
+  const pendingShifts = rows.filter(s => s.status === 'pending');
+  const pendingSales = pendingShifts.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
+  const pendingCount = pendingShifts.length;
+  const pendingLine = pendingCount > 0 && isStationOverseer()
+    ? `<p class="pending-approval-line">⏳ ${pendingCount} shift${pendingCount === 1 ? '' : 's'} pending approval — ${formatCurrency(pendingSales)}</p>`
+    : '';
   container.innerHTML = `<section class="report-printable" aria-labelledby="report-card-title">
     <div class="report-card-head"><div><p class="eyebrow">PumpLog Report Card</p><h3 id="report-card-title">${h(reportEmployeeLabel(rows))}</h3>
-      <p class="report-card-sub">${h(station?.name || 'Station')} · ${h(range.label)}</p></div><span class="report-card-mark" aria-hidden="true">⛽</span></div>
+      <p class="report-card-sub">${h(station?.name || 'Station')} · ${h(range.label)}</p>${pendingLine}</div><span class="report-card-mark" aria-hidden="true">⛽</span></div>
     <div class="report-stat-grid">
       <div><span>Working days</span><strong>${summary.days}</strong></div><div><span>Hours worked</span><strong>${summary.hours}</strong></div>
       <div><span>Total volume</span><strong>${h(formatVolume(summary.volume))}</strong></div><div><span>Total sales</span><strong>${h(formatCurrency(summary.sales))}</strong></div>
@@ -160,7 +167,7 @@ async function loadReportData() {
   const dateRange = stationDateRange();
   const [shifts, peopleRows] = await Promise.all([
     getShifts(reportState.stationId, { from: dateRange.from, max: 5000 }),
-    isSuperAdmin() ? getAllUsers() : isStationAdmin() ? getUsersCreatedBy(getCurrentUserData()?.uid) : Promise.resolve([getCurrentUserData()]),
+    isSuperAdmin() ? getAllUsers() : (isStationAdmin() || isManager()) ? getUsersCreatedBy(getCurrentUserData()?.uid) : Promise.resolve([getCurrentUserData()]),
   ]);
   reportState.shifts = shifts;
   reportState.people = new Map((peopleRows || []).filter(Boolean).map(person => [person.uid || person.id, person]));
@@ -241,12 +248,15 @@ function csvCell(value) {
 }
 
 function exportCSV(rows, employee) {
-  const headers = ['Employee', 'Date', 'Station', 'Pump', 'Shift', 'Hours', 'Volume (L)', 'Sales', 'Clock in', 'Clock out'];
+  const headers = ['Employee', 'Date', 'Station', 'Pump', 'Shift', 'Hours', 'Volume (L)', 'Sales', 'Status', 'Notes', 'Expenses', 'Clock in', 'Clock out'];
   const station = reportState.stations.find(s => s.id === reportState.stationId) || reportState.station;
   const csv = [headers.map(csvCell).join(','), ...rows.map(shift => [
     employee, shift.date, station?.name || '', shift.pumpName, shift.shiftLabel,
     knownHours(shift) == null ? '' : Number(shift.hoursWorked).toFixed(2),
     Number(shift.volume || 0).toFixed(2), Number(shift.sales || 0).toFixed(2),
+    shift.status || '',
+    shift.notes || '',
+    shift.expensesTotal ? Number(shift.expensesTotal).toFixed(2) : '0.00',
     formatDateTime(shift.clockInAt), formatDateTime(shift.clockOutAt),
   ].map(csvCell).join(','))].join('\r\n');
   const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });

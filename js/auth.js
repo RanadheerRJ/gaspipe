@@ -1,9 +1,16 @@
 /* PumpLog — Authentication + RBAC
  *
- * Roles
- *   superadmin   — full control over stations, rates, pumps, shifts, users
- *   stationadmin — manages rates/pumps/shifts and staff for assigned stations
- *   staff        — reads assigned stations, logs shift readings
+ * Roles (hierarchy, highest → lowest)
+ *   superadmin    — full control over stations, rates, pumps, shifts, users
+ *   stationadmin  — manages rates/pumps/shifts and staff for assigned stations;
+ *                   can also create managers for their stations
+ *   manager       — Station Manager: same operational powers as stationadmin
+ *                   (pumps, rates, shifts, shift approvals, staff they create)
+ *                   EXCEPT cannot create/edit/delete stations, cannot create
+ *                   other managers or station admins, and only manages staff
+ *                   they personally created
+ *   staff         — reads assigned stations, logs shift readings on assigned
+ *                   pumps, and reads only their own shift records
  *
  * `can(action, ctx)` is the single source of truth for the UI. The identical
  * logic is mirrored in firestore.rules, which is the source of truth on the
@@ -26,12 +33,14 @@ import {
 export const ROLES = {
   superadmin: 'Super Admin',
   stationadmin: 'Station Admin',
+  manager: 'Station Manager',
   staff: 'Staff',
 };
 
 export const ROLE_BADGE = {
   superadmin: '🔶',
   stationadmin: '🔷',
+  manager: '🟢',
   staff: '⚪',
 };
 
@@ -175,7 +184,20 @@ export function onAuthChange(fn) {
 export const hasRole = (...roles) => !!currentUserData && roles.includes(currentUserData.role);
 export const isSuperAdmin = () => currentUserData?.role === 'superadmin';
 export const isStationAdmin = () => currentUserData?.role === 'stationadmin';
+export const isManager = () => currentUserData?.role === 'manager';
 export const isStaff = () => currentUserData?.role === 'staff';
+
+/** True for any role that can manage station operations (not owner-gated). */
+export const isStationOverseer = () => currentUserData && (isSuperAdmin() || isStationAdmin() || isManager());
+
+/** Best available display name for a user record. Falls back: fullName → firstName+lastName → email */
+export function userDisplayName(userData) {
+  if (!userData) return 'Staff';
+  if (userData.fullName) return userData.fullName;
+  if (userData.firstName || userData.lastName) return [userData.firstName, userData.lastName].filter(Boolean).join(' ');
+  if (userData.email) return userData.email.split('@')[0];
+  return 'Staff';
+}
 
 export function myStationIds() {
   return currentUserData?.stationIds || [];
@@ -184,6 +206,13 @@ export function myStationIds() {
 export function canAccessStation(stationId) {
   if (!currentUserData || !stationId) return false;
   return isSuperAdmin() || myStationIds().includes(stationId);
+}
+
+/** True when the signed-in user has operational management power over a
+ *  station (pumps, rates, shifts, approvals, force-release, reset). */
+export function canManageStation(stationId) {
+  if (!currentUserData || !stationId) return false;
+  return isSuperAdmin() || isStationAdmin() || (isManager() && myStationIds().includes(stationId));
 }
 
 // ── Pump assignments (staff only) ─────────────────────────────────────
@@ -203,7 +232,7 @@ export function canUsePump(pumpId) {
   if (!pumpId) return false;
   if (!isStaff()) return true;
   const assigned = myPumpIds();
-  return assigned.length === 0 || assigned.includes(pumpId);
+  return assigned.includes(pumpId);
 }
 
 /** The subset of `pumps` the signed-in user is allowed to see/use. */
@@ -225,6 +254,7 @@ export function can(action, ctx = {}) {
   const { stationId, target } = ctx;
   const superAdmin = me.role === 'superadmin';
   const stationAdmin = me.role === 'stationadmin';
+  const manager = me.role === 'manager';
   const stationOk = superAdmin || (!!stationId && myStationIds().includes(stationId));
 
   switch (action) {
@@ -236,49 +266,49 @@ export function can(action, ctx = {}) {
     case 'station.read':
       return stationOk;
 
-    // ── Rates & pumps ──────────────────────────────────────────────
+    // ── Rates & pumps (open to manager) ────────────────────────────
     case 'rate.create':
     case 'rate.update':
     case 'rate.delete':
     case 'pump.create':
     case 'pump.update':
     case 'pump.delete':
-      return (superAdmin || stationAdmin) && stationOk;
+      return (superAdmin || stationAdmin || manager) && stationOk;
 
-    // ── Shifts and live pump sessions ──────────────────────────────
+    // ── Shifts and live pump sessions (open to manager) ────────────
     case 'shift.create':
       return stationOk;
     case 'shift.update':
     case 'shift.delete':
-      return (superAdmin || stationAdmin) && stationOk;
+      return (superAdmin || stationAdmin || manager) && stationOk;
     case 'pumpSession.start':
-      return stationOk && (superAdmin || stationAdmin || canUsePump(ctx.pumpId));
+      return stationOk && (superAdmin || stationAdmin || manager || canUsePump(ctx.pumpId));
     case 'pumpSession.end':
       // An active owner may finish a session even if an admin removed the
       // assignment while it was in progress. Firestore still verifies the
       // activeUid on the atomic clock-out transaction.
-      return stationOk && (superAdmin || stationAdmin || canUsePump(ctx.pumpId) || ctx.activeUid === me.uid);
+      return stationOk && (superAdmin || stationAdmin || manager || canUsePump(ctx.pumpId) || ctx.activeUid === me.uid);
     case 'pumpSession.forceRelease':
-      return (superAdmin || stationAdmin) && stationOk;
+      return (superAdmin || stationAdmin || manager) && stationOk;
 
     // Reports deliberately allow Staff to access their own data. The page
     // never offers them an employee picker, and Firestore scopes their reads.
     case 'report.view':
-      return stationOk && (superAdmin || stationAdmin || isStaff());
+      return stationOk && (superAdmin || stationAdmin || manager || isStaff());
     case 'report.viewOthers':
-      return (superAdmin || stationAdmin) && stationOk;
+      return (superAdmin || stationAdmin || manager) && stationOk;
     case 'station.reset':
-      return (superAdmin || stationAdmin) && stationOk;
+      return (superAdmin || stationAdmin || manager) && stationOk;
 
-    // ── Config page access ─────────────────────────────────────────
+    // ── Config page access (open to manager) ───────────────────────
     case 'config.view':
-      return superAdmin || stationAdmin;
+      return superAdmin || stationAdmin || manager;
     case 'team.view':
-      return superAdmin || stationAdmin;
+      return superAdmin || stationAdmin || manager;
 
     // ── Users ──────────────────────────────────────────────────────
     case 'user.create':
-      return superAdmin || stationAdmin;
+      return superAdmin || stationAdmin || manager;
 
     case 'user.update':
       if (!target) return false;
@@ -287,22 +317,31 @@ export function can(action, ctx = {}) {
       if (target.id === me.uid) return false;
       if (superAdmin) return true;
       // Station Admin manages only the staff accounts they created.
-      return stationAdmin && target.role === 'staff' && target.createdBy === me.uid;
+      if (stationAdmin && target.role === 'staff' && target.createdBy === me.uid) return true;
+      // Manager manages only the staff accounts they created.
+      if (manager && target.role === 'staff' && target.createdBy === me.uid) return true;
+      return false;
 
     case 'user.delete':
       if (!target) return false;
       if (target.id === me.uid) return false;                 // never delete yourself
       if (target.role === 'superadmin') return false;          // super admins are protected
+      if (target.role === 'stationadmin') return manager ? false : false; // only superadmin (checked below)
+      if (target.role === 'manager') return manager ? false : false;        // only superadmin/stationadmin
       if (superAdmin) return true;
-      return stationAdmin && target.role === 'staff' && target.createdBy === me.uid;
+      if (stationAdmin && target.role === 'staff' && target.createdBy === me.uid) return true;
+      if (manager && target.role === 'staff' && target.createdBy === me.uid) return true;
+      return false;
 
     // Which roles the current user may assign
     case 'user.assignRole.superadmin':
       return superAdmin;
     case 'user.assignRole.stationadmin':
       return superAdmin;
-    case 'user.assignRole.staff':
+    case 'user.assignRole.manager':
       return superAdmin || stationAdmin;
+    case 'user.assignRole.staff':
+      return superAdmin || stationAdmin || manager;
 
     default:
       return false;
@@ -324,6 +363,7 @@ export function denyReason(action, ctx = {}) {
     if (target?.id === me.uid) return 'You cannot modify your own account here.';
     if (action === 'user.delete' && target?.role === 'superadmin') return 'Super Admin accounts are protected.';
     if (me.role === 'stationadmin') return 'Station Admins can only manage staff they created.';
+    if (me.role === 'manager') return 'Managers can only manage staff they created.';
   }
   if (action.startsWith('rate.')) return 'Rates are controlled by Managers and Admins only.';
   if (action.startsWith('pump.')) return 'Only Managers and Admins can configure pumps.';

@@ -1544,3 +1544,188 @@ fieldset.is-disabled { opacity: .55; pointer-events: none; }
 #station-modal { z-index: 1000; }
 #generic-modal { z-index: 1100; }
 #confirm-modal { z-index: 1200; }
+
+/* ===== Dashboard v2 — Greeting, Filter, Station Info ===== */
+.dashboard-greeting {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+  margin-bottom: 16px;
+}
+.greeting-row {
+  display: flex;
+  align-items: center;
+  gap: 14px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.greeting-row .avatar { flex: 0 0 48px; width: 48px; height: 48px; font-size: 19px; border-radius: 14px; }
+.greeting-text { flex: 1; min-width: 0; }
+.greeting-text .welcome-greeting { font-size: 22px; margin-bottom: 2px; }
+.greeting-date { color: var(--text-secondary); font-size: 13px; }
+.greeting-station { margin-top: 4px; color: var(--primary); font-size: 13px; font-weight: 600; }
+.greeting-active { padding: 8px 16px; }
+
+/* Date picker + chip filter bar */
+.dash-filter-bar {
+  display: flex;
+  align-items: center;
+  gap: 8px;
+  flex-wrap: wrap;
+  margin-bottom: 14px;
+  padding: 10px 14px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.dash-date-picker { margin-left: auto; }
+.dash-date-input {
+  min-height: 38px;
+  padding: 6px 10px;
+  border: 1.5px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  background: var(--surface);
+  color: var(--text);
+  font: inherit;
+  font-size: 14px;
+}
+.dash-date-input:focus {
+  outline: none;
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light);
+}
+
+/* Station info card (Robinhood-style widget) */
+.station-info-card {
+  margin-bottom: 18px;
+  padding: 16px;
+  background: var(--surface);
+  border: 1px solid var(--border);
+  border-radius: var(--radius);
+  box-shadow: var(--shadow);
+}
+.info-columns {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 12px;
+}
+.info-block { min-width: 0; }
+.info-title {
+  font-size: 12px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: .5px;
+  margin-bottom: 8px;
+}
+.info-rates-list { display: flex; flex-direction: column; gap: 6px; }
+.info-rate-row {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  padding: 6px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+  font-size: 13px;
+}
+.info-rate-product { font-weight: 600; flex: 1; min-width: 0; }
+.info-rate-value { font-family: var(--mono); font-weight: 700; }
+.info-rate-row small { color: var(--text-muted); font-size: 11px; margin-left: auto; }
+
+.info-personal-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+.info-stat {
+  padding: 8px 10px;
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+  background: var(--surface-2);
+}
+.info-stat-label { display: block; color: var(--text-muted); font-size: 11px; font-weight: 600; margin-bottom: 2px; }
+.info-stat strong { font-family: var(--mono); font-size: 15px; }
+
+.info-station-grid {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  gap: 6px;
+}
+
+.pending-approval-line {
+  margin-top: 10px;
+  padding: 8px 12px;
+  background: var(--amber-bg);
+  color: var(--amber);
+  border-radius: var(--radius-sm);
+  font-size: 13px;
+  font-weight: 600;
+}
+
+/* Pending / Approved tags in History */
+.tag-pending { background: var(--amber-bg); color: var(--amber); }
+.tag-approved { background: var(--green-bg); color: var(--green); }
+.tag-rejected { background: var(--red-bg); color: var(--red); }
+.shift-pending { border-left: 3px solid var(--amber); }
+.shift-rejected { border-left: 3px solid var(--red); }
+.shift-notes { font-size: 12px; color: var(--text-secondary); margin-top: 2px; font-style: italic; }
+.shift-expenses { font-size: 12px; color: var(--text-secondary); margin-top: 2px; }
+.approved-by-note { font-size: 11px; color: var(--green); margin-left: 6px; }
+
+/* Expense rows in clock-out */
+.form-divider { border: none; border-top: 1px solid var(--border); margin: 16px 0; }
+.expense-row {
+  display: flex;
+  gap: 8px;
+  align-items: center;
+  margin-bottom: 8px;
+}
+.expense-row input[type="text"] { flex: 1; min-width: 0; }
+.expense-row input[type="number"] { width: 110px; flex-shrink: 0; }
+.expense-remove { flex-shrink: 0; }
+
+/* Pump card action area */
+.pump-card-actions {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  margin-top: auto;
+}
+.pump-card-actions .pump-action { flex: 1; }
+.pump-menu { position: relative; display: inline-flex; }
+.pump-menu-trigger { font-size: 22px; font-weight: 700; line-height: 1; }
+.pump-menu-dropdown {
+  position: absolute;
+  right: 0;
+  top: 100%;
+  z-index: 50;
+  min-width: 200px;
+  background: var(--surface);
+  border: 1px solid var(--border-strong);
+  border-radius: var(--radius-sm);
+  box-shadow: var(--shadow-lg);
+  overflow: hidden;
+}
+.pump-menu-item {
+  display: block;
+  width: 100%;
+  padding: 10px 14px;
+  border: none;
+  background: transparent;
+  color: var(--text);
+  font: inherit;
+  font-size: 13px;
+  text-align: left;
+  cursor: pointer;
+}
+.pump-menu-item:hover { background: var(--surface-2); }
+
+/* Bulk approve button */
+.bulk-approve-day { font-size: 12px; padding: 4px 10px; white-space: nowrap; }
+
+.mt-8 { margin-top: 8px; }

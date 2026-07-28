@@ -5,7 +5,7 @@ import {
   serverTimestamp, writeBatch,
 } from './firebase.js';
 import {
-  getCurrentUserData, isSuperAdmin, isStationAdmin,
+  getCurrentUserData, isSuperAdmin, isStationAdmin, isManager,
   can, denyReason, assignableRoles, ROLES, ROLE_BADGE, formatFirebaseError,
 } from './auth.js';
 import {
@@ -103,7 +103,8 @@ function renderProfileSection(me, stations, pumps) {
 // ── Station Security (sign-in methods, App Lock, credential policies) ───
 function canManageSecurity(stationId) {
   if (!stationId) return false;
-  return isSuperAdmin() || (isStationAdmin() && (getCurrentUserData()?.stationIds || []).includes(stationId));
+  return isSuperAdmin() || (isStationAdmin() && (getCurrentUserData()?.stationIds || []).includes(stationId))
+    || (isManager() && (getCurrentUserData()?.stationIds || []).includes(stationId));
 }
 
 function renderStationSecuritySection(stationId, security) {
@@ -219,7 +220,16 @@ function renderRatesSection(stationId, rates) {
     return section('Rates', addBtn, emptyState('💰', 'No rates yet. Add one to start tracking sales.'));
   }
 
-  const items = rates.map(r => configItem({
+  // E3: Dedupe to latest rate per product (rates already sorted by effectiveDate desc)
+  const latestPerProduct = new Map();
+  for (const r of rates) {
+    if (!latestPerProduct.has(r.product)) {
+      latestPerProduct.set(r.product, r);
+    }
+  }
+  const displayRates = [...latestPerProduct.values()];
+
+  const items = displayRates.map(r => configItem({
     title: `${h(r.product)} — ${formatCurrency(r.rate)}/L`,
     meta: `Effective ${formatDate(r.effectiveDate)}`,
     actions: mayEdit ? [
@@ -255,7 +265,8 @@ function renderPumpsSection(stationId, pumps, sessions = []) {
     const active = session
       ? ` · Active since ${formatDateTime(session.clockInAt) || 'just now'} · ${h(session.activeName || 'Staff member')}`
       : '';
-    return configItem({ title: h(p.name), meta: `${h(p.product || 'No product set')}${active}`, actions });
+    const initReading = p.initialReading != null ? ` · Init: ${Number(p.initialReading).toFixed(2)}` : '';
+    return configItem({ title: h(p.name), meta: `${h(p.product || 'No product set')}${initReading}${active}`, actions });
   }).join('');
 
   return section('Pumps', addBtn, items);
@@ -631,6 +642,13 @@ function showPumpForm(pump) {
           ${productOptions(pump?.product)}
         </select>
       </div>
+      <!-- E2: Initial reading (optional, default 0) -->
+      <div class="field">
+        <label for="pump-initial-reading">Initial reading <span class="optional">(optional)</span></label>
+        <input type="number" id="pump-initial-reading" step="0.01" min="0" inputmode="decimal"
+               placeholder="0.00" value="${pump?.initialReading ?? ''}" />
+        <small class="hint">Sets the opening reading for the pump's very first shift. After that, the last closing reading is used.</small>
+      </div>
       <p class="form-error hidden" id="pump-form-error" role="alert"></p>
       <button type="submit" class="btn btn-primary btn-full">${isEdit ? `Save ${ICONS.save}` : `${ICONS.add} Add pump`}</button>
     </form>
@@ -642,9 +660,14 @@ function showPumpForm(pump) {
     const err = byId('pump-form-error');
     const name = byId('pump-name').value.trim();
     const product = byId('pump-product').value;
+    const initialReadingRaw = byId('pump-initial-reading')?.value;
+    const initialReading = initialReadingRaw ? parseFloat(initialReadingRaw) : null;
 
     if (!name) return showFieldError(err, '❌ Enter a pump name.');
     if (!product) return showFieldError(err, '❌ Choose a product.');
+    if (initialReading !== null && (!Number.isFinite(initialReading) || initialReading < 0)) {
+      return showFieldError(err, '❌ Initial reading must be zero or greater.');
+    }
 
     err.classList.add('hidden');
     if (isEdit && !(await confirmSave(`pump ${name}`))) return;
@@ -652,13 +675,15 @@ function showPumpForm(pump) {
 
     try {
       const db = getDb();
+      const payload = { name, product };
+      if (initialReading !== null) payload.initialReading = initialReading;
       if (isEdit) {
         await updateDoc(doc(db, 'stations', currentStationId, 'pumps', pump.id), {
-          name, product, updatedAt: serverTimestamp(),
+          ...payload, updatedAt: serverTimestamp(),
         });
       } else {
         await addDoc(collection(db, 'stations', currentStationId, 'pumps'), {
-          name, product,
+          ...payload,
           createdBy: getCurrentUserData()?.uid || 'unknown',
           createdAt: serverTimestamp(),
         });
@@ -708,9 +733,13 @@ async function forceReleasePump(pump, session) {
   });
   if (!ok) return;
   try {
+    // E1: Include pumpName and product explicitly so sessionFieldsOk() passes
     await updateDoc(doc(getDb(), 'stations', currentStationId, 'pumpSessions', pump.id), {
       status: 'idle', activeUid: null, activeName: null, clockInAt: null, opening: null,
-      date: null, shiftLabel: null, updatedAt: serverTimestamp(),
+      date: null, shiftLabel: null,
+      pumpName: pump.name || 'Pump',
+      product: pump.product || '',
+      updatedAt: serverTimestamp(),
       updatedBy: getCurrentUserData()?.uid || 'unknown',
     });
     invalidateStation(currentStationId);

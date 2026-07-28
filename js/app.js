@@ -550,6 +550,14 @@ function setupUI() {
   $('btn-refresh').addEventListener('click', () => refreshData('user'));
   $('fab-refresh').addEventListener('click', () => refreshData('user'));
 
+  // Dashboard range change from the new filter bar
+  window.addEventListener('pumplog:dashRangeChange', (e) => {
+    if (currentPage === 'dashboard') {
+      currentRange = e.detail.range;
+      renderCurrentPage();
+    }
+  });
+
   // A page-level write (e.g. a shift saved from the dashboard feed) re-renders
   // the current page in place, whatever it is.
   window.addEventListener('pumplog:dataChanged', () => renderCurrentPage());
