@@ -39,6 +39,47 @@ Sign-in is deliberately simple for testing and development:
 4. The first signed-in Auth user with no profile automatically becomes `superadmin`.
 5. Create stations and additional users from **Config → Team**.
 
+## Pump assignment — the Roster board
+
+Day-to-day pump assignment happens on the **Roster** tab, a Kanban board with
+one column per pump plus an "Available" column:
+
+- **Managers, Station Admins, and Super Admins** build the board. Drag a staff
+  card onto a pump, or tap the card and then tap a column (touch/keyboard
+  friendly), or use a column's **➕ Assign** dialog.
+- **Staff** see the same board read-only, so they know where they are working.
+- Each card shows live status: on shift with elapsed time, shift ended with
+  volume and sales, or waiting — plus last sign-in.
+- The board is per **date**. Use the arrows or the date picker to review or
+  pre-build another day, and **⧉ Copy previous day** to reuse a roster.
+
+Storage is one document per pump per day:
+
+```
+stations/{stationId}/assignments/{YYYY-MM-DD}_{pumpId}
+  { date, pumpId, pumpName, product, staffUids: [...], staffNames: { uid: name } }
+```
+
+### Who may use which pump
+
+A staff member may start a shift on a pump when **any** of these is true:
+
+1. Today's roster places them on it, **or**
+2. their profile's standing `pumpIds` list includes it, **or**
+3. they have no standing list and no roster entry — i.e. **no restriction**.
+
+Case 3 matters: an empty assignment list means *unrestricted*, not *locked
+out*. A freshly created staff account can work immediately, and admins opt in
+to tighter control by rostering people or setting standing pumps. The same
+three-way rule is enforced in `firestore.rules`, which is the real authority.
+
+Creating pumps stays in **Config → Pumps** and is open to Managers, Station
+Admins, and Super Admins for their own stations.
+
+> The roster decides who is *allowed* to clock in. Whether a pump is *currently*
+> occupied is still owned by `stations/{id}/pumpSessions/{pumpId}`, and the
+> atomic clock-in transaction remains the only thing that can claim one.
+
 ## Deploying Firestore rules
 
 `firebase.json` deploys Firestore rules only:

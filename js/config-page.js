@@ -9,7 +9,8 @@ import {
   can, denyReason, assignableRoles, ROLES, ROLE_BADGE, formatFirebaseError,
 } from './auth.js';
 import {
-  getAllStations, getStationsByIds, getRates, getPumps, getPumpSessions, getAllUsers, getUsersCreatedBy,
+  getAllStations, getStationsByIds, getRates, getPumps, getPumpSessions,
+  getManageableUsers,
   invalidateStation, invalidateStations, invalidateUsers,
 } from './store.js';
 import {
@@ -61,7 +62,7 @@ export async function renderConfig(stationId) {
       stationId ? getPumps(stationId) : [],
       stationId ? getPumpSessions(stationId) : [],
       isSuperAdmin() ? getAllStations() : getStationsByIds(me.stationIds || []),
-      isSuperAdmin() ? getAllUsers() : getUsersCreatedBy(me.uid),
+      getManageableUsers(me.stationIds || []),
       stationId ? getSecuritySettings(stationId) : { ...DEFAULT_SECURITY },
     ]);
     stationsCache = stations;
@@ -90,7 +91,9 @@ function renderProfileSection(me, stations, pumps) {
     ? 'All stations'
     : (stations || []).filter(station => (me.stationIds || []).includes(station.id)).map(station => station.name).join(', ') || 'No stations assigned';
   const pumpText = me.role === 'staff'
-    ? (me.pumpIds?.length ? `${me.pumpIds.length} assigned pump${me.pumpIds.length === 1 ? '' : 's'}` : 'All pumps at assigned stations')
+    ? (me.pumpIds?.length
+        ? `${me.pumpIds.length} default pump${me.pumpIds.length === 1 ? '' : 's'} · plus today's roster`
+        : 'Set by the daily roster board')
     : `${(pumps || []).length || 'All'} pumps visible at this station`;
   return section('Profile', '', `<div class="profile-card-grid">
     <div class="profile-card-identity">${avatarHTML(me, 'medium')}<div><strong>${h(me.fullName || me.email || 'PumpLog user')}</strong><small>${h(me.email || me.username ? `@${me.username || ''}` : '')}</small></div></div>
@@ -972,7 +975,7 @@ async function showUserForm(user) {
         <small class="hint" id="role-station-hint"></small>
       </fieldset>
       <fieldset class="field" id="pump-assign-fieldset">
-        <legend>Assign pumps <span class="optional">(staff only, optional)</span></legend>
+        <legend>Default pumps <span class="optional">(staff only, optional)</span></legend>
         <div class="pump-assign-list" id="pump-assign-list"></div>
         <small class="hint" id="pump-assign-hint"></small>
       </fieldset>
@@ -1044,7 +1047,7 @@ async function showUserForm(user) {
     pumpFieldset.classList.toggle('is-disabled', !isStaffRole);
     if (!isStaffRole) {
       pumpList.innerHTML = '';
-      pumpHint.textContent = 'Only staff accounts use pump assignments — admins and managers see every pump.';
+      pumpHint.textContent = 'Only staff accounts use pump assignments — admins and managers work every pump.';
       return;
     }
 
@@ -1077,7 +1080,7 @@ async function showUserForm(user) {
       </div>`;
     }).join('');
 
-    pumpHint.textContent = 'This staff member will see only the ticked pumps when they log in. Leave all unticked to allow every pump at the assigned stations.';
+    pumpHint.textContent = 'Optional standing assignment. The Roster board is the day-to-day tool — leave every box unticked and this person can be rostered onto any pump at their stations.';
     pumpList.querySelectorAll('input[type="checkbox"]').forEach(cb =>
       cb.addEventListener('change', () => {
         if (cb.checked) selectedPumps.add(cb.value);

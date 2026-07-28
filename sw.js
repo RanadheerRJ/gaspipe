@@ -8,7 +8,7 @@
  *   - Firebase / Google APIs: always network, never cached.
  */
 
-const VERSION = 'v1.0.0';
+const VERSION = 'v1.3.0';
 const SHELL_CACHE = `pumplog-shell-${VERSION}`;
 const RUNTIME_CACHE = `pumplog-runtime-${VERSION}`;
 
@@ -26,6 +26,7 @@ const SHELL_FILES = [
   './js/app-lock.js',
   './js/dashboard.js',
   './js/pumps.js',
+  './js/board.js',
   './js/config-page.js',
   './js/history.js',
   './js/reports.js',

@@ -28,6 +28,7 @@ import {
   setDoc,
   serverTimestamp,
   writeBatch,
+  onSnapshot,
 } from './firebase.js';
 
 export const ROLES = {
@@ -49,9 +50,37 @@ let currentUserData = null;
 let currentAuthError = null;
 let authListeners = [];
 let authReady = false;
+let profileUnsub = null;
 
 function notify() {
   authListeners.forEach(fn => fn(currentUser, currentUserData, currentAuthError));
+}
+
+/**
+ * Keep the in-memory profile in sync with Firestore.
+ *
+ * Role, station, and pump assignments used to be read once at sign-in, so a
+ * manager assigning a pump meant the staff member had to sign out and back in
+ * before the app would let them start a shift. Watching the document makes
+ * assignment changes land within a second on every open device.
+ */
+function watchMyProfile(uid, db) {
+  profileUnsub?.();
+  profileUnsub = onSnapshot(doc(db, 'users', uid), (snap) => {
+    if (!snap.exists() || currentUser?.uid !== uid) return;
+    const next = { uid, ...snap.data() };
+    const changed = JSON.stringify(next) !== JSON.stringify(currentUserData);
+    currentUserData = next;
+    if (changed) {
+      notify();
+      window.dispatchEvent(new CustomEvent('pumplog:profileChanged'));
+    }
+  }, () => { /* transient listen failure — the cached profile stays usable */ });
+}
+
+function stopProfileWatch() {
+  profileUnsub?.();
+  profileUnsub = null;
 }
 
 // ── Init ────────────────────────────────────────────────────────────────
@@ -61,6 +90,8 @@ export function initAuth() {
   onAuthStateChanged(auth, async (user) => {
     currentUser = user;
     currentAuthError = null;
+    stopProfileWatch();
+    clearMyDailyPumps();
 
     try {
       currentUserData = user ? await loadOrCreateUserProfile(user, db) : null;
@@ -76,6 +107,8 @@ export function initAuth() {
       }
       return;
     }
+
+    if (user && currentUserData) watchMyProfile(user.uid, db);
 
     authReady = true;
     notify();
@@ -215,24 +248,67 @@ export function canManageStation(stationId) {
   return isSuperAdmin() || isStationAdmin() || (isManager() && myStationIds().includes(stationId));
 }
 
-// ── Pump assignments (staff only) ─────────────────────────────────────
-// Admins/Managers see and manage every pump. Staff may be restricted to an
-// explicit list of pump ids on their profile; an EMPTY list means
-// "unrestricted" (every pump at their assigned stations), which keeps
-// existing staff accounts working until an admin assigns specific pumps.
+// ── Pump assignments ──────────────────────────────────────────────────
+//
+// There are two layers, and a staff member may use a pump through EITHER:
+//
+//   1. Daily assignment  — the Kanban board writes
+//      `stations/{id}/assignments/{date}_{pumpId}.staffUids`. This is the
+//      day-to-day roster a manager rebuilds each morning.
+//   2. Standing assignment — `users/{uid}.pumpIds`, a long-lived list set
+//      from Config → Team. Useful for stations that never change the roster.
+//
+// If a staff member has NEITHER for the day, they are unrestricted (every
+// pump at their assigned stations). That matches firestore.rules and is what
+// keeps a freshly created account able to work before anyone touches the
+// board — the old behaviour of "empty list = no pumps at all" locked staff
+// out of Start/End shift entirely.
+//
+// The daily set is page-supplied because rendering is synchronous: pages load
+// the day's assignments, publish them here, then render.
+
+let dailyPumpIds = [];
+let dailyPumpDate = null;
+
+/** Publish the signed-in user's pump ids for `date` (from the board). */
+export function setMyDailyPumps(pumpIds, date = null) {
+  dailyPumpIds = [...new Set((pumpIds || []).filter(Boolean))];
+  dailyPumpDate = date;
+}
+
+export function clearMyDailyPumps() {
+  dailyPumpIds = [];
+  dailyPumpDate = null;
+}
+
+export const myDailyPumpIds = () => [...dailyPumpIds];
+export const myDailyPumpDate = () => dailyPumpDate;
+
 export function myPumpIds() {
   return currentUserData?.pumpIds || [];
 }
 
+/** True when some assignment layer narrows this staff member's pump list. */
 export function hasPumpRestriction() {
-  return isStaff() && myPumpIds().length > 0;
+  return isStaff() && (dailyPumpIds.length > 0 || myPumpIds().length > 0);
+}
+
+/** Why a staff member can see the pumps they see — drives the page hint. */
+export function pumpAccessMode() {
+  if (!isStaff()) return 'all';
+  if (dailyPumpIds.length > 0) return 'daily';
+  if (myPumpIds().length > 0) return 'standing';
+  return 'unrestricted';
 }
 
 export function canUsePump(pumpId) {
   if (!pumpId) return false;
-  if (!isStaff()) return true;
-  const assigned = myPumpIds();
-  return assigned.includes(pumpId);
+  if (!isStaff()) return true;              // overseers work every pump
+  if (dailyPumpIds.includes(pumpId)) return true;
+  const standing = myPumpIds();
+  if (standing.includes(pumpId)) return true;
+  // No roster entry for today and no standing list — nothing restricts them.
+  return dailyPumpIds.length === 0 && standing.length === 0;
 }
 
 /** The subset of `pumps` the signed-in user is allowed to see/use. */
@@ -282,12 +358,20 @@ export function can(action, ctx = {}) {
     case 'shift.delete':
       return (superAdmin || stationAdmin || manager) && stationOk;
     case 'pumpSession.start':
+      // Staff need station access plus a pump they may use. `canUsePump`
+      // already treats "no assignment anywhere" as unrestricted, so a staff
+      // member is never locked out of every pump by default.
       return stationOk && (superAdmin || stationAdmin || manager || canUsePump(ctx.pumpId));
     case 'pumpSession.end':
       // An active owner may finish a session even if an admin removed the
       // assignment while it was in progress. Firestore still verifies the
       // activeUid on the atomic clock-out transaction.
       return stationOk && (superAdmin || stationAdmin || manager || canUsePump(ctx.pumpId) || ctx.activeUid === me.uid);
+    // Daily pump roster (the Kanban board) — overseers only.
+    case 'assignment.view':
+      return stationOk;
+    case 'assignment.manage':
+      return (superAdmin || stationAdmin || manager) && stationOk;
     case 'pumpSession.forceRelease':
       return (superAdmin || stationAdmin || manager) && stationOk;
 
@@ -367,6 +451,7 @@ export function denyReason(action, ctx = {}) {
   }
   if (action.startsWith('rate.')) return 'Rates are controlled by Managers and Admins only.';
   if (action.startsWith('pump.')) return 'Only Managers and Admins can configure pumps.';
+  if (action.startsWith('assignment.')) return 'Only Managers and Admins can change the daily pump roster.';
   if (action === 'station.reset') return 'Only station managers can reset station data.';
   if (action === 'report.viewOthers') return 'Staff can only view their own report card.';
   if (action.startsWith('station.')) return 'Only a Super Admin can manage stations.';

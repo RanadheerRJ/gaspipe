@@ -5,7 +5,7 @@
  * an employee at a station they manage.
  */
 
-import { getAllStations, getStationsByIds, getStation, getShifts, getAllUsers, getUsersCreatedBy } from './store.js';
+import { getAllStations, getStationsByIds, getStation, getShifts, getManageableUsers } from './store.js';
 import {
   getCurrentUserData, isSuperAdmin, isStationAdmin, isManager, isStationOverseer, isStaff, can, formatFirebaseError,
 } from './auth.js';
@@ -167,7 +167,11 @@ async function loadReportData() {
   const dateRange = stationDateRange();
   const [shifts, peopleRows] = await Promise.all([
     getShifts(reportState.stationId, { from: dateRange.from, max: 5000 }),
-    isSuperAdmin() ? getAllUsers() : (isStationAdmin() || isManager()) ? getUsersCreatedBy(getCurrentUserData()?.uid) : Promise.resolve([getCurrentUserData()]),
+    // Managers and Station Admins need every name at their stations, not just
+    // the accounts they personally created, or report rows show raw uids.
+    (isStationAdmin() || isManager() || isSuperAdmin())
+      ? getManageableUsers(getCurrentUserData()?.stationIds || [])
+      : Promise.resolve([getCurrentUserData()]),
   ]);
   reportState.shifts = shifts;
   reportState.people = new Map((peopleRows || []).filter(Boolean).map(person => [person.uid || person.id, person]));

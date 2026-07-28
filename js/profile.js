@@ -12,7 +12,7 @@
 
 import {
   getCurrentUser, getCurrentUserData, isSuperAdmin, ROLES, ROLE_BADGE,
-  formatFirebaseError, doSignOut,
+  formatFirebaseError, doSignOut, myDailyPumpIds,
 } from './auth.js';
 import {
   changeCloudPin, getMyPinStatus,
@@ -102,10 +102,13 @@ export async function openProfileModal({ stations = [], onSignOut } = {}) {
     : stations.length
       ? stations.map(s => s.name).join(', ')
       : 'None assigned';
+  const rostered = myDailyPumpIds().length;
   const pumpText = userData.role === 'staff'
-    ? (userData.pumpIds?.length
-        ? `${userData.pumpIds.length} assigned pump${userData.pumpIds.length === 1 ? '' : 's'}`
-        : 'All pumps at your stations')
+    ? (rostered
+        ? `${rostered} pump${rostered === 1 ? '' : 's'} rostered to you today`
+        : userData.pumpIds?.length
+          ? `${userData.pumpIds.length} default pump${userData.pumpIds.length === 1 ? '' : 's'}`
+          : 'Not rostered today — ask your manager')
     : 'All pumps';
 
   const lockStatus = getAppLockStatus(uid);
