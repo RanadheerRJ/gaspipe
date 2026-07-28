@@ -5,7 +5,7 @@ rules_version = '2';
  * The client mirrors this logic in js/auth.js `can()` purely for rendering.
  *
  * Roles
- *   superadmin   — full control everywhere
+ *   superadmin   — full control everywhere from world
  *   stationadmin — rates/pumps/shifts + staff they created, on assigned stations
  *   staff        — read assigned stations, log shifts on their assigned pumps,
  *                  and read ONLY their own shift records
