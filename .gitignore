@@ -1,0 +1,24 @@
+# Dependencies
+node_modules/
+
+# Local environment
+.env
+.env.*
+*.local
+
+# Firebase / Google credentials — these belong in the GitHub secret store,
+# never in the repository. See DEPLOYMENT.md.
+serviceAccount*.json
+firebase-sa.json
+*-firebase-adminsdk-*.json
+gcloud-credentials*.json
+
+# Firebase tooling
+.firebase/
+firebase-debug.log
+firestore-debug.log
+ui-debug.log
+
+# OS / editor noise
+.DS_Store
+Thumbs.db

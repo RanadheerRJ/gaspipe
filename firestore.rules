@@ -1,0 +1,420 @@
+rules_version = '2';
+
+/*
+ * PumpLog security rules — server-side source of truth for RBAC.
+ * The client mirrors this logic in js/auth.js `can()` purely for rendering.
+ *
+ * Roles
+ *   superadmin   — full control everywhere
+ *   stationadmin — rates/pumps/shifts + staff they created, on assigned stations
+ *   staff        — read assigned stations, log shifts on their assigned pumps,
+ *                  and read ONLY their own shift records
+ *
+ * Rates are exclusively controlled by Super Admin / Station Admin.
+ * Staff may be restricted to specific pumps via the `pumpIds` list on their
+ * profile (empty list = all pumps at their assigned stations).
+ */
+service cloud.firestore {
+  match /databases/{database}/documents {
+
+    // ── Identity helpers ────────────────────────────────────────────
+    function isSignedIn() {
+      return request.auth != null;
+    }
+
+    function userPath() {
+      return /databases/$(database)/documents/users/$(request.auth.uid);
+    }
+
+    function hasProfile() {
+      return isSignedIn()
+        && exists(userPath())
+        && (!get(userPath()).data.keys().hasAny(['status'])
+            || get(userPath()).data.status != 'disabled');
+    }
+
+    function me() {
+      return get(userPath()).data;
+    }
+
+    function myRole() {
+      return hasProfile() ? me().role : '';
+    }
+
+    function isSuperAdmin()   { return myRole() == 'superadmin'; }
+    function isStationAdmin() { return myRole() == 'stationadmin'; }
+
+    function myStations() {
+      return hasProfile() && me().stationIds is list ? me().stationIds : [];
+    }
+
+    // Super Admins reach every station; everyone else needs an assignment.
+    function canAccessStation(stationId) {
+      return isSuperAdmin() || (hasProfile() && stationId in myStations());
+    }
+
+    function canManageStation(stationId) {
+      return isSuperAdmin() || (isStationAdmin() && stationId in myStations());
+    }
+
+    // Staff pump restrictions are enforced here as well as in js/auth.js.
+    // Missing/empty pumpIds intentionally means every pump at an assigned
+    // station, preserving access for older profiles.
+    function myPumps() {
+      return hasProfile()
+        && me().keys().hasAny(['pumpIds'])
+        && me().pumpIds is list
+        ? me().pumpIds : [];
+    }
+
+    function canUsePump(stationId, pumpId) {
+      return canManageStation(stationId)
+        || (myRole() == 'staff'
+            && canAccessStation(stationId)
+            && (myPumps().size() == 0 || pumpId in myPumps()));
+    }
+
+    function sessionPath(stationId, pumpId) {
+      return /databases/$(database)/documents/stations/$(stationId)/pumpSessions/$(pumpId);
+    }
+
+    function sessionFieldsOk() {
+      return request.resource.data.keys().hasAll([
+          'status', 'activeUid', 'activeName', 'pumpName', 'product',
+          'clockInAt', 'opening', 'date', 'shiftLabel', 'updatedAt'
+        ])
+        && request.resource.data.keys().hasOnly([
+          'status', 'activeUid', 'activeName', 'pumpName', 'product',
+          'clockInAt', 'opening', 'date', 'shiftLabel', 'updatedAt', 'updatedBy'
+        ])
+        && request.resource.data.status in ['idle', 'active'];
+    }
+
+    function writesActiveSession(stationId, pumpId) {
+      return sessionFieldsOk()
+        && request.resource.data.status == 'active'
+        && request.resource.data.activeUid == request.auth.uid
+        && canUsePump(stationId, pumpId);
+    }
+
+    function writesIdleSession() {
+      return sessionFieldsOk() && request.resource.data.status == 'idle';
+    }
+
+    function bootstrapPath() {
+      return /databases/$(database)/documents/app/bootstrap;
+    }
+
+    function bootstrapExists() {
+      return exists(bootstrapPath());
+    }
+
+    // ── Validation helpers ──────────────────────────────────────────
+    function isValidRole(role) {
+      return role in ['superadmin', 'stationadmin', 'staff'];
+    }
+
+    function userFieldsOk() {
+      return request.resource.data.keys().hasAll(['role', 'stationIds'])
+        && (request.resource.data.keys().hasAny(['email'])
+            || request.resource.data.keys().hasAny(['username']))
+        && request.resource.data.keys().hasOnly([
+             'email', 'firstName', 'lastName', 'fullName', 'username', 'phoneNumber',
+             'employeeId', 'avatarUrl', 'role', 'stationIds', 'pumpIds',
+             'status', 'createdBy', 'createdByAdmin', 'createdAt', 'updatedAt', 'updatedBy',
+             'lastLogin', 'lastLogout', 'pinUpdatedAt', 'pin_reset_required', 'password_reset_required',
+             'pwaLoginAllowed', 'isAdmin'
+           ])
+        && request.resource.data.stationIds is list
+        && request.resource.data.stationIds.size() <= 50
+        && (!request.resource.data.keys().hasAny(['pumpIds'])
+            || (request.resource.data.pumpIds is list
+                && request.resource.data.pumpIds.size() <= 200))
+        && (!request.resource.data.keys().hasAny(['fullName']) || request.resource.data.fullName is string)
+        && (!request.resource.data.keys().hasAny(['username']) || request.resource.data.username is string)
+        && (!request.resource.data.keys().hasAny(['phoneNumber']) || request.resource.data.phoneNumber is string)
+        && (!request.resource.data.keys().hasAny(['status'])
+            || request.resource.data.status in ['invited', 'active', 'disabled'])
+        && (!request.resource.data.keys().hasAny(['pin_reset_required'])
+            || request.resource.data.pin_reset_required is bool)
+        && (!request.resource.data.keys().hasAny(['password_reset_required'])
+            || request.resource.data.password_reset_required is bool)
+        && (!request.resource.data.keys().hasAny(['pwaLoginAllowed'])
+            || request.resource.data.pwaLoginAllowed is bool)
+        && (!request.resource.data.keys().hasAny(['isAdmin'])
+            || request.resource.data.isAdmin is bool)
+        && isValidRole(request.resource.data.role);
+    }
+
+    // Fields a self-signup may set on its own profile.
+    function isOwnNewProfile(uid) {
+      return isSignedIn()
+        && request.auth.uid == uid
+        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.stationIds.size() == 0
+        && (!request.resource.data.keys().hasAny(['pumpIds'])
+            || request.resource.data.pumpIds.size() == 0)
+        && userFieldsOk();
+    }
+
+    function isBootstrapSuperAdmin(uid) {
+      return isOwnNewProfile(uid)
+        && !bootstrapExists()
+        && request.resource.data.role == 'superadmin'
+        && request.resource.data.createdBy == request.auth.uid;
+    }
+
+    function isSelfSignupStaff(uid) {
+      return isOwnNewProfile(uid)
+        && bootstrapExists()
+        && request.resource.data.role == 'staff'
+        && request.resource.data.createdBy == 'system';
+    }
+
+    // A Station Admin may only mint staff, only for stations they hold.
+    function stationAdminCreatingStaff() {
+      return isStationAdmin()
+        && userFieldsOk()
+        && request.resource.data.role == 'staff'
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.stationIds.hasOnly(myStations());
+    }
+
+    // Station Admins may edit only the staff accounts they created, and may
+    // never escalate a role or grant a station they do not hold themselves.
+    function stationAdminUpdatingOwnStaff() {
+      return isStationAdmin()
+        && resource.data.role == 'staff'
+        && resource.data.createdBy == request.auth.uid
+        && request.resource.data.role == 'staff'
+        && ((!resource.data.keys().hasAny(['email']) && !request.resource.data.keys().hasAny(['email']))
+            || request.resource.data.email == resource.data.email)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.stationIds.hasOnly(myStations())
+        && userFieldsOk();
+    }
+
+    function stationAdminDeletingOwnStaff() {
+      return isStationAdmin()
+        && resource.data.role == 'staff'
+        && resource.data.createdBy == request.auth.uid;
+    }
+
+    function selfUpdatingRuntimeFields(uid) {
+      let changed = request.resource.data.diff(resource.data).affectedKeys();
+      return request.auth.uid == uid
+        && userFieldsOk()
+        && changed.hasOnly([
+          'lastLogin', 'lastLogout', 'pinUpdatedAt',
+          'pin_reset_required', 'password_reset_required',
+          'updatedAt', 'updatedBy'
+        ])
+        && (!changed.hasAny(['pin_reset_required']) || request.resource.data.pin_reset_required == false)
+        && (!changed.hasAny(['password_reset_required']) || request.resource.data.password_reset_required == false)
+        && (!changed.hasAny(['updatedBy']) || request.resource.data.updatedBy == request.auth.uid);
+    }
+
+    // ── App metadata ────────────────────────────────────────────────
+    match /app/{docId} {
+      allow get: if isSignedIn() && docId == 'bootstrap';
+      allow list: if isSuperAdmin();
+
+      // Claimed once, by the first signup, in the same batch as its profile.
+      allow create: if isSignedIn()
+        && docId == 'bootstrap'
+        && !bootstrapExists()
+        && request.resource.data.keys().hasOnly(['uid', 'email', 'createdAt'])
+        && request.resource.data.uid == request.auth.uid
+        && request.resource.data.email == request.auth.token.email;
+
+      allow update, delete: if isSuperAdmin();
+    }
+
+    // ── Users ───────────────────────────────────────────────────────
+    match /users/{uid} {
+      allow get: if isSignedIn()
+        && (
+             request.auth.uid == uid
+          || isSuperAdmin()
+          || (isStationAdmin() && resource.data.createdBy == request.auth.uid)
+        );
+
+      // Super Admin lists everyone. A Station Admin's query must be scoped to
+      // the staff they created; an unscoped list returns a doc that fails this
+      // condition, so Firestore rejects the whole query.
+      allow list: if isSuperAdmin()
+        || (isStationAdmin() && resource.data.createdBy == request.auth.uid);
+
+      allow create: if isSignedIn() && (
+           (isSuperAdmin() && userFieldsOk())
+        || isBootstrapSuperAdmin(uid)
+        || isSelfSignupStaff(uid)
+        || stationAdminCreatingStaff()
+      );
+
+      // Super Admin may edit anyone except their own role (no self-lockout).
+      allow update: if isSignedIn() && (
+           (isSuperAdmin() && request.auth.uid != uid && userFieldsOk())
+        || stationAdminUpdatingOwnStaff()
+        || selfUpdatingRuntimeFields(uid)
+      );
+
+      // Deleting the profile revokes app access. The last Super Admin and the
+      // caller's own account are protected.
+      allow delete: if isSignedIn()
+        && request.auth.uid != uid
+        && (
+             (isSuperAdmin() && resource.data.role != 'superadmin')
+          || stationAdminDeletingOwnStaff()
+        );
+    }
+
+    // ── Legacy trusted identity records ────────────────────────────
+    // Free mode does not use these collections. Keep them client-inaccessible
+    // so any old PIN/joining-code records cannot be read from the browser.
+    match /staffSecrets/{uid} {
+      allow read, write: if false;
+    }
+
+    match /usernames/{username} {
+      allow read, write: if false;
+    }
+
+    match /joiningCodes/{code} {
+      allow read, write: if false;
+    }
+
+    match /adminInvites/{code} {
+      allow read, write: if false;
+    }
+
+    match /auditLogs/{auditId} {
+      allow read: if isSuperAdmin();
+      allow write: if false;
+    }
+
+    // Server-owned sign-in throttling counters; clients never touch them.
+    match /rateLimits/{key} {
+      allow read, write: if false;
+    }
+
+    // ── Stations ────────────────────────────────────────────────────
+    match /stations/{stationId} {
+      allow get: if isSignedIn() && canAccessStation(stationId);
+
+      // Evaluated per returned document: a Super Admin may list everything,
+      // while Station Admins and Staff must scope the query to their assigned
+      // ids (the client uses a `documentId() in [...]` query). A broader query
+      // would return a document that fails this check and be rejected.
+      allow list: if isSignedIn() && canAccessStation(stationId);
+
+      allow create, update, delete: if isSuperAdmin();
+
+      // ── Station security settings ─────────────────────────────────
+      // Feature flags and policy numbers only — never secrets. Free mode uses
+      // email + Cloud PIN through Firebase Auth; only station managers may
+      // change App Lock / Cloud PIN policy settings.
+      match /settings/{docId} {
+        allow read: if true;
+        allow create, update, delete: if isSignedIn() && canManageStation(stationId);
+      }
+
+      // ── Pumps ─────────────────────────────────────────────────────
+      match /pumps/{pumpId} {
+        allow read: if isSignedIn() && canAccessStation(stationId);
+        allow create, update, delete: if isSignedIn() && canManageStation(stationId);
+      }
+
+      // ── Rates ─────────────────────────────────────────────────────
+      match /rates/{rateId} {
+        allow read: if isSignedIn() && canAccessStation(stationId);
+
+        allow create: if isSignedIn()
+          && canManageStation(stationId)
+          && request.resource.data.rate is number
+          && request.resource.data.rate >= 0
+          && request.resource.data.product is string
+          && request.resource.data.effectiveDate is string;
+
+        allow update: if isSignedIn()
+          && canManageStation(stationId)
+          && request.resource.data.rate is number
+          && request.resource.data.rate >= 0;
+
+        allow delete: if isSignedIn() && canManageStation(stationId);
+      }
+
+      // ── Live pump session locks ──────────────────────────────────
+      match /pumpSessions/{pumpId} {
+        // Every signed-in station member needs this read for live lock UI.
+        allow read: if isSignedIn() && canAccessStation(stationId);
+
+        // A transaction may create a missing lock or claim an existing idle
+        // lock. It may never overwrite an active lock with another active one.
+        allow create: if isSignedIn()
+          && canAccessStation(stationId)
+          && writesActiveSession(stationId, pumpId)
+          && !exists(sessionPath(stationId, pumpId));
+
+        allow update: if isSignedIn()
+          && canAccessStation(stationId)
+          && (
+               (resource.data.status == 'idle'
+                && request.resource.data.status == 'active'
+                && writesActiveSession(stationId, pumpId))
+            || (resource.data.status == 'active'
+                && writesIdleSession()
+                && (resource.data.activeUid == request.auth.uid || canManageStation(stationId)))
+          );
+
+        // Station reset is the only bulk delete path and is manager-only.
+        allow delete: if isSignedIn() && canManageStation(stationId);
+      }
+
+      // ── Shifts ────────────────────────────────────────────────────
+      match /shifts/{shiftId} {
+        // Managers (Super/Station Admin) read every record at the station.
+        // Staff read ONLY their own records, so their list queries must
+        // include where('createdBy', '==', <uid>) — an unscoped query would
+        // match other users' records and be rejected outright.
+        allow read: if isSignedIn()
+          && canAccessStation(stationId)
+          && (canManageStation(stationId)
+              || resource.data.createdBy == request.auth.uid);
+
+        // Any user with station access may log a reading, but only as
+        // themselves and only with sane numbers.
+        allow create: if isSignedIn()
+          && canAccessStation(stationId)
+          && canUsePump(stationId, request.resource.data.pumpId)
+          && request.resource.data.createdBy == request.auth.uid
+          && request.resource.data.keys().hasAll([
+               'staffId', 'staffUid', 'staffName', 'clockInAt', 'clockOutAt', 'hoursWorked'
+             ])
+          && request.resource.data.staffId == request.auth.uid
+          && request.resource.data.staffUid == request.auth.uid
+          && request.resource.data.staffName is string
+          && request.resource.data.clockInAt is timestamp
+          && request.resource.data.clockOutAt is timestamp
+          && request.resource.data.hoursWorked is number
+          && request.resource.data.hoursWorked >= 0
+          && request.resource.data.volume is number
+          && request.resource.data.volume >= 0
+          && request.resource.data.rate is number
+          && request.resource.data.rate >= 0
+          && request.resource.data.date is string
+          // A new shift is valid only as the same atomic operation that
+          // closes this user's active session. This prevents direct writes
+          // from bypassing the pump lock.
+          && exists(sessionPath(stationId, request.resource.data.pumpId))
+          && get(sessionPath(stationId, request.resource.data.pumpId)).data.status == 'active'
+          && get(sessionPath(stationId, request.resource.data.pumpId)).data.activeUid == request.auth.uid
+          && getAfter(sessionPath(stationId, request.resource.data.pumpId)).data.status == 'idle'
+          && getAfter(sessionPath(stationId, request.resource.data.pumpId)).data.activeUid == null;
+
+        // Corrections are an admin action.
+        allow update, delete: if isSignedIn() && canManageStation(stationId);
+      }
+    }
+  }
+}
