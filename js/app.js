@@ -65,7 +65,37 @@ initAuth();
 document.addEventListener('DOMContentLoaded', () => {
   setupAuthForm();
   initFreeModeLogin();
+  initDevBuildTag(); // DEV-ONLY — see block below.
 }, { once: true });
+
+// ── DEV-ONLY: build/version tag for staging — remove before production launch ──
+// Fetches version.json (generated fresh on every Pages deploy by
+// .github/workflows/deploy-pages.yml) and renders a small, low-contrast
+// "Build: <timestamp> · <short sha>" tag under the logo on #auth-screen, so
+// it's easy to eyeball whether a browser is on the latest deploy or stuck on
+// a stale service-worker cache. Entirely best-effort: any failure (missing
+// file, network error, bad JSON) is swallowed silently and simply results in
+// no tag — it must never block, delay, or throw during app boot.
+// To remove: delete this whole block plus the initDevBuildTag() call above.
+function initDevBuildTag() {
+  const logo = document.querySelector('#auth-screen .auth-logo');
+  if (!logo) return;
+
+  fetch(`version.json?t=${Date.now()}`, { cache: 'no-store' })
+    .then(res => (res.ok ? res.json() : null))
+    .then((info) => {
+      if (!info || !info.deployedAt || !info.commit) return;
+      const tag = document.createElement('p');
+      tag.id = 'dev-build-tag';
+      tag.style.cssText =
+        'margin-top:8px;font-size:11px;line-height:1.4;color:#9ca3af;' +
+        'opacity:.8;letter-spacing:.02em;user-select:text;';
+      tag.textContent = `Build: ${info.deployedAt} · ${info.commit}`;
+      logo.appendChild(tag);
+    })
+    .catch(() => { /* no version.json / offline / bad JSON — fail silent */ });
+}
+// ── END DEV-ONLY build/version tag block ──
 
 window.addEventListener('pumplog:stationsChanged', async (event) => {
   invalidate();

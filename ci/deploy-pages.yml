@@ -1,0 +1,71 @@
+# Builds a fresh version.json (UTC deploy timestamp + short commit SHA)
+# and publishes the static PumpLog site to GitHub Pages on every push to main.
+#
+# NOTE: this file lives at ci/deploy-pages.yml as a reference copy. To
+# activate it, copy it to .github/workflows/deploy-pages.yml — see
+# DEPLOYMENT.md for the one-time setup (including switching Settings ->
+# Pages -> Source to "GitHub Actions").
+
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+# Only one Pages deployment at a time; let newer pushes supersede older
+# in-flight ones instead of queuing behind them.
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build site + version.json
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check out the repository
+        uses: actions/checkout@v4
+
+      - name: Generate version.json
+        run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DEPLOYED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          printf '{\n  "deployedAt": "%s",\n  "commit": "%s"\n}\n' \
+            "$DEPLOYED_AT" "$SHORT_SHA" > version.json
+          echo "Generated version.json:"
+          cat version.json
+
+      - name: Assemble static site output
+        # Only ship what the PWA actually needs — not CI config, Firestore
+        # rules, or docs — so the deployed site stays a clean static bundle.
+        run: |
+          mkdir -p _site
+          cp -r index.html manifest.json sw.js version.json css js icons _site/
+
+      - name: Setup Pages
+        uses: actions/configure-pages@v5
+
+      - name: Upload artifact
+        uses: actions/upload-pages-artifact@v3
+        with:
+          path: '_site'
+
+  deploy:
+    name: Deploy to GitHub Pages
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - name: Deploy to GitHub Pages
+        id: deployment
+        uses: actions/deploy-pages@v4
