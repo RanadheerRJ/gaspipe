@@ -503,10 +503,14 @@ service cloud.firestore {
         allow update: if isSignedIn()
           && canAccessStation(stationId)
           && (
-               (resource.data.status == 'idle'
+               // Missing document (read by transaction, then set) — treat as create.
+               (resource == null
                 && request.resource.data.status == 'active'
                 && writesActiveSession(stationId, pumpId))
-            || (resource.data.status == 'active'
+            || (resource != null && resource.data.status == 'idle'
+                && request.resource.data.status == 'active'
+                && writesActiveSession(stationId, pumpId))
+            || (resource != null && resource.data.status == 'active'
                 && writesIdleSession()
                 && (resource.data.activeUid == request.auth.uid || canManageStation(stationId)))
           );
