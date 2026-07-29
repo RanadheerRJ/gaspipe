@@ -9,7 +9,7 @@
 import { initMainApp, setAuthPersistence } from './firebase.js';
 import {
   initAuth, onAuthChange, getCurrentUser, getCurrentUserData,
-  isSuperAdmin, can,
+  isSuperAdmin, can, applyPermission,
   doSignOut, formatFirebaseError,
 } from './auth.js';
 import {
@@ -323,18 +323,19 @@ async function renderCurrentPage() {
 }
 
 function applyRoleVisibility() {
-  const configTab = document.querySelector('[data-page="config"]');
-  if (configTab) configTab.hidden = !can('config.view');
-
-  // Managers were missing from this list, so the Reports tab stayed hidden
-  // for them even though can('report.view') allows it.
-  const reportsTab = document.querySelector('[data-page="reports"]');
-  if (reportsTab) reportsTab.hidden = !can('report.view', { stationId: currentStationId });
-
-  // The roster board is readable by every station member; only overseers can
-  // rearrange it.
-  const boardTab = document.querySelector('[data-page="board"]');
-  if (boardTab) boardTab.hidden = !can('assignment.view', { stationId: currentStationId });
+  applyPermission(document.querySelector('[data-page="config"]'), 'config.view');
+  applyPermission(
+    document.querySelector('[data-page="reports"]'),
+    'report.view',
+    { stationId: currentStationId },
+  );
+  // Every station member sees the same daily board; edit controls have their
+  // own assignment.manage gate inside the page.
+  applyPermission(
+    document.querySelector('[data-page="board"]'),
+    'assignment.view',
+    { stationId: currentStationId },
+  );
 }
 
 // ── Refresh ─────────────────────────────────────────────────────────────
@@ -638,7 +639,7 @@ function setupUI() {
 function openStationPicker() {
   if (userStations.length === 0) {
     toast(isSuperAdmin()
-      ? 'No stations yet. Create one in Config → Stations.'
+      ? 'No stations yet. Create one in Settings → Stations.'
       : 'No stations assigned to you. Contact your admin.', 'info');
     return;
   }

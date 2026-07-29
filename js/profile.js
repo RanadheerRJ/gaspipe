@@ -105,10 +105,10 @@ export async function openProfileModal({ stations = [], onSignOut } = {}) {
   const rostered = myDailyPumpIds().length;
   const pumpText = userData.role === 'staff'
     ? (rostered
-        ? `${rostered} pump${rostered === 1 ? '' : 's'} rostered to you today`
+        ? `${rostered} pump${rostered === 1 ? '' : 's'} assigned to you today`
         : userData.pumpIds?.length
-          ? `${userData.pumpIds.length} default pump${userData.pumpIds.length === 1 ? '' : 's'}`
-          : 'Not rostered today — ask your manager')
+          ? `${userData.pumpIds.length} usual pump${userData.pumpIds.length === 1 ? '' : 's'}`
+          : 'No pump assigned today — ask your manager')
     : 'All pumps';
 
   const lockStatus = getAppLockStatus(uid);

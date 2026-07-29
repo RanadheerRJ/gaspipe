@@ -8,7 +8,7 @@
  *   - Firebase / Google APIs: always network, never cached.
  */
 
-const VERSION = 'v1.3.0';
+const VERSION = 'v1.3.1';
 const SHELL_CACHE = `pumplog-shell-${VERSION}`;
 const RUNTIME_CACHE = `pumplog-runtime-${VERSION}`;
 

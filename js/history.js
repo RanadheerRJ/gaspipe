@@ -6,7 +6,7 @@
  */
 
 import { getDb, doc, updateDoc, deleteDoc, writeBatch, serverTimestamp } from './firebase.js';
-import { can, isStationOverseer, getCurrentUserData, denyReason, formatFirebaseError } from './auth.js';
+import { can, ifCan, getCurrentUserData, denyReason, formatFirebaseError } from './auth.js';
 import { getPumps, getShifts, invalidateStation } from './store.js';
 import {
   h, formatCurrency, formatVolume, formatDate, formatDateTime, getTodayDate,
@@ -49,7 +49,7 @@ export async function renderHistory(stationId, range = 'today') {
     ]);
     allShifts = shifts;
 
-    const mayApprove = isStationOverseer();
+    const mayApprove = can('shift.update', { stationId });
 
     content.innerHTML = `
       <div class="page-head">
@@ -76,16 +76,16 @@ export async function renderHistory(stationId, range = 'today') {
             <option value="3">Shift 3</option>
           </select>
         </div>
-        ${mayApprove ? `
+        ${ifCan('shift.update', { stationId }, `
         <div class="filter-field">
-          <label for="filter-status">Status</label>
+          <label for="filter-status">Approval</label>
           <select id="filter-status">
-            <option value="">All statuses</option>
-            <option value="pending">⏳ Pending</option>
+            <option value="">Show all</option>
+            <option value="pending">⏳ Waiting</option>
             <option value="approved">✅ Approved</option>
             <option value="rejected">❌ Rejected</option>
           </select>
-        </div>` : ''}
+        </div>`)}
         <div class="filter-field">
           <label for="filter-search">Search</label>
           <input type="search" id="filter-search" placeholder="Pump or product" />
@@ -152,7 +152,7 @@ function paint(list) {
 
   const mayEdit = can('shift.update', { stationId: currentStationId });
   const mayDelete = can('shift.delete', { stationId: currentStationId });
-  const mayApprove = isStationOverseer();
+  const mayApprove = can('shift.update', { stationId: currentStationId });
 
   const byDate = new Map();
   for (const s of list) {
@@ -193,12 +193,9 @@ function paint(list) {
               </span>
               <span class="shift-amount">${formatCurrency(s.sales)}</span>
               ${(mayEdit || mayDelete || (mayApprove && s.status === 'pending')) ? `<span class="shift-actions">
-                ${mayApprove && s.status === 'pending' ? `<button class="icon-btn approve-shift" data-id="${h(s.id)}"
-                    aria-label="Approve shift" title="Approve">✅</button>` : ''}
-                ${mayEdit ? `<button class="icon-btn edit-shift" data-id="${h(s.id)}"
-                    aria-label="Edit ${h(s.pumpName)} shift ${h(s.shiftLabel)}" title="Edit">✏️</button>` : ''}
-                ${mayDelete ? `<button class="icon-btn delete-shift" data-id="${h(s.id)}"
-                    aria-label="Delete ${h(s.pumpName)} shift ${h(s.shiftLabel)}" title="Delete">🗑️</button>` : ''}
+                ${s.status === 'pending' ? ifCan('shift.update', { stationId: currentStationId }, `<button class="btn btn-secondary btn-small approve-shift" data-id="${h(s.id)}">✅ Approve</button>`) : ''}
+                ${ifCan('shift.update', { stationId: currentStationId }, `<button class="btn btn-secondary btn-small edit-shift" data-id="${h(s.id)}">✏️ Edit</button>`)}
+                ${ifCan('shift.delete', { stationId: currentStationId }, `<button class="btn btn-secondary btn-small delete-shift danger-text" data-id="${h(s.id)}">🗑️ Delete</button>`)}
               </span>` : ''}
             </div>`;
           }).join('')}
@@ -210,7 +207,7 @@ function paint(list) {
   container.querySelectorAll('.approve-shift').forEach(btn =>
     btn.addEventListener('click', () => {
       const s = allShifts.find(x => x.id === btn.dataset.id);
-      if (s) approveShift(s);
+      if (s) approveShift(s, btn);
     }));
 
   // Wire bulk approve day
@@ -235,11 +232,14 @@ function paint(list) {
 }
 
 // ── Approve single shift ───────────────────────────────────────────────
-async function approveShift(shift) {
+async function approveShift(shift, button = null) {
   if (!can('shift.update', { stationId: currentStationId })) {
     toastError(denyReason('shift.update'));
     return;
   }
+  const ok = await confirmSave(`${shift.staffName || 'this staff member'}’s shift on ${shift.pumpName || 'this pump'}`);
+  if (!ok) return;
+  setBusy(button, true, 'Approving…');
   try {
     const me = getCurrentUserData();
     await updateDoc(doc(getDb(), 'stations', currentStationId, 'shifts', shift.id), {
@@ -252,13 +252,13 @@ async function approveShift(shift) {
     renderHistory(currentStationId, currentRange);
   } catch (err) {
     toastError(formatFirebaseError(err));
+    setBusy(button, false);
   }
 }
 
 // ── Bulk approve shifts ────────────────────────────────────────────────
 async function bulkApproveShifts(shifts, label) {
   if (!shifts.length) return;
-  const { confirmSave } = await import('./components.js');
   const ok = await confirmSave(`approving ${shifts.length} pending shift${shifts.length === 1 ? '' : 's'} (${label})`);
   if (!ok) return;
   try {

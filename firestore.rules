@@ -155,6 +155,15 @@ service cloud.firestore {
       return sessionFieldsOk() && request.resource.data.status == 'idle';
     }
 
+    // Clock-out authority comes from the active lock, not from a roster entry
+    // that may be changed after clock-in. The shift create still has to happen
+    // atomically with that exact lock becoming idle (see /shifts below).
+    function ownsActiveSession(stationId, pumpId) {
+      return exists(sessionPath(stationId, pumpId))
+        && get(sessionPath(stationId, pumpId)).data.status == 'active'
+        && get(sessionPath(stationId, pumpId)).data.activeUid == request.auth.uid;
+    }
+
     function bootstrapPath() {
       return /databases/$(database)/documents/app/bootstrap;
     }
@@ -522,12 +531,16 @@ service cloud.firestore {
       // ── Shifts ────────────────────────────────────────────────────
       match /shifts/{shiftId} {
         // Managers (Super/Station Admin) read every record at the station.
-        // Staff read ONLY their own records, so their list queries must
-        // include where('createdBy', '==', <uid>) — an unscoped query would
-        // match other users' records and be rejected outright.
+        // Staff read ONLY their own records, so their list queries use
+        // where('staffUid', '==', <uid>). createdBy may be a Manager who
+        // performed clock-out on their behalf.
         allow read: if isSignedIn()
           && canAccessStation(stationId)
           && (canManageStation(stationId)
+              // `createdBy` is the person who performed clock-out. When a
+              // manager ends a shift for Staff, ownership is in staffUid.
+              || (resource.data.keys().hasAny(['staffUid'])
+                  && resource.data.staffUid == request.auth.uid)
               || resource.data.createdBy == request.auth.uid);
 
         // Any user with station access may log a reading, but only as
@@ -535,7 +548,11 @@ service cloud.firestore {
         // on behalf of a staff member (the session's activeUid).
         allow create: if isSignedIn()
           && canAccessStation(stationId)
-          && canUsePump(stationId, request.resource.data.pumpId)
+          // Starting a shift is assignment-gated, but ending one is lock-gated.
+          // Keep a legitimate owner able to finish after midnight or after a
+          // manager edits/removes the day's board entry or standing pump list.
+          && (canUsePump(stationId, request.resource.data.pumpId)
+              || ownsActiveSession(stationId, request.resource.data.pumpId))
           && request.resource.data.createdBy == request.auth.uid
           && request.resource.data.keys().hasAll([
                'staffId', 'staffUid', 'staffName', 'clockInAt', 'clockOutAt', 'hoursWorked'

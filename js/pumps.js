@@ -13,11 +13,11 @@
  */
 
 import {
-  getDb, collection, doc, setDoc, deleteDoc, runTransaction, serverTimestamp,
+  getDb, collection, doc, runTransaction, serverTimestamp,
 } from './firebase.js';
 import {
   getCurrentUserData, isStationOverseer,
-  can, denyReason, formatFirebaseError,
+  can, ifCan, denyReason, formatFirebaseError,
   canUsePump, filterMyPumps, userDisplayName,
   pumpAccessMode, setMyDailyPumps,
 } from './auth.js';
@@ -31,6 +31,7 @@ import {
   getTodayDate, openModal, closeModal, emptyState, toastSuccess, toastError,
   confirmDialog, setBusy, showSkeleton,
 } from './components.js';
+import { selectTodayOnBoard } from './board.js';
 
 let currentStationId = null;
 let pumpContext = null;
@@ -56,18 +57,6 @@ function sessionFor(pumpId, rows = pumpContext?.sessions || []) {
   return rows.find(s => s.id === pumpId && s.status === 'active') || null;
 }
 
-function closeAllPumpMenus() {
-  document.querySelectorAll('.pump-menu-dropdown:not([hidden])').forEach(d => { d.hidden = true; });
-  document.querySelectorAll('.pump-menu-trigger[aria-expanded="true"]')
-    .forEach(t => t.setAttribute('aria-expanded', 'false'));
-}
-
-// Registered once at module load, not on every repaint — the old code added a
-// fresh document listener each time the board painted, which accumulated
-// hundreds of handlers over a long shift.
-document.addEventListener('click', closeAllPumpMenus);
-document.addEventListener('keydown', e => { if (e.key === 'Escape') closeAllPumpMenus(); });
-
 function isMine(session) {
   return !!session && session.activeUid === getCurrentUserData()?.uid;
 }
@@ -82,20 +71,22 @@ function sessionLabel(session) {
   };
 }
 
-function actionFor(pump, session, mayLog) {
-  if (isStationOverseer()) {
-    if (!session) return { label: 'Start shift →', disabled: false, mode: 'manager-start', secondaryLabel: 'Assign to staff instead' };
-    // Manager/admins can end someone else's shift (not just force-release)
-    return { label: session.activeUid === getCurrentUserData()?.uid ? 'End shift →' : 'End shift for staff →', disabled: false, mode: 'manager-end' };
+function actionFor(pump, session, mayLog, stationId) {
+  if (!session && can('pumpSession.start', { stationId, pumpId: pump.id })
+      && (isStationOverseer() || mayLog)) {
+    return { label: '▶️ Start shift', mode: isStationOverseer() ? 'manager-start' : 'start' };
   }
-  if (!mayLog) return { label: 'View only', disabled: true, mode: 'none' };
-  if (!session) return { label: 'Start shift →', disabled: false, mode: 'start' };
-  if (isMine(session)) return { label: 'End shift →', disabled: false, mode: 'end' };
-  return {
-    label: session.activeName ? `In use by ${session.activeName} →` : 'In use — try again shortly',
-    disabled: true,
-    mode: 'none',
-  };
+  if (session && can('pumpSession.end', {
+    stationId, pumpId: pump.id, activeUid: session.activeUid,
+  }) && (isStationOverseer() || isMine(session))) {
+    return {
+      label: isMine(session) ? '⏹️ End shift' : `⏹️ End ${session.activeName || 'staff'}’s shift`,
+      mode: isStationOverseer() ? 'manager-end' : 'end',
+    };
+  }
+  // The status chip already explains why there is no action. Do not show a
+  // disabled button that looks tappable but can never succeed.
+  return null;
 }
 
 function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
@@ -103,7 +94,7 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
   const state = sessionLabel(session);
   const mayLog = !isStationOverseer() && can('shift.create', { stationId })
     && (canUsePump(pump.id) || isMine(session));
-  const action = actionFor(pump, session, mayLog);
+  const action = actionFor(pump, session, mayLog, stationId);
   // Who is rostered on this pump today, per the board. Falls back to the
   // standing pumpIds list so stations that never open the board still see
   // their assignments here.
@@ -116,8 +107,8 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
   const names = rosterNames.length ? rosterNames : standingNames;
   const assignmentLine = isStationOverseer()
     ? `<span class="pump-assignment-line">${names.length
-        ? `${rosterNames.length ? 'Rostered today' : 'Assigned'}: ${names.map(h).join(', ')}`
-        : 'Nobody rostered — assign from the Roster tab'}</span>`
+        ? `${rosterNames.length ? 'Working here today' : 'Usual staff'}: ${names.map(h).join(', ')}`
+        : 'Nobody added yet — use the Who’s where tab'}</span>`
     : '';
   const rate = rateMap[pump.product];
   const detail = session
@@ -125,26 +116,22 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
     : rate
       ? `${h(formatCurrency(rate.rate))}/L configured rate`
       : 'No rate configured';
-  const disabledTitle = !mayLog && !isStationOverseer()
-    ? denyReason('shift.create', { stationId })
-    : action.disabled
-      ? 'This pump is locked by another staff member.'
-      : '';
-
-  // For overseers, show both a primary action button and a secondary "⋮" menu.
-  // The menu is always available (not only while someone else holds the pump)
-  // so rostering is reachable from the pump card at any time.
-  const isOverseer = isStationOverseer();
-  const heldByOther = session && session.activeUid !== getCurrentUserData()?.uid;
-  const secondaryMenu = isOverseer
-    ? `<div class="pump-menu">
-        <button type="button" class="icon-btn pump-menu-trigger" data-pump-id="${h(pump.id)}" aria-label="More actions for ${h(pump.name || 'pump')}" title="More actions" aria-haspopup="true" aria-expanded="false">⋮</button>
-        <div class="pump-menu-dropdown" hidden>
-          <button type="button" class="pump-menu-item" data-action="assign" data-pump-id="${h(pump.id)}">👥 Assign staff for today</button>
-          ${heldByOther ? `<button type="button" class="pump-menu-item" data-action="force-release" data-pump-id="${h(pump.id)}">🔓 Force release (no shift record)</button>` : ''}
-        </div>
-      </div>`
-    : '';
+  const primaryPermission = session ? 'pumpSession.end' : 'pumpSession.start';
+  const primaryAction = action ? ifCan(primaryPermission, {
+    stationId, pumpId: pump.id, activeUid: session?.activeUid,
+  }, `
+    <button type="button" class="btn pump-action ${action.mode === 'end' || action.mode === 'manager-end' ? 'btn-danger' : 'btn-primary'}"
+            data-pump-id="${h(pump.id)}" data-mode="${h(action.mode)}">
+      ${h(action.label)}
+    </button>`) : '';
+  const assignAction = ifCan('assignment.manage', { stationId }, `
+    <button type="button" class="btn btn-secondary pump-secondary-action" data-action="open-board" data-pump-id="${h(pump.id)}">
+      👥 Open today’s staff board
+    </button>`);
+  const releaseAction = session ? ifCan('pumpSession.forceRelease', { stationId }, `
+    <button type="button" class="btn btn-secondary pump-secondary-action danger-text" data-action="force-release" data-pump-id="${h(pump.id)}">
+      🔓 Release without saving
+    </button>`) : '';
 
   return `<li>
     <article class="pump-card ${state.cls}">
@@ -157,15 +144,9 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
         <span class="status-chip pump-status ${state.cls}" role="status">${state.icon} ${h(state.text)}</span>
       </div>
       <p class="pump-card-detail">${detail}${assignmentLine}</p>
-      <div class="pump-card-actions">
-        <button type="button" class="btn pump-action ${action.mode === 'end' || action.mode === 'manager-end' ? 'btn-danger' : 'btn-primary'}"
-                data-pump-id="${h(pump.id)}" data-mode="${h(action.mode)}"
-                ${action.disabled ? 'disabled' : ''}
-                ${disabledTitle ? `title="${h(disabledTitle)}"` : ''}>
-          ${h(action.label)}
-        </button>
-        ${secondaryMenu}
-      </div>
+      ${(primaryAction || assignAction || releaseAction) ? `<div class="pump-card-actions">
+        ${primaryAction}${assignAction}${releaseAction}
+      </div>` : ''}
     </article>
   </li>`;
 }
@@ -188,36 +169,23 @@ function paintPumpBoard() {
       if (mode === 'end') openClockOutForm(stationId, pump, rateMap[pump.product], session);
       if (mode === 'manager-start') openClockInForm(stationId, pump, rateMap[pump.product]);
       if (mode === 'manager-end') openClockOutForm(stationId, pump, rateMap[pump.product], session);
-      if (mode === 'assign') openPumpAssignmentForm(stationId, pump, staff);
     });
   });
-  // Menu triggers
-  board.querySelectorAll('.pump-menu-trigger').forEach(trigger => {
-    trigger.addEventListener('click', e => {
-      e.stopPropagation();
-      const dropdown = trigger.parentElement.querySelector('.pump-menu-dropdown');
-      if (!dropdown) return;
-      const open = dropdown.hidden;
-      closeAllPumpMenus();
-      dropdown.hidden = !open;
-      trigger.setAttribute('aria-expanded', String(open));
-    });
-  });
-  // Menu item actions
-  board.querySelectorAll('.pump-menu-item').forEach(item => {
-    item.addEventListener('click', e => {
-      e.stopPropagation();
+  board.querySelectorAll('.pump-secondary-action').forEach(item => {
+    item.addEventListener('click', () => {
       const pump = pumps.find(p => p.id === item.dataset.pumpId);
       if (!pump) return;
       const session = sessionFor(pump.id, sessions);
-      item.closest('.pump-menu-dropdown').hidden = true;
-      if (item.dataset.action === 'assign') openPumpAssignmentForm(stationId, pump, staff);
-      if (item.dataset.action === 'force-release') forceReleasePumpAtStation(stationId, pump, session);
+      if (item.dataset.action === 'open-board') {
+        selectTodayOnBoard();
+        document.querySelector('[data-page="board"]')?.click();
+      }
+      if (item.dataset.action === 'force-release') forceReleasePumpAtStation(stationId, pump, session, item);
     });
   });
 }
 
-async function forceReleasePumpAtStation(stationId, pump, session) {
+async function forceReleasePumpAtStation(stationId, pump, session, button = null) {
   if (!pump || !session || !can('pumpSession.forceRelease', { stationId })) {
     toastError(denyReason('pumpSession.forceRelease'));
     return;
@@ -231,6 +199,7 @@ async function forceReleasePumpAtStation(stationId, pump, session) {
     danger: true,
   });
   if (!ok) return;
+  setBusy(button, true, 'Releasing…');
   try {
     const db = getDb();
     const ref = doc(db, 'stations', stationId, 'pumpSessions', pump.id);
@@ -257,6 +226,7 @@ async function forceReleasePumpAtStation(stationId, pump, session) {
     renderPumps(stationId);
   } catch (err) {
     toastError(formatFirebaseError(err));
+    setBusy(button, false);
   }
 }
 
@@ -345,23 +315,23 @@ export async function renderPumps(stationId) {
 
     if (pumps.length === 0) {
       content.innerHTML = `<h2 class="page-title">Pumps</h2>${emptyState('⛽', mayConfigure
-        ? 'No pumps yet. Add them from Config → Pumps.'
+        ? 'No pumps yet. Add them in Settings → Pumps.'
         : 'No pumps configured yet. Ask your station admin to add them.')}`;
       return;
     }
 
     if (myPumps.length === 0) {
       content.innerHTML = `<h2 class="page-title">Pumps</h2>${emptyState('🔒',
-        'No pumps are rostered to you at this station today. Ask your manager to place you on the Roster board.')}`;
+        'No pumps are assigned to you today. Ask your manager to add you on the Who’s where page.')}`;
       return;
     }
 
     const mayLog = !isStationOverseer() && can('shift.create', { stationId });
     const mode = pumpAccessMode();
     const hint = isStationOverseer()
-      ? 'Live status is shared across devices. Start/end shifts on any pump, or open the Roster tab to plan the day.'
+      ? 'Live status is shared across devices. Start or end a shift, or open Who’s where to plan the day.'
       : mode === 'daily'
-        ? `Rostered to ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} today. Tap one to start your shift.`
+        ? `You are on ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} today. Tap one to start your shift.`
         : mode === 'standing'
           ? `Showing the ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} assigned to you.`
           : mayLog ? 'Choose a pump to start or end your shift. Live locks update on every device.' : 'You have read-only access.';
@@ -406,87 +376,6 @@ export function openShiftForm(stationId, pump, rate, session = null) {
   }
 }
 
-/**
- * Roster staff onto a pump for TODAY.
- *
- * This writes the day's assignment document rather than editing each staff
- * member's standing `pumpIds`, so yesterday's roster never silently governs
- * today. The Roster tab is the full board; this is the single-pump shortcut.
- */
-async function openPumpAssignmentForm(stationId, pump, staff) {
-  if (!can('assignment.manage', { stationId })) {
-    toastError(denyReason('assignment.manage'));
-    return;
-  }
-
-  const date = pumpContext?.date || getTodayDate();
-  const activeSession = sessionFor(pump.id, pumpContext?.sessions || []);
-  const activeUser = staff.find(user => user.id === activeSession?.activeUid);
-  const row = (pumpContext?.assignments || []).find(r => r.pumpId === pump.id);
-  const assignedIds = new Set(row?.staffUids || []);
-
-  const warning = activeSession
-    ? `<p class="assignment-warning" role="status">⚠️ ${h(activeUser ? userDisplayName(activeUser) : activeSession.activeName || 'A staff member')} is currently clocked in on this pump. Changing the roster does not end that shift — the lock stays until clock-out or a manager ends it.</p>`
-    : '';
-  const options = staff.length
-    ? `<div class="checkbox-list">${staff.map(user => `<div class="checkbox-item"><input type="checkbox" id="assign-pump-${h(user.id)}" value="${h(user.id)}" ${assignedIds.has(user.id) ? 'checked' : ''} /><label for="assign-pump-${h(user.id)}">${h(userDisplayName(user))}</label></div>`).join('')}</div>`
-    : '<p class="muted-note">No staff accounts are assigned to this station yet. Add staff from Config → Team first.</p>';
-
-  document.getElementById('modal-title').textContent = `Assign ${pump.name}`;
-  document.getElementById('modal-body').innerHTML = `<form id="pump-assignment-form" novalidate>
-    <p class="modal-intro">Who works ${h(pump.name)} on ${h(date)}? Rostered staff can start a shift on this pump straight away.</p>
-    ${warning}${options}
-    <p id="pump-assignment-error" class="form-error hidden" role="alert"></p>
-    <button type="submit" class="btn btn-primary btn-full mt-16" ${staff.length ? '' : 'disabled'}>Save roster</button>
-  </form>`;
-  openModal('generic-modal');
-
-  document.getElementById('pump-assignment-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const button = form.querySelector('button[type="submit"]');
-    const error = document.getElementById('pump-assignment-error');
-    const selected = Array.from(form.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value);
-    error.classList.add('hidden');
-    setBusy(button, true, 'Saving…');
-
-    try {
-      const names = {};
-      for (const uid of selected) {
-        names[uid] = userDisplayName(staff.find(user => user.id === uid)) || 'Staff member';
-      }
-      const ref = doc(getDb(), 'stations', stationId, 'assignments', `${date}_${pump.id}`);
-      const me = getCurrentUserData();
-
-      if (selected.length === 0) {
-        await deleteDoc(ref).catch(err => { if (err?.code !== 'not-found') throw err; });
-      } else {
-        await setDoc(ref, {
-          date,
-          pumpId: pump.id,
-          pumpName: pump.name || 'Pump',
-          product: pump.product || '',
-          staffUids: selected,
-          staffNames: names,
-          createdAt: serverTimestamp(),
-          createdBy: me?.uid || 'unknown',
-          updatedAt: serverTimestamp(),
-          updatedBy: me?.uid || 'unknown',
-        }, { merge: true });
-      }
-
-      invalidateStation(stationId);
-      closeModal('generic-modal');
-      toastSuccess(`Roster saved — ${pump.name}`);
-      await renderPumps(stationId);
-    } catch (err) {
-      error.textContent = `❌ ${formatFirebaseError(err)}`;
-      error.classList.remove('hidden');
-      setBusy(button, false);
-    }
-  });
-}
-
 // ── Clock-in form (now open to managers/admins too) ──────────────────────
 function openClockInForm(stationId, pump, rate) {
   if (!isStationOverseer() && (!can('pumpSession.start', { stationId, pumpId: pump.id }) || !canUsePump(pump.id))) {
@@ -516,7 +405,7 @@ function openClockInForm(stationId, pump, rate) {
       <p class="modal-intro">Enter the opening meter reading. The pump will be reserved for you until you end this shift.</p>
       <div class="form-row">
         <div class="field"><label for="clock-in-date">Date</label>
-          <input type="date" id="clock-in-date" value="${getTodayDate()}" max="${getTodayDate()}" required /></div>
+          <input type="date" id="clock-in-date" value="${getTodayDate()}" max="${getTodayDate()}" ${isStationOverseer() ? '' : `min="${getTodayDate()}" readonly aria-readonly="true"`} required /></div>
         <div class="field"><label for="clock-in-shift">Shift</label>
           <select id="clock-in-shift" required><option value="1">Shift 1</option><option value="2">Shift 2</option><option value="3">Shift 3</option></select></div>
       </div>
@@ -547,6 +436,7 @@ function openClockInForm(stationId, pump, rate) {
     const openingRaw = document.getElementById('clock-in-opening').value;
     const opening = Number(openingRaw);
     if (!date || date > getTodayDate()) return fail('Choose today or an earlier date.');
+    if (!isStationOverseer() && date !== getTodayDate()) return fail('Staff shifts must start today. Refresh the page and try again.');
     if (openingRaw === '' || !Number.isFinite(opening) || opening < 0) return fail('Enter a valid opening reading.');
     if (missingRate) return fail('No rate configured — ask a manager or admin to set one first.');
 
@@ -612,7 +502,7 @@ function openClockOutForm(stationId, pump, rate, session) {
     return;
   }
   if (!can('pumpSession.end', { stationId, pumpId: pump.id, activeUid: session.activeUid })) {
-    toastError(denyReason('pumpSession.end', { stationId }));
+    toastError(denyReason('pumpSession.end', { stationId, pumpId: pump.id, activeUid: session.activeUid }));
     return;
   }
 
@@ -653,7 +543,7 @@ function openClockOutForm(stationId, pump, rate, session) {
           <div class="expense-row" data-index="0">
             <input type="text" class="expense-item" placeholder="Item" maxlength="60" />
             <input type="number" class="expense-cost" step="0.01" min="0" placeholder="₹0.00" inputmode="decimal" />
-            <button type="button" class="icon-btn expense-remove" title="Remove expense" aria-label="Remove expense" hidden>✕</button>
+            <button type="button" class="btn btn-secondary btn-small expense-remove" hidden>✕ Remove</button>
           </div>
         </div>
         <button type="button" id="add-expense-btn" class="btn btn-secondary btn-small mt-8">+ Add expense</button>
@@ -712,7 +602,7 @@ function openClockOutForm(stationId, pump, rate, session) {
     row.innerHTML = `
       <input type="text" class="expense-item" placeholder="Item" maxlength="60" />
       <input type="number" class="expense-cost" step="0.01" min="0" placeholder="₹0.00" inputmode="decimal" />
-      <button type="button" class="icon-btn expense-remove" title="Remove expense" aria-label="Remove expense">✕</button>`;
+      <button type="button" class="btn btn-secondary btn-small expense-remove">✕ Remove</button>`;
     container.appendChild(row);
     row.querySelector('.expense-cost').addEventListener('input', compute);
     row.querySelector('.expense-item').addEventListener('input', compute);
@@ -762,7 +652,7 @@ function openClockOutForm(stationId, pump, rate, session) {
     });
     const notes = readText('clock-out-notes');
     const expensesTotal = computeExpenses();
-    const volume = closing - Number.isFinite(opening) ? Math.max(0, closing - opening) : 0;
+    const volume = Number.isFinite(opening) ? Math.max(0, closing - opening) : 0;
     const sales = volume * finalRate;
     const cashDue = Math.max(0, sales - expensesTotal);
 
@@ -777,7 +667,7 @@ function openClockOutForm(stationId, pump, rate, session) {
       await runTransaction(getDb(), async transaction => {
         const snapshot = await transaction.get(sessionRef);
         const current = snapshot.exists() ? snapshot.data() : null;
-        if (!current || current.status !== 'active') {
+        if (!current || current.status !== 'active' || current.activeUid !== actualStaffUid) {
           const released = new Error('This pump session changed before it could be ended.');
           released.code = 'session-released';
           throw released;
@@ -839,8 +729,17 @@ function openClockOutForm(stationId, pump, rate, session) {
       toastSuccess(`Shift Ended — ${formatVolume(volume)} · ${formatCurrency(sales)}`);
       window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId } }));
     } catch (err) {
-      if (err.code === 'session-released') fail('This pump session is no longer yours. It may have been force-released by an admin.');
-      else fail(formatFirebaseError(err));
+      const permissionDenied = err?.code === 'permission-denied'
+        || String(err?.message || '').includes('Missing or insufficient permissions');
+      if (err.code === 'session-released') {
+        fail("This shift isn't showing as yours anymore. Refresh the page and try again.");
+      } else if (permissionDenied) {
+        fail(denyReason('pumpSession.end', {
+          stationId, pumpId: pump.id, activeUid: session?.activeUid,
+        }));
+      } else {
+        fail(formatFirebaseError(err));
+      }
       setBusy(button, false);
     }
   });

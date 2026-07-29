@@ -5,8 +5,8 @@ import {
   serverTimestamp, writeBatch,
 } from './firebase.js';
 import {
-  getCurrentUserData, isSuperAdmin, isStationAdmin, isManager,
-  can, denyReason, assignableRoles, ROLES, ROLE_BADGE, formatFirebaseError,
+  getCurrentUserData, isSuperAdmin,
+  can, ifCan, denyReason, assignableRoles, ROLES, ROLE_BADGE, formatFirebaseError,
 } from './auth.js';
 import {
   getAllStations, getStationsByIds, getRates, getPumps, getPumpSessions,
@@ -24,8 +24,7 @@ import {
   PIN_COMPLEXITY_OPTIONS, isValidEmail,
 } from './station-settings.js';
 import {
-  createUserAccount, updateUserAccount,
-  deactivateUserAccount, removeUserAccount,
+  createUserAccount, updateUserAccount, removeUserAccount,
 } from './staff-auth.js';
 import { openProfileModal, avatarHTML } from './profile.js';
 
@@ -68,13 +67,17 @@ export async function renderConfig(stationId) {
     stationsCache = stations;
     teamCache = users;
 
+    // Config is intentionally a shared page, but every topic has its own
+    // permission gate. Passing config.view never exposes unrelated controls.
+    const selectedStation = stations.find(station => station.id === stationId) || null;
     const sections = [
       renderProfileSection(me, stations, pumps),
-      renderStationSecuritySection(stationId, security),
-      renderRatesSection(stationId, rates),
-      renderPumpsSection(stationId, pumps, sessions),
-      renderStationsSection(stations),
-      renderTeamSection(users, me),
+      ifCan('stationSecurity.update', { stationId }, renderStationSecuritySection(stationId, security)),
+      ifCan('rate.update', { stationId }, renderRatesSection(stationId, rates)),
+      ifCan('pump.update', { stationId }, renderPumpsSection(stationId, pumps, sessions)),
+      ifCan('station.create', {}, renderStationsSection(stations)),
+      ifCan('station.reset', { stationId }, renderStationDataSection(selectedStation)),
+      ifCan('team.view', {}, renderTeamSection(users, me)),
       renderSecuritySection(),
     ].filter(Boolean).join('');
 
@@ -92,11 +95,11 @@ function renderProfileSection(me, stations, pumps) {
     : (stations || []).filter(station => (me.stationIds || []).includes(station.id)).map(station => station.name).join(', ') || 'No stations assigned';
   const pumpText = me.role === 'staff'
     ? (me.pumpIds?.length
-        ? `${me.pumpIds.length} default pump${me.pumpIds.length === 1 ? '' : 's'} · plus today's roster`
-        : 'Set by the daily roster board')
+        ? `${me.pumpIds.length} usual pump${me.pumpIds.length === 1 ? '' : 's'} · plus today’s staff board`
+        : 'Set on the Who’s where page')
     : `${(pumps || []).length || 'All'} pumps visible at this station`;
   return section('Profile', '', `<div class="profile-card-grid">
-    <div class="profile-card-identity">${avatarHTML(me, 'medium')}<div><strong>${h(me.fullName || me.email || 'PumpLog user')}</strong><small>${h(me.email || me.username ? `@${me.username || ''}` : '')}</small></div></div>
+    <div class="profile-card-identity">${avatarHTML(me, 'medium')}<div><strong>${h(me.fullName || me.email || 'PumpLog user')}</strong><small>${h(me.email || (me.username ? `@${me.username}` : ''))}</small></div></div>
     <dl class="profile-settings-list"><dt>Role</dt><dd><span class="role-badge">${ROLE_BADGE[me.role] || '⚪'} ${h(ROLES[me.role] || me.role || 'Staff')}</span></dd>
       <dt>Assigned stations</dt><dd>${h(stationText)}</dd><dt>Pump access</dt><dd>${h(pumpText)}</dd></dl>
     <div class="profile-account-actions"><button type="button" id="config-open-profile" class="btn btn-primary btn-full">${ICONS.user} Profile &amp; security</button></div>
@@ -104,38 +107,29 @@ function renderProfileSection(me, stations, pumps) {
 }
 
 // ── Station Security (sign-in methods, App Lock, credential policies) ───
-function canManageSecurity(stationId) {
-  if (!stationId) return false;
-  return isSuperAdmin() || (isStationAdmin() && (getCurrentUserData()?.stationIds || []).includes(stationId))
-    || (isManager() && (getCurrentUserData()?.stationIds || []).includes(stationId));
-}
-
 function renderStationSecuritySection(stationId, security) {
   if (!stationId) {
     return section('Station Security', '', emptyState('🛡️', 'Select a station from the top bar to manage its security settings.'));
   }
   const s = normalizeSecurity(security);
-  const mayEdit = canManageSecurity(stationId);
-  const disabled = mayEdit ? '' : 'disabled';
 
   const toggle = (name, label, hint, checked) => `
     <label class="toggle-row">
       <span class="toggle-text">${h(label)}${hint ? `<small>${h(hint)}</small>` : ''}</span>
-      <input type="checkbox" class="toggle-input" role="switch" name="${name}" ${checked ? 'checked' : ''} ${disabled} />
+      <input type="checkbox" class="toggle-input" role="switch" name="${name}" ${checked ? 'checked' : ''} />
     </label>`;
 
   const number = (name, label, value, min, max, hint = '') => `
     <div class="field"><label for="sec-${name}">${h(label)}</label>
-      <input type="number" id="sec-${name}" name="${name}" value="${value}" min="${min}" max="${max}" inputmode="numeric" ${disabled} />
+      <input type="number" id="sec-${name}" name="${name}" value="${value}" min="${min}" max="${max}" inputmode="numeric" />
       ${hint ? `<small class="hint">${h(hint)}</small>` : ''}</div>`;
 
   const select = (name, label, options, value) => `
     <div class="field"><label for="sec-${name}">${h(label)}</label>
-      <select id="sec-${name}" name="${name}" ${disabled}>${options.map(([v, l]) =>
+      <select id="sec-${name}" name="${name}">${options.map(([v, l]) =>
         `<option value="${v}" ${v === value ? 'selected' : ''}>${h(l)}</option>`).join('')}</select></div>`;
 
   const body = `
-    ${mayEdit ? '' : `<p class="section-hint">Read-only — only a Super Admin or this station's Station Admin can change these.</p>`}
     <div class="settings-group">
       <h4 class="settings-group-title">🔑 Sign-in method</h4>
       <p class="section-hint">Free mode keeps sign-in simple: email + Cloud PIN using Firebase Authentication. No Cloud Functions or pay-as-you-go APIs are used.</p>
@@ -158,13 +152,17 @@ function renderStationSecuritySection(stationId, security) {
       </div>
       ${number('pinRotationDays', 'Force Cloud PIN rotation after (days)', s.pinRotationDays, 0, 365, '0 = never force rotation. The new PIN is required at the next sign-in.')}
     </div>
-    ${mayEdit ? `<button type="button" id="save-station-security" class="btn btn-primary btn-full mt-16">${ICONS.save} Save security settings</button>` : ''}`;
+    ${ifCan('stationSecurity.update', { stationId }, `<button type="button" id="save-station-security" class="btn btn-primary btn-full mt-16">${ICONS.save} Save security settings</button>`)}`;
 
   return section('Station Security', '', body);
 }
 
 function wireStationSecurity(stationId) {
   onClick('save-station-security', async event => {
+    if (!can('stationSecurity.update', { stationId })) {
+      toastError(denyReason('stationSecurity.update', { stationId }));
+      return;
+    }
     const button = event.currentTarget;
     const read = name => {
       const el = document.querySelector(`[name="${name}"]`);
@@ -210,10 +208,8 @@ function wireStationSecurity(stationId) {
 
 // ── Rates ───────────────────────────────────────────────────────────────
 function renderRatesSection(stationId, rates) {
-  const mayEdit = can('rate.update', { stationId });
-  const addBtn = can('rate.create', { stationId })
-    ? `<button id="add-rate-btn" class="btn btn-primary btn-small">${ICONS.add} Add rate</button>`
-    : '';
+  const addBtn = ifCan('rate.create', { stationId },
+    `<button id="add-rate-btn" class="btn btn-primary btn-small">${ICONS.add} Add rate</button>`);
 
   if (!stationId) {
     return section('Rates', '', emptyState('🏪', 'Select a station from the top bar to manage its rates.'));
@@ -235,10 +231,10 @@ function renderRatesSection(stationId, rates) {
   const items = displayRates.map(r => configItem({
     title: `${h(r.product)} — ${formatCurrency(r.rate)}/L`,
     meta: `Effective ${formatDate(r.effectiveDate)}`,
-    actions: mayEdit ? [
-      { cls: 'edit-rate', id: r.id, icon: ICONS.edit, label: `Edit ${r.product} rate` },
-      { cls: 'delete-rate', id: r.id, icon: ICONS.delete, label: `Delete ${r.product} rate` },
-    ] : [],
+    actions: [
+      { action: 'rate.update', ctx: { stationId }, cls: 'edit-rate', id: r.id, icon: ICONS.edit, text: 'Edit', label: `Edit ${r.product} rate` },
+      { action: 'rate.delete', ctx: { stationId }, cls: 'delete-rate', id: r.id, icon: ICONS.delete, text: 'Delete', label: `Delete ${r.product} rate` },
+    ],
   })).join('');
 
   return section('Rates', addBtn, items);
@@ -247,10 +243,8 @@ function renderRatesSection(stationId, rates) {
 // ── Pumps ───────────────────────────────────────────────────────────────
 function renderPumpsSection(stationId, pumps, sessions = []) {
   if (!stationId) return '';
-  const mayEdit = can('pump.update', { stationId });
-  const addBtn = can('pump.create', { stationId })
-    ? `<button id="add-pump-btn-cfg" class="btn btn-primary btn-small">${ICONS.add} Add pump</button>`
-    : '';
+  const addBtn = ifCan('pump.create', { stationId },
+    `<button id="add-pump-btn-cfg" class="btn btn-primary btn-small">${ICONS.add} Add pump</button>`);
 
   if (pumps.length === 0) {
     return section('Pumps', addBtn, emptyState('⛽', 'No pumps configured for this station.'));
@@ -258,12 +252,12 @@ function renderPumpsSection(stationId, pumps, sessions = []) {
 
   const items = pumps.map(p => {
     const session = sessions.find(s => s.id === p.id && s.status === 'active');
-    const actions = mayEdit ? [
-      { cls: 'edit-pump', id: p.id, icon: ICONS.edit, label: `Edit ${p.name}` },
-      { cls: 'delete-pump', id: p.id, icon: ICONS.delete, label: `Delete ${p.name}` },
-    ] : [];
-    if (session && can('pumpSession.forceRelease', { stationId })) {
-      actions.push({ cls: 'force-release', id: p.id, icon: ICONS.unlock, label: `Force release ${p.name}` });
+    const actions = [
+      { action: 'pump.update', ctx: { stationId }, cls: 'edit-pump', id: p.id, icon: ICONS.edit, text: 'Edit', label: `Edit ${p.name}` },
+      { action: 'pump.delete', ctx: { stationId }, cls: 'delete-pump', id: p.id, icon: ICONS.delete, text: 'Delete', label: `Delete ${p.name}` },
+    ];
+    if (session) {
+      actions.push({ action: 'pumpSession.forceRelease', ctx: { stationId }, cls: 'force-release', id: p.id, icon: ICONS.unlock, text: 'Release', label: `Release ${p.name} without saving` });
     }
     const active = session
       ? ` · Active since ${formatDateTime(session.clockInAt) || 'just now'} · ${h(session.activeName || 'Staff member')}`
@@ -277,29 +271,38 @@ function renderPumpsSection(stationId, pumps, sessions = []) {
 
 // ── Stations (Super Admin) ──────────────────────────────────────────────
 function renderStationsSection(stations) {
-  const addBtn = can('station.create')
-    ? `<button id="add-station-btn" class="btn btn-primary btn-small">${ICONS.add} Create station</button>`
-    : '';
+  const addBtn = ifCan('station.create', {},
+    `<button id="add-station-btn" class="btn btn-primary btn-small">${ICONS.add} Create station</button>`);
 
   if (stations.length === 0) {
     return section('Stations', addBtn, emptyState('🏪', 'No stations yet. Create your first one.'));
   }
 
   const items = stations.map(s => {
-    const actions = [];
-    if (can('station.update')) actions.push({ cls: 'edit-station', id: s.id, icon: ICONS.edit, label: `Edit ${s.name}` });
-    if (can('station.delete')) actions.push({ cls: 'delete-station', id: s.id, icon: ICONS.delete, label: `Delete ${s.name}` });
-    if (can('station.reset', { stationId: s.id })) {
-      actions.push({ cls: 'reset-station', id: s.id, icon: '♻️', label: `Reset data for ${s.name}` });
-    }
+    const actions = [
+      { action: 'station.update', ctx: {}, cls: 'edit-station', id: s.id, icon: ICONS.edit, text: 'Edit', label: `Edit ${s.name}` },
+      { action: 'station.delete', ctx: {}, cls: 'delete-station', id: s.id, icon: ICONS.delete, text: 'Delete', label: `Delete ${s.name}` },
+    ];
     return configItem({
       title: h(s.name),
-      meta: `${h(s.address || 'No address')} · <span class="destructive-label">Reset removes shift history and live locks only</span>`,
+      meta: h(s.address || 'No address'),
       actions,
     });
   }).join('');
 
-  return section('Stations', addBtn, `<p class="section-hint">Reset station data keeps pumps, rates, and team assignments.</p>${items}`);
+  return section('Stations', addBtn, items);
+}
+
+// ── Station data reset (all station overseers) ──────────────────────────
+function renderStationDataSection(station) {
+  if (!station) return '';
+  const action = ifCan('station.reset', { stationId: station.id }, `
+    <button type="button" class="btn btn-danger btn-full reset-station" data-id="${h(station.id)}">
+      ♻️ Reset shift history and live locks
+    </button>`);
+  return section('Station data', '', `
+    <p class="section-hint">Use this only when you need a clean start. Pumps, rates, and team members are kept.</p>
+    ${action}`);
 }
 
 // ── Team ────────────────────────────────────────────────────────────────
@@ -311,13 +314,12 @@ function statusTag(user) {
 }
 
 function renderTeamSection(users, me) {
-  const addBtn = can('user.create')
-    ? `<button id="add-team-btn" class="btn btn-primary btn-small">${ICONS.add} Add ${isSuperAdmin() ? 'user' : 'staff'}</button>`
-    : '';
+  const addBtn = ifCan('user.create', {},
+    `<button id="add-team-btn" class="btn btn-primary btn-small">${ICONS.add} Add team member</button>`);
 
   const hint = isSuperAdmin()
     ? 'Every PumpLog account. You cannot change your own role here.'
-    : 'Staff accounts you created for your stations.';
+    : 'People at your stations. Controls only appear for accounts you are allowed to manage.';
 
   const searchBar = users.length > 4 ? `
     <div class="field search-field">
@@ -357,8 +359,6 @@ function repaintTeamList(me) {
 
 function teamItemHTML(u, me) {
   const isMe = u.id === me.uid;
-  const mayEdit = can('user.update', { target: u });
-  const mayDelete = can('user.delete', { target: u });
   const stationIds = u.stationIds || [];
   const nameOf = id => stationsCache.find(s => s.id === id)?.name || 'Unknown station';
   const stationText = u.role === 'superadmin'
@@ -370,20 +370,15 @@ function teamItemHTML(u, me) {
     ? (u.pumpIds?.length ? `${u.pumpIds.length} pump${u.pumpIds.length === 1 ? '' : 's'}` : 'all pumps')
     : null;
 
-  const actions = [];
-  if (mayEdit) {
-    actions.push({ cls: 'edit-user', id: u.id, icon: ICONS.edit, label: `Edit ${u.fullName || u.email}` });
-    actions.push(u.status === 'disabled'
-      ? { cls: 'activate-user', id: u.id, icon: '▶️', label: `Activate ${u.fullName || u.email}` }
-      : { cls: 'deactivate-user', id: u.id, icon: '⏸️', label: `Deactivate ${u.fullName || u.email}` });
-  } else if (!isMe) {
-    actions.push({ cls: '', id: u.id, icon: ICONS.edit, label: 'Edit unavailable', disabled: true, title: denyReason('user.update', { target: u }) });
-  }
-  if (mayDelete) {
-    actions.push({ cls: 'remove-user', id: u.id, icon: ICONS.delete, label: `Remove ${u.fullName || u.email}` });
-  } else if (!isMe) {
-    actions.push({ cls: '', id: u.id, icon: ICONS.delete, label: 'Remove unavailable', disabled: true, title: denyReason('user.delete', { target: u }) });
-  }
+  const targetCtx = { target: u };
+  const actions = [
+    { action: 'user.update', ctx: targetCtx, cls: 'edit-user', id: u.id, icon: ICONS.edit, text: 'Edit', label: `Edit ${u.fullName || u.email}` },
+    u.status === 'disabled'
+      ? { action: 'user.update', ctx: targetCtx, cls: 'activate-user', id: u.id, icon: '▶️', text: 'Activate', label: `Activate ${u.fullName || u.email}` }
+      : { action: 'user.delete', ctx: targetCtx, cls: 'remove-user', id: u.id, icon: ICONS.delete, text: 'Remove access', label: `Remove access for ${u.fullName || u.email}` },
+  ];
+  const actionButtons = actions.map(a => ifCan(a.action, a.ctx, `
+    <button class="btn btn-secondary btn-small item-action-btn ${a.cls}" data-id="${h(a.id)}" aria-label="${h(a.label)}">${a.icon} <span>${h(a.text || a.label)}</span></button>`)).join('');
 
   return `<div class="config-item team-item">
     ${avatarHTML(u, 'small')}
@@ -391,8 +386,7 @@ function teamItemHTML(u, me) {
       <div class="item-title">${h(u.fullName || u.email || u.username || 'Unnamed user')}${isMe ? ' <span class="tag tag-you">You</span>' : ''} ${statusTag(u)}${u.pwaLoginAllowed === false ? ' <span class="tag tag-off">PWA off</span>' : ''}</div>
       <div class="item-meta">${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''}${u.email ? ` · ${h(u.email)}` : ''}${u.employeeId ? ` · ID ${h(u.employeeId)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}</div>
     </div>
-    <div class="item-actions">${actions.map(a => `
-      <button class="icon-btn ${a.cls}" data-id="${h(a.id)}" aria-label="${h(a.label)}" title="${h(a.title || a.label)}" ${a.disabled ? 'disabled' : ''}>${a.icon}</button>`).join('')}</div>
+    ${actionButtons ? `<div class="item-actions">${actionButtons}</div>` : ''}
   </div>`;
 }
 
@@ -411,9 +405,10 @@ const SECTION_META = {
   Profile: { icon: '👤', description: 'Your account, role, station, and security settings.' },
   'Station Security': { icon: '🛡️', description: 'Sign-in methods, App Lock, and credential policies for this station.' },
   Rates: { icon: '₹', description: 'Set the prices used to calculate each shift.' },
-  Pumps: { icon: '⛽', description: 'Manage pumps, products, and stuck session locks.' },
-  Stations: { icon: '🏪', description: 'Manage stations or safely reset station data.' },
-  Team: { icon: '👥', description: 'Create and manage users, credentials, and assignments.' },
+  Pumps: { icon: '⛽', description: 'Manage pumps, products, and pumps that still show active.' },
+  Stations: { icon: '🏪', description: 'Create, rename, or remove stations.' },
+  'Station data': { icon: '♻️', description: 'Clear shift history and stuck pump locks for this station.' },
+  Team: { icon: '👥', description: 'Create and manage people and their station access.' },
   Security: { icon: '🔒', description: 'How Firebase protects PumpLog accounts and data.' },
 };
 
@@ -435,11 +430,10 @@ function section(title, actionHTML, bodyHTML) {
 }
 
 function configItem({ title, meta, actions = [] }) {
-  const buttons = actions.map(a => `
-    <button class="icon-btn ${a.cls}" data-id="${h(a.id)}"
-            aria-label="${h(a.label)}" title="${h(a.title || a.label)}"
-            ${a.disabled ? 'disabled' : ''}>${a.icon}</button>
-  `).join('');
+  const buttons = actions.map(a => ifCan(a.action, a.ctx, `
+    <button class="btn btn-secondary btn-small item-action-btn ${a.cls}" data-id="${h(a.id)}"
+            aria-label="${h(a.label)}">${a.icon} <span>${h(a.text || a.label)}</span></button>
+  `)).join('');
 
   return `<div class="config-item">
     <div class="item-info">
@@ -484,14 +478,19 @@ function wireHandlers(rates, pumps, sessions, stations, users) {
   onClick('add-pump-btn-cfg', () => showPumpForm(null));
   onEach('.edit-pump', id => showPumpForm(pumps.find(p => p.id === id)));
   onEach('.delete-pump', id => deletePump(pumps.find(p => p.id === id)));
-  onEach('.force-release', id => forceReleasePump(pumps.find(p => p.id === id), sessions.find(s => s.id === id)));
+  onEach('.force-release', (id, button) => forceReleasePump(pumps.find(p => p.id === id), sessions.find(s => s.id === id), button));
 
   onClick('add-station-btn', () => showStationForm(null));
   onEach('.edit-station', id => showStationForm(stations.find(s => s.id === id)));
   onEach('.delete-station', id => deleteStation(stations.find(s => s.id === id)));
-  onEach('.reset-station', id => resetStationData(stations.find(s => s.id === id)));
+  onEach('.reset-station', (id, button) => resetStationData(stations.find(s => s.id === id), button));
 
-  onClick('add-team-btn', () => showUserForm(null));
+  onClick('add-team-btn', async event => {
+    setBusy(event.currentTarget, true, 'Loading…');
+    try { await showUserForm(null); }
+    catch (err) { toastError(formatFirebaseError(err)); }
+    finally { setBusy(event.currentTarget, false); }
+  });
   wireTeamActions(users);
 
   const searchInput = byId('team-search');
@@ -504,10 +503,14 @@ function wireHandlers(rates, pumps, sessions, stations, users) {
 }
 
 function wireTeamActions(users) {
-  onEach('.edit-user', id => showUserForm(users.find(u => u.id === id)));
-  onEach('.deactivate-user', id => deactivateUser(users.find(u => u.id === id)));
-  onEach('.activate-user', id => activateUser(users.find(u => u.id === id)));
-  onEach('.remove-user', id => removeUser(users.find(u => u.id === id)));
+  onEach('.edit-user', async (id, button) => {
+    setBusy(button, true, 'Loading…');
+    try { await showUserForm(users.find(u => u.id === id)); }
+    catch (err) { toastError(formatFirebaseError(err)); }
+    finally { setBusy(button, false); }
+  });
+  onEach('.activate-user', (id, button) => activateUser(users.find(u => u.id === id), button));
+  onEach('.remove-user', (id, button) => removeUser(users.find(u => u.id === id), button));
 }
 
 // ── Rate form ───────────────────────────────────────────────────────────
@@ -721,7 +724,7 @@ async function deletePump(pump) {
 }
 
 // ── Live lock recovery ──────────────────────────────────────────────────
-async function forceReleasePump(pump, session) {
+async function forceReleasePump(pump, session, button = null) {
   if (!pump || !session || !can('pumpSession.forceRelease', { stationId: currentStationId })) {
     toastError(denyReason('pumpSession.forceRelease'));
     return;
@@ -735,6 +738,7 @@ async function forceReleasePump(pump, session) {
     danger: true,
   });
   if (!ok) return;
+  setBusy(button, true, 'Releasing…');
   try {
     // E1: Include pumpName and product explicitly so sessionFieldsOk() passes
     await updateDoc(doc(getDb(), 'stations', currentStationId, 'pumpSessions', pump.id), {
@@ -750,6 +754,7 @@ async function forceReleasePump(pump, session) {
     window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId: currentStationId } }));
   } catch (err) {
     toastError(formatFirebaseError(err));
+    setBusy(button, false);
   }
 }
 
@@ -770,19 +775,20 @@ async function deleteSubcollection(stationId, name) {
   return deleted;
 }
 
-async function resetStationData(station) {
+async function resetStationData(station, button = null) {
   if (!station || !can('station.reset', { stationId: station.id })) {
     toastError(denyReason('station.reset'));
     return;
   }
   const ok = await confirmDialog({
     title: `${ICONS.warning} Reset ${station.name}?`,
-    message: `This permanently deletes every shift record and pump session lock for ${station.name}. Pumps, rates, and team assignments will not be changed. This cannot be undone.`,
+    message: `This permanently deletes every shift record and clears every active pump at ${station.name}. Pumps, rates, and team members will not be changed. This cannot be undone.`,
     confirmLabel: `Reset station data ${ICONS.delete}`,
     danger: true,
     confirmationText: station.name,
   });
   if (!ok) return;
+  setBusy(button, true, 'Resetting…');
   try {
     const [shifts, sessions] = await Promise.all([
       deleteSubcollection(station.id, 'shifts'),
@@ -795,6 +801,7 @@ async function resetStationData(station) {
     rerender();
   } catch (err) {
     toastError(formatFirebaseError(err));
+    setBusy(button, false);
   }
 }
 
@@ -897,13 +904,21 @@ async function showUserForm(user) {
   }
 
   const stations = isSuperAdmin() ? await getAllStations() : await getStationsByIds(me.stationIds || []);
-  const roles = assignableRoles();
+  // Station Admins may create Managers, but Firestore only lets them edit an
+  // existing Staff account as Staff. Never show a promotion option that the
+  // server will reject. Managers likewise only create/edit Staff.
+  const roles = isEdit && !isSuperAdmin() ? [user.role] : assignableRoles();
   const assigned = new Set(user?.stationIds || []);
 
   const roleList = isEdit && !roles.includes(user.role) ? [user.role, ...roles] : roles;
+  const selectedRole = user?.role || 'staff';
   const roleOptions = roleList.map(r =>
-    `<option value="${r}" ${(user?.role || 'staff') === r ? 'selected' : ''}>${ROLES[r] || r}</option>`
+    `<option value="${r}" ${selectedRole === r ? 'selected' : ''}>${ROLES[r] || r}</option>`
   ).join('');
+  const roleField = roleList.length === 1
+    ? `<input type="hidden" id="user-role" value="${h(roleList[0])}" />
+       <dl class="profile-settings-list"><dt>Role</dt><dd>${h(ROLES[roleList[0]] || roleList[0])}</dd></dl>`
+    : `<div class="field"><label for="user-role">Role</label><select id="user-role" required>${roleOptions}</select></div>`;
 
   const stationBoxes = stations.length
     ? stations.map(s => `
@@ -952,23 +967,19 @@ async function showUserForm(user) {
     </div>
     <div class="settings-group user-options">
       <label class="toggle-row"><span class="toggle-text">Active<small>Inactive accounts cannot sign in.</small></span><input type="checkbox" id="user-active" class="toggle-input" role="switch" checked /></label>
-      <label class="toggle-row"><span class="toggle-text">Allow PWA login</span><input type="checkbox" id="user-allow-pwa" class="toggle-input" role="switch" checked /></label>
+      <label class="toggle-row"><span class="toggle-text">Allow app sign-in on a phone</span><input type="checkbox" id="user-allow-pwa" class="toggle-input" role="switch" checked /></label>
     </div>
   `;
 
   const editOptions = isEdit ? `
     <div class="settings-group user-options">
-      <label class="toggle-row"><span class="toggle-text">Active<small>Inactive accounts cannot sign in.</small></span><input type="checkbox" id="user-active" class="toggle-input" role="switch" ${user.status === 'disabled' ? '' : 'checked'} ${user.role === 'superadmin' ? 'disabled' : ''} /></label>
-      <label class="toggle-row"><span class="toggle-text">Allow PWA login</span><input type="checkbox" id="user-allow-pwa" class="toggle-input" role="switch" ${user.pwaLoginAllowed === false ? '' : 'checked'} /></label>
+      <label class="toggle-row"><span class="toggle-text">Allow app sign-in on a phone</span><input type="checkbox" id="user-allow-pwa" class="toggle-input" role="switch" ${user.pwaLoginAllowed === false ? '' : 'checked'} /></label>
     </div>` : '';
 
   showFormModal(isEdit ? `Edit — ${user.fullName || user.email || user.username}` : 'Add team member', `
     <form id="user-form" novalidate>
       ${identityFields}
-      <div class="field">
-        <label for="user-role">Role</label>
-        <select id="user-role" required>${roleOptions}</select>
-      </div>
+      ${roleField}
       <fieldset class="field">
         <legend>Assign to stations</legend>
         <div class="checkbox-list" id="station-assign-list">${stationBoxes}</div>
@@ -1047,7 +1058,7 @@ async function showUserForm(user) {
     pumpFieldset.classList.toggle('is-disabled', !isStaffRole);
     if (!isStaffRole) {
       pumpList.innerHTML = '';
-      pumpHint.textContent = 'Only staff accounts use pump assignments — admins and managers work every pump.';
+      pumpHint.textContent = 'Only staff need a usual pump list — admins and managers can work every pump.';
       return;
     }
 
@@ -1080,7 +1091,7 @@ async function showUserForm(user) {
       </div>`;
     }).join('');
 
-    pumpHint.textContent = 'Optional standing assignment. The Roster board is the day-to-day tool — leave every box unticked and this person can be rostered onto any pump at their stations.';
+    pumpHint.textContent = 'Optional usual pumps. Use Who’s where for daily changes. Leave every box unticked to allow this person on any pump at their stations.';
     pumpList.querySelectorAll('input[type="checkbox"]').forEach(cb =>
       cb.addEventListener('change', () => {
         if (cb.checked) selectedPumps.add(cb.value);
@@ -1108,7 +1119,7 @@ async function showUserForm(user) {
       list.querySelectorAll('input[type="checkbox"]:checked')
     ).map(cb => cb.value);
     const pumpIds = role === 'staff' ? [...selectedPumps] : [];
-    const active = byId('user-active')?.checked !== false;
+    const active = isEdit ? user.status !== 'disabled' : byId('user-active')?.checked !== false;
     const allowPwaLogin = byId('user-allow-pwa')?.checked !== false;
 
     if (role !== 'superadmin' && stationIds.length === 0) {
@@ -1214,9 +1225,15 @@ function showUserCreated(result, credentials) {
       toastError('Copy failed — write the credentials down before closing.');
     }
   });
-  byId('create-another-user')?.addEventListener('click', async () => {
-    closeModal('generic-modal');
-    await showUserForm(null);
+  byId('create-another-user')?.addEventListener('click', async event => {
+    setBusy(event.currentTarget, true, 'Loading…');
+    try {
+      closeModal('generic-modal');
+      await showUserForm(null);
+    } catch (err) {
+      toastError(formatFirebaseError(err));
+      setBusy(event.currentTarget, false);
+    }
   });
 }
 
@@ -1227,34 +1244,12 @@ async function showCredentialsForm() {
 }
 
 
-async function deactivateUser(user) {
-  if (!user || !can('user.delete', { target: user })) {
-    toastError(denyReason('user.delete', { target: user }));
-    return;
-  }
-  const name = user.fullName || user.email || user.username || 'This user';
-  const ok = await confirmDialog({
-    title: `${ICONS.warning} Deactivate Account`,
-    message: `${name} will immediately lose access to PumpLog. History and assignments stay for audit. You can reactivate the account later.`,
-    confirmLabel: 'Deactivate ⏸️',
-    danger: true,
-  });
-  if (!ok) return;
-  try {
-    await deactivateUserAccount(user.id);
-    invalidateUsers();
-    toastSuccess('User Deactivated');
-    rerender();
-  } catch (err) {
-    toastError(formatFirebaseError(err));
-  }
-}
-
-async function activateUser(user) {
+async function activateUser(user, button = null) {
   if (!user || !can('user.update', { target: user })) {
     toastError(denyReason('user.update', { target: user }));
     return;
   }
+  setBusy(button, true, 'Activating…');
   try {
     await updateUserAccount(user.id, { active: true });
     invalidateUsers();
@@ -1262,25 +1257,33 @@ async function activateUser(user) {
     rerender();
   } catch (err) {
     toastError(formatFirebaseError(err));
+    setBusy(button, false);
   }
 }
 
-async function removeUser(user) {
+async function removeUser(user, button = null) {
   if (!user || !can('user.delete', { target: user })) {
     toastError(denyReason('user.delete', { target: user }));
     return;
   }
   const name = user.fullName || user.email || user.username || 'this user';
-  const ok = await confirmDelete(`${name} will permanently lose access. Their profile, secure identity, and sign-in credential will be deleted. Past shift records stay for audit.`);
+  const ok = await confirmDialog({
+    title: `${ICONS.warning} Remove app access?`,
+    message: `${name} will not be able to use PumpLog. Their account will be kept inactive so past shifts stay complete, and you can reactivate it later.`,
+    confirmLabel: `${ICONS.delete} Remove access`,
+    danger: true,
+  });
   if (!ok) return;
 
+  setBusy(button, true, 'Removing…');
   try {
     await removeUserAccount(user.id);
     invalidateUsers();
-    toastSuccess('User Removed');
+    toastSuccess('User Access Removed');
     rerender();
   } catch (err) {
     toastError(formatFirebaseError(err));
+    setBusy(button, false);
   }
 }
 
