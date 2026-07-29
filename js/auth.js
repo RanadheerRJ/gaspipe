@@ -245,7 +245,8 @@ export function canAccessStation(stationId) {
  *  station (pumps, rates, shifts, approvals, force-release, reset). */
 export function canManageStation(stationId) {
   if (!currentUserData || !stationId) return false;
-  return isSuperAdmin() || isStationAdmin() || (isManager() && myStationIds().includes(stationId));
+  return isSuperAdmin()
+    || ((isStationAdmin() || isManager()) && myStationIds().includes(stationId));
 }
 
 // ── Pump assignments ──────────────────────────────────────────────────
@@ -382,6 +383,7 @@ export function can(action, ctx = {}) {
     case 'report.viewOthers':
       return (superAdmin || stationAdmin || manager) && stationOk;
     case 'station.reset':
+    case 'stationSecurity.update':
       return (superAdmin || stationAdmin || manager) && stationOk;
 
     // ── Config page access (open to manager) ───────────────────────
@@ -443,6 +445,13 @@ export function denyReason(action, ctx = {}) {
   if (!me) return 'You are signed out.';
   const { target } = ctx;
 
+  if (action === 'pumpSession.end') {
+    if (ctx.activeUid && ctx.activeUid !== me.uid && !canManageStation(ctx.stationId)) {
+      return 'Another person is using this pump. Only they or a station manager can end the shift.';
+    }
+    return "This shift isn't showing as yours anymore. Refresh the page and try again.";
+  }
+
   if (action === 'user.update' || action === 'user.delete') {
     if (target?.id === me.uid) return 'You cannot modify your own account here.';
     if (action === 'user.delete' && target?.role === 'superadmin') return 'Super Admin accounts are protected.';
@@ -451,10 +460,37 @@ export function denyReason(action, ctx = {}) {
   }
   if (action.startsWith('rate.')) return 'Rates are controlled by Managers and Admins only.';
   if (action.startsWith('pump.')) return 'Only Managers and Admins can configure pumps.';
-  if (action.startsWith('assignment.')) return 'Only Managers and Admins can change the daily pump roster.';
+  if (action.startsWith('assignment.')) return 'Only Managers and Admins can change who works on each pump.';
   if (action === 'station.reset') return 'Only station managers can reset station data.';
+  if (action === 'stationSecurity.update') return 'Only Managers and Admins can change station security.';
   if (action === 'report.viewOthers') return 'Staff can only view their own report card.';
   if (action.startsWith('station.')) return 'Only a Super Admin can manage stations.';
   if (action.startsWith('pumpSession.')) return 'Only the active staff member or a station manager can do this.';
   return 'Your role does not allow this action.';
+}
+
+/**
+ * Permission-aware markup helper. Keep visibility decisions beside `can()` so
+ * a page cannot accidentally show a control that Firestore will reject.
+ */
+export function ifCan(action, ctx = {}, html = '') {
+  return can(action, ctx) ? html : '';
+}
+
+/**
+ * Apply the same permission decision to an element that already exists.
+ * Hiding is the default: unavailable controls should not become dead ends.
+ */
+export function applyPermission(el, action, ctx = {}, { hide = true } = {}) {
+  if (!el) return false;
+  const allowed = can(action, ctx);
+  if (hide) {
+    el.hidden = !allowed;
+  } else {
+    el.disabled = !allowed;
+    el.setAttribute('aria-disabled', String(!allowed));
+  }
+  if (!allowed) el.title = denyReason(action, ctx);
+  else if (el.title === denyReason(action, ctx)) el.removeAttribute('title');
+  return allowed;
 }

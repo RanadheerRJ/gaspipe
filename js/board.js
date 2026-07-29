@@ -1,50 +1,42 @@
-/* PumpLog — Daily pump roster board (Kanban / Trello style)
+/* PumpLog — Who is working on each pump today
  *
- * One column per pump, plus an "Available" column holding everyone who is
- * on shift at the station but not yet placed. Managers and admins move staff
- * cards between columns to build the day's roster; staff see the same board
- * read-only so they know where they are working.
- *
- * Storage: one document per pump per day —
+ * Touch-first daily board. One document per pump per day is kept at:
  *   stations/{stationId}/assignments/{YYYY-MM-DD}_{pumpId}
- *     { date, pumpId, pumpName, product, staffUids[], staffNames{}, ... }
  *
- * The board is a roster, not a lock. Whether a pump is *currently* occupied
- * is still owned by stations/{id}/pumpSessions/{pumpId}, and the clock-in
- * transaction remains the only thing that can claim one. The board decides
- * who is *allowed* to clock in today; the session decides who actually has it.
- *
- * Both layers are live: pumpSessions and assignments each have a snapshot
- * listener, so a card moved on the manager's phone appears on the staff
- * member's device without a refresh.
+ * Every station member sees the same pump cards. Managers and admins get an
+ * “Add staff” button; staff get the complete board without edit controls.
+ * Changes use taps (not drag-and-drop), write in one batch, and offer Undo.
  */
 
 import {
-  getDb, doc, setDoc, deleteDoc, writeBatch, serverTimestamp,
+  getDb, doc, writeBatch, serverTimestamp,
 } from './firebase.js';
 import {
-  getCurrentUserData, isStationOverseer, can, denyReason,
+  getCurrentUserData, isStationOverseer, can, ifCan, denyReason,
   formatFirebaseError, userDisplayName, setMyDailyPumps,
 } from './auth.js';
 import {
-  getPumps, getStaffForStation, getAssignments, getPumpSessions, getShifts,
+  getPumps, getStaffForStation, getAssignments, getPumpSessions,
   watchAssignments, watchPumpSessions, assignmentId, pumpIdsForUser,
-  getCurrentRateMap, invalidateStation,
+  invalidateStation,
 } from './store.js';
 import {
-  h, formatCurrency, formatVolume, formatTimeAgo, formatDateTime, getTodayDate,
-  openModal, closeModal, emptyState, toastSuccess, toastError, toast,
-  confirmDialog, setBusy, showSkeleton, timestampToDate,
+  h, formatDate, getTodayDate, openModal, emptyState,
+  toastAction, toastSuccess, toastError, confirmDialog, showSkeleton,
 } from './components.js';
 import { avatarHTML } from './profile.js';
 
 const DATE_KEY = 'pumplog:boardDate';
+const ASSIGNMENT_FIELDS = [
+  'date', 'pumpId', 'pumpName', 'product', 'staffUids', 'staffNames', 'note',
+  'createdAt', 'createdBy', 'updatedAt', 'updatedBy',
+];
 
-let ctx = null;              // { stationId, date, pumps, staff, ... }
+let ctx = null;
 let assignUnsub = null;
 let sessionUnsub = null;
 let tickTimer = null;
-let picked = null;           // uid "held" for tap-to-move on touch devices
+let pickerPumpId = null;
 
 export function initBoard() {}
 
@@ -57,13 +49,12 @@ export function stopBoardLive() {
   if (tickTimer) clearInterval(tickTimer);
   tickTimer = null;
   ctx = null;
-  picked = null;
+  pickerPumpId = null;
 }
 
-// ── Board date ──────────────────────────────────────────────────────────
+// ── Day picker ──────────────────────────────────────────────────────────
 export function getBoardDate() {
-  const saved = sessionStorage.getItem(DATE_KEY);
-  return saved || getTodayDate();
+  return sessionStorage.getItem(DATE_KEY) || getTodayDate();
 }
 
 function setBoardDate(date) {
@@ -71,628 +62,387 @@ function setBoardDate(date) {
   else sessionStorage.setItem(DATE_KEY, date);
 }
 
-// ── Lookups ─────────────────────────────────────────────────────────────
-const rowFor = (pumpId) => (ctx?.assignments || []).find(a => a.pumpId === pumpId) || null;
-const uidsOn = (pumpId) => rowFor(pumpId)?.staffUids || [];
-const sessionOn = (pumpId) =>
-  (ctx?.sessions || []).find(s => s.id === pumpId && s.status === 'active') || null;
-
-function staffById(uid) {
-  return (ctx?.staff || []).find(user => user.id === uid) || null;
+export function selectTodayOnBoard() {
+  setBoardDate(getTodayDate());
 }
 
-/** Everyone not placed on any pump for this date. */
-function benchUids() {
-  const placed = new Set((ctx?.assignments || []).flatMap(a => a.staffUids || []));
-  return (ctx?.staff || []).map(u => u.id).filter(uid => !placed.has(uid));
+function shiftDate(date, days) {
+  const value = new Date(`${date}T12:00:00`);
+  value.setDate(value.getDate() + days);
+  const pad = number => String(number).padStart(2, '0');
+  return `${value.getFullYear()}-${pad(value.getMonth() + 1)}-${pad(value.getDate())}`;
 }
 
-/**
- * What a rostered person is doing right now.
- *   working  — holds the live session on this pump
- *   elsewhere— clocked in, but on a different pump
- *   done     — closed at least one shift on this pump today
- *   waiting  — rostered, not started
- */
-function staffState(uid, pumpId) {
-  const here = sessionOn(pumpId);
-  if (here && here.activeUid === uid) {
-    return { key: 'working', label: 'On shift', icon: '🟢', since: here.clockInAt };
-  }
-  const other = (ctx?.sessions || []).find(s => s.status === 'active' && s.activeUid === uid);
-  if (other) {
-    const pump = ctx.pumps.find(p => p.id === other.id);
-    return { key: 'elsewhere', label: `On ${pump?.name || 'another pump'}`, icon: '🟡', since: other.clockInAt };
-  }
-  const done = (ctx?.shifts || []).filter(s => s.pumpId === pumpId
-    && (s.staffUid || s.staffId || s.createdBy) === uid);
-  if (done.length) {
-    const volume = done.reduce((sum, s) => sum + (Number(s.volume) || 0), 0);
-    const sales = done.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
-    return { key: 'done', label: 'Shift ended', icon: '✅', volume, sales, count: done.length };
-  }
-  return { key: 'waiting', label: 'Not started', icon: '⚪' };
+// ── Board lookups ───────────────────────────────────────────────────────
+const rowFor = pumpId => (ctx?.assignments || []).find(row => row.pumpId === pumpId) || null;
+const uidsOn = pumpId => rowFor(pumpId)?.staffUids || [];
+const sessionOn = pumpId =>
+  (ctx?.sessions || []).find(session => session.id === pumpId && session.status === 'active') || null;
+const pumpFor = pumpId => (ctx?.pumps || []).find(pump => pump.id === pumpId) || null;
+const staffById = uid => (ctx?.staff || []).find(person => person.id === uid || person.uid === uid) || null;
+
+function nameFor(uid, pumpId = '') {
+  const person = staffById(uid);
+  if (person) return userDisplayName(person);
+  const stored = rowFor(pumpId)?.staffNames?.[uid];
+  if (stored) return stored;
+  const me = getCurrentUserData();
+  if (me?.uid === uid) return userDisplayName(me);
+  return 'Staff member';
 }
 
-function elapsedLabel(value) {
-  const date = timestampToDate(value);
-  if (!date) return '';
-  const mins = Math.max(0, Math.round((Date.now() - date.getTime()) / 60000));
-  const hours = Math.floor(mins / 60);
-  return hours ? `${hours}h ${mins % 60}m` : `${mins}m`;
+function currentPumpFor(uid) {
+  return (ctx?.assignments || []).find(row => (row.staffUids || []).includes(uid))?.pumpId || '';
 }
 
-// ── Card + column markup ────────────────────────────────────────────────
-function staffCardHTML(uid, pumpId) {
-  const user = staffById(uid);
-  const name = user ? userDisplayName(user) : (rowFor(pumpId)?.staffNames?.[uid] || 'Staff member');
-  const state = pumpId ? staffState(uid, pumpId) : bencherState(uid);
-  const mayMove = ctx.mayManage;
+function selectedDayText() {
+  if (!ctx || ctx.date === getTodayDate()) return 'today';
+  return `on ${formatDate(ctx.date) || ctx.date}`;
+}
 
-  let detail = state.label;
-  if (state.key === 'working') detail = `On shift · ${elapsedLabel(state.since)}`;
-  if (state.key === 'done') {
-    detail = `${state.label} · ${formatVolume(state.volume)} · ${formatCurrency(state.sales)}`;
-  }
+function elapsed(value) {
+  const started = value?.toDate?.() || (value instanceof Date ? value : null);
+  if (!started) return '';
+  const minutes = Math.max(0, Math.floor((Date.now() - started.getTime()) / 60000));
+  if (minutes < 60) return `${minutes} min`;
+  return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
 
-  const login = user?.lastLogin ? `Signed in ${formatTimeAgo(user.lastLogin)}` : 'No sign-in yet';
-
-  return `<li class="board-card state-${state.key} ${picked === uid ? 'is-picked' : ''}"
-      data-uid="${h(uid)}" data-from="${h(pumpId || '')}"
-      ${mayMove ? 'draggable="true"' : ''}
-      tabindex="0" role="button"
-      aria-label="${h(name)} — ${h(detail)}${mayMove ? '. Activate to move.' : ''}">
-    ${avatarHTML(user || { fullName: name }, 'small')}
-    <span class="board-card-body">
-      <span class="board-card-name">${h(name)}</span>
-      <span class="board-card-meta">${h(state.icon)} ${h(detail)}</span>
-      <span class="board-card-sub">${h(login)}</span>
+// ── Pump cards ──────────────────────────────────────────────────────────
+function personHTML(uid, pumpId) {
+  const person = staffById(uid);
+  const name = nameFor(uid, pumpId);
+  const live = sessionOn(pumpId);
+  const working = live?.activeUid === uid;
+  return `<li class="board-person ${working ? 'is-working' : ''}">
+    ${avatarHTML(person || { fullName: name }, 'small')}
+    <span class="board-person-copy">
+      <strong>${h(name)}</strong>
+      <small>${working ? `🟢 Working now${elapsed(live.clockInAt) ? ` · ${h(elapsed(live.clockInAt))}` : ''}` : `⚪ Added here ${h(selectedDayText())}`}</small>
     </span>
-    ${mayMove ? '<span class="board-card-grip" aria-hidden="true">⠿</span>' : ''}
   </li>`;
 }
 
-/** State for someone sitting on the bench (not rostered anywhere). */
-function bencherState(uid) {
-  const active = (ctx?.sessions || []).find(s => s.status === 'active' && s.activeUid === uid);
-  if (active) {
-    const pump = ctx.pumps.find(p => p.id === active.id);
-    return { key: 'elsewhere', label: `On ${pump?.name || 'a pump'} (unrostered)`, icon: '🟡', since: active.clockInAt };
-  }
-  const done = (ctx?.shifts || []).filter(s => (s.staffUid || s.staffId || s.createdBy) === uid);
-  if (done.length) {
-    return {
-      key: 'done',
-      label: `${done.length} shift${done.length === 1 ? '' : 's'} today`,
-      icon: '✅',
-      volume: done.reduce((sum, s) => sum + (Number(s.volume) || 0), 0),
-      sales: done.reduce((sum, s) => sum + (Number(s.sales) || 0), 0),
-      count: done.length,
-    };
-  }
-  return { key: 'waiting', label: 'Available', icon: '⚪' };
-}
-
-function pumpColumnHTML(pump) {
+function pumpCardHTML(pump) {
   const uids = uidsOn(pump.id);
   const session = sessionOn(pump.id);
-  const rate = ctx.rateMap?.[pump.product];
-  const shiftsHere = (ctx.shifts || []).filter(s => s.pumpId === pump.id);
-  const volume = shiftsHere.reduce((sum, s) => sum + (Number(s.volume) || 0), 0);
-  const sales = shiftsHere.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
-
   const status = session
-    ? `<span class="status-chip mine">● ${h(session.activeName || 'In use')} · ${h(elapsedLabel(session.clockInAt))}</span>`
-    : '<span class="status-chip idle">○ Idle</span>';
+    ? `<span class="board-pump-status is-active" role="status">🔒 Active now · ${h(session.activeName || 'In use')}${elapsed(session.clockInAt) ? ` · ${h(elapsed(session.clockInAt))}` : ''}</span>`
+    : '<span class="board-pump-status is-idle" role="status">✅ Idle now · ready</span>';
+  const people = uids.length
+    ? `<ul class="board-people">${uids.map(uid => personHTML(uid, pump.id)).join('')}</ul>`
+    : emptyState('👤', ctx.mayManage
+      ? `No one is added here ${selectedDayText()} — tap Add staff.`
+      : `No one is added here ${selectedDayText()}.`);
+  const addButton = ifCan('assignment.manage', { stationId: ctx.stationId }, `
+    <button type="button" class="btn btn-primary board-add" data-pump-id="${h(pump.id)}">
+      ➕ Add or remove staff
+    </button>`);
 
-  const cards = uids.length
-    ? `<ul class="board-card-list">${uids.map(uid => staffCardHTML(uid, pump.id)).join('')}</ul>`
-    : `<p class="board-empty">${ctx.mayManage ? 'Drop a staff card here' : 'Nobody rostered'}</p>`;
-
-  return `<section class="board-column" data-pump-id="${h(pump.id)}" aria-label="${h(pump.name)} roster">
-    <header class="board-column-head">
-      <div class="board-column-title">
-        <span class="board-column-icon" aria-hidden="true">⛽</span>
-        <div>
-          <h3>${h(pump.name)}</h3>
-          <p>${h(pump.product || 'No product')}${rate ? ` · ${h(formatCurrency(rate.rate))}/L` : ''}</p>
-        </div>
-        <span class="board-count" title="${uids.length} rostered">${uids.length}</span>
+  return `<article class="board-pump-card" aria-labelledby="board-pump-${h(pump.id)}">
+    <header class="board-pump-head">
+      <span class="board-pump-icon" aria-hidden="true">⛽</span>
+      <div class="board-pump-title">
+        <h3 id="board-pump-${h(pump.id)}">${h(pump.name || 'Pump')}</h3>
+        <p>${h(pump.product || 'Product not set')}</p>
       </div>
       ${status}
     </header>
-    <div class="board-dropzone" data-drop="${h(pump.id)}">
-      ${cards}
+    <div class="board-pump-people">
+      <h4>Who’s on ${h(pump.name || 'this pump')} ${h(selectedDayText())}</h4>
+      ${people}
     </div>
-    <footer class="board-column-foot">
-      <span>${shiftsHere.length} shift${shiftsHere.length === 1 ? '' : 's'} · ${formatVolume(volume)} · ${formatCurrency(sales)}</span>
-      ${ctx.mayManage ? `<button type="button" class="btn btn-secondary btn-small board-add" data-pump-id="${h(pump.id)}">➕ Assign</button>` : ''}
-    </footer>
-  </section>`;
+    ${addButton ? `<footer class="board-pump-actions">${addButton}</footer>` : ''}
+  </article>`;
 }
 
-function benchColumnHTML() {
-  const uids = benchUids();
-  const cards = uids.length
-    ? `<ul class="board-card-list">${uids.map(uid => staffCardHTML(uid, '')).join('')}</ul>`
-    : '<p class="board-empty">Everyone is rostered 🎉</p>';
-
-  return `<section class="board-column board-column-bench" data-pump-id="" aria-label="Available staff">
-    <header class="board-column-head">
-      <div class="board-column-title">
-        <span class="board-column-icon" aria-hidden="true">👥</span>
-        <div>
-          <h3>Available</h3>
-          <p>Not on a pump yet</p>
-        </div>
-        <span class="board-count">${uids.length}</span>
-      </div>
-    </header>
-    <div class="board-dropzone" data-drop="">
-      ${cards}
-    </div>
-    <footer class="board-column-foot">
-      <span>${ctx.staff.length} staff at this station</span>
-    </footer>
-  </section>`;
-}
-
-// ── Painting ────────────────────────────────────────────────────────────
 function paintBoard() {
-  const host = document.getElementById('board-columns');
+  const host = document.getElementById('board-cards');
   if (!ctx || !host) return;
-
-  host.innerHTML = `${benchColumnHTML()}${ctx.pumps.map(pumpColumnHTML).join('')}`;
-  wireBoardInteractions();
+  host.innerHTML = ctx.pumps.map(pumpCardHTML).join('');
+  host.querySelectorAll('.board-add').forEach(button =>
+    button.addEventListener('click', () => openStaffPicker(button.dataset.pumpId)));
   paintSummary();
   publishMyDailyPumps();
 }
 
 function paintSummary() {
-  const el = document.getElementById('board-summary');
-  if (!el || !ctx) return;
-  const rostered = new Set((ctx.assignments || []).flatMap(a => a.staffUids || [])).size;
-  const active = (ctx.sessions || []).filter(s => s.status === 'active').length;
-  const covered = ctx.pumps.filter(p => uidsOn(p.id).length).length;
-  el.textContent = `${rostered} of ${ctx.staff.length} staff rostered · ${covered} of ${ctx.pumps.length} pumps covered · ${active} running now`;
+  const summary = document.getElementById('board-summary');
+  if (!summary || !ctx) return;
+  const people = new Set((ctx.assignments || []).flatMap(row => row.staffUids || [])).size;
+  const covered = ctx.pumps.filter(pump => uidsOn(pump.id).length > 0).length;
+  const active = (ctx.sessions || []).filter(session => session.status === 'active').length;
+  summary.textContent = `${covered} of ${ctx.pumps.length} pumps have staff · ${people} people added · ${active} active now`;
 }
 
-/**
- * Tell the RBAC layer which pumps today's board grants the signed-in user,
- * so Start shift stops being blocked the moment a manager rosters them.
- */
 function publishMyDailyPumps() {
-  if (!ctx) return;
   const me = getCurrentUserData();
-  if (!me) return;
-  if (ctx.date !== getTodayDate()) return;   // only today's board grants access
+  if (!ctx || !me || ctx.date !== getTodayDate()) return;
   setMyDailyPumps(pumpIdsForUser(ctx.assignments, me.uid), ctx.date);
 }
 
-// ── Interactions ────────────────────────────────────────────────────────
-function wireBoardInteractions() {
-  const host = document.getElementById('board-columns');
-  if (!host) return;
+// ── Tap-first staff picker ──────────────────────────────────────────────
+function pickerRowsHTML(pumpId) {
+  if (!ctx?.staff.length) {
+    return emptyState('👥', 'No staff are at this station yet. Add staff in Settings first.');
+  }
+  return `<div class="board-picker-list">${ctx.staff.map(person => {
+    const uid = person.id || person.uid;
+    const currentPumpId = currentPumpFor(uid);
+    const onThisPump = currentPumpId === pumpId;
+    const otherPump = currentPumpId ? pumpFor(currentPumpId) : null;
+    const action = onThisPump
+      ? '✓ On this pump · tap to remove'
+      : otherPump
+        ? `Move from ${otherPump.name}`
+        : '+ Add to this pump';
+    return `<button type="button" class="board-picker-person ${onThisPump ? 'is-selected' : ''}" data-picker-uid="${h(uid)}">
+      ${avatarHTML(person, 'small')}
+      <span><strong>${h(userDisplayName(person))}</strong><small>${h(action)}</small></span>
+    </button>`;
+  }).join('')}</div>`;
+}
 
-  host.querySelectorAll('.board-card').forEach(card => {
-    card.addEventListener('click', () => onCardActivate(card));
-    card.addEventListener('keydown', e => {
-      if (e.key === 'Enter' || e.key === ' ') { e.preventDefault(); onCardActivate(card); }
-    });
-
-    if (!ctx.mayManage) return;
-    card.addEventListener('dragstart', e => {
-      e.dataTransfer.effectAllowed = 'move';
-      e.dataTransfer.setData('text/plain', JSON.stringify({
-        uid: card.dataset.uid, from: card.dataset.from,
-      }));
-      card.classList.add('is-dragging');
-    });
-    card.addEventListener('dragend', () => card.classList.remove('is-dragging'));
-  });
-
-  if (!ctx.mayManage) return;
-
-  host.querySelectorAll('.board-dropzone').forEach(zone => {
-    zone.addEventListener('dragover', e => {
-      e.preventDefault();
-      e.dataTransfer.dropEffect = 'move';
-      zone.classList.add('is-over');
-    });
-    zone.addEventListener('dragleave', () => zone.classList.remove('is-over'));
-    zone.addEventListener('drop', async e => {
-      e.preventDefault();
-      zone.classList.remove('is-over');
-      let payload;
-      try { payload = JSON.parse(e.dataTransfer.getData('text/plain')); } catch { return; }
-      await moveStaff(payload.uid, payload.from || '', zone.dataset.drop || '');
-    });
-    // Tap-to-move: with a card "picked up", tapping a column drops it there.
-    zone.addEventListener('click', async () => {
-      if (!picked) return;
-      const from = findCurrentPump(picked);
-      const uid = picked;
-      picked = null;
-      await moveStaff(uid, from, zone.dataset.drop || '');
-    });
-  });
-
-  host.querySelectorAll('.board-add').forEach(btn => {
-    btn.addEventListener('click', e => {
-      e.stopPropagation();
-      openAssignPicker(btn.dataset.pumpId);
-    });
+function paintPickerList() {
+  const host = document.getElementById('board-picker-list');
+  if (!host || !ctx || !pickerPumpId) return;
+  host.innerHTML = pickerRowsHTML(pickerPumpId);
+  host.querySelectorAll('[data-picker-uid]').forEach(button => {
+    button.addEventListener('click', () => changePersonOnPump(button.dataset.pickerUid, pickerPumpId, button));
   });
 }
 
-function findCurrentPump(uid) {
-  const row = (ctx.assignments || []).find(a => (a.staffUids || []).includes(uid));
-  return row ? row.pumpId : '';
-}
-
-function onCardActivate(card) {
-  const uid = card.dataset.uid;
-  if (!ctx.mayManage) { openStaffDetail(uid); return; }
-  // Toggle "picked up" state — the next column tap moves them.
-  if (picked === uid) {
-    picked = null;
-    paintBoard();
+function openStaffPicker(pumpId) {
+  if (!ctx || !can('assignment.manage', { stationId: ctx.stationId })) {
+    toastError(denyReason('assignment.manage', { stationId: ctx?.stationId }));
     return;
   }
-  picked = uid;
-  paintBoard();
-  const user = staffById(uid);
-  toast(`${userDisplayName(user) || 'Staff'} picked up — tap a pump column to move, or tap the card again to cancel.`, 'info', 3500);
-}
-
-function openStaffDetail(uid) {
-  const user = staffById(uid);
-  if (!user) return;
-  const pumpId = findCurrentPump(uid);
-  const pump = ctx.pumps.find(p => p.id === pumpId);
-  const state = pumpId ? staffState(uid, pumpId) : bencherState(uid);
-  document.getElementById('modal-title').textContent = userDisplayName(user);
+  const pump = pumpFor(pumpId);
+  if (!pump) return;
+  pickerPumpId = pumpId;
+  document.getElementById('modal-title').textContent = `Staff on ${pump.name}`;
   document.getElementById('modal-body').innerHTML = `
-    <div class="board-detail-head">${avatarHTML(user, 'medium')}
-      <div><strong>${h(userDisplayName(user))}</strong>
-      <small>${h(user.email || user.username || '')}</small></div></div>
-    <dl class="profile-settings-list">
-      <dt>Rostered to</dt><dd>${h(pump?.name || 'Not rostered today')}</dd>
-      <dt>Status</dt><dd>${h(state.icon)} ${h(state.label)}</dd>
-      <dt>Last sign-in</dt><dd>${h(user.lastLogin ? formatDateTime(user.lastLogin) : 'Never')}</dd>
-    </dl>`;
+    <p class="modal-intro">Tap a name to add them ${h(selectedDayText())}. Tap a checked name to remove them. A person can be on one pump per day.</p>
+    <p id="board-picker-error" class="form-error hidden" role="alert"></p>
+    <div id="board-picker-list"></div>`;
+  paintPickerList();
   openModal('generic-modal');
 }
 
-// ── Writes ──────────────────────────────────────────────────────────────
-async function moveStaff(uid, fromPumpId, toPumpId) {
-  if (!ctx || !uid || fromPumpId === toPumpId) { paintBoard(); return; }
-  if (!can('assignment.manage', { stationId: ctx.stationId })) {
-    toastError(denyReason('assignment.manage'));
-    return;
-  }
-
-  // A staff member holding a live session should not be quietly moved off it.
-  const live = (ctx.sessions || []).find(s => s.status === 'active' && s.activeUid === uid);
-  if (live && live.id === fromPumpId) {
-    const pump = ctx.pumps.find(p => p.id === fromPumpId);
-    const user = staffById(uid);
-    const ok = await confirmDialog({
-      title: '⚠️ Staff member is on shift',
-      message: `${userDisplayName(user)} is clocked in on ${pump?.name || 'this pump'} right now. Moving the roster card does not end that shift — the pump stays locked until they clock out or a manager ends it. Move them anyway?`,
-      confirmLabel: 'Move anyway',
-      danger: true,
-    });
-    if (!ok) { paintBoard(); return; }
-  }
-
-  const user = staffById(uid);
-  const name = user ? userDisplayName(user) : 'Staff member';
-
-  try {
-    await writeAssignment(fromPumpId, uids => uids.filter(id => id !== uid));
-    await writeAssignment(toPumpId, uids => [...new Set([...uids, uid])], { uid, name });
-    invalidateStation(ctx.stationId);
-    const target = ctx.pumps.find(p => p.id === toPumpId);
-    toastSuccess(toPumpId ? `${name} → ${target?.name || 'pump'}` : `${name} moved to Available`);
-    await reloadAssignments();
-  } catch (err) {
-    toastError(formatFirebaseError(err));
-    await reloadAssignments();
-  }
+function cleanRow(row) {
+  if (!row) return null;
+  const clean = {};
+  ASSIGNMENT_FIELDS.forEach(key => {
+    if (row[key] !== undefined) clean[key] = row[key];
+  });
+  return clean;
 }
 
-/**
- * Rewrite one pump's roster document for the board's date.
- * `mutate` receives the current uid list and returns the next one.
- */
-async function writeAssignment(pumpId, mutate, addName = null) {
-  if (!pumpId) return;                   // the bench is "absence of a doc"
-  const pump = ctx.pumps.find(p => p.id === pumpId);
-  if (!pump) return;
-
-  const row = rowFor(pumpId);
-  const nextUids = mutate([...(row?.staffUids || [])]);
-  const names = { ...(row?.staffNames || {}) };
-  if (addName) names[addName.uid] = addName.name;
-  for (const key of Object.keys(names)) {
-    if (!nextUids.includes(key)) delete names[key];
-  }
-
-  const ref = doc(getDb(), 'stations', ctx.stationId, 'assignments', assignmentId(ctx.date, pumpId));
+function rowWithPerson(row, pump, uid, name, add) {
+  const currentUids = [...(row?.staffUids || [])];
+  const staffUids = add
+    ? [...new Set([...currentUids, uid])]
+    : currentUids.filter(value => value !== uid);
+  const staffNames = { ...(row?.staffNames || {}) };
+  if (add) staffNames[uid] = name;
+  else delete staffNames[uid];
   const me = getCurrentUserData();
-
-  if (nextUids.length === 0) {
-    await deleteDoc(ref).catch(async (err) => {
-      if (err?.code !== 'not-found') throw err;
-    });
-    return;
-  }
-
-  await setDoc(ref, {
+  return {
     date: ctx.date,
-    pumpId,
+    pumpId: pump.id,
     pumpName: pump.name || 'Pump',
     product: pump.product || '',
-    staffUids: nextUids,
-    staffNames: names,
+    staffUids,
+    staffNames,
+    ...(row?.note ? { note: row.note } : {}),
+    createdAt: row?.createdAt || serverTimestamp(),
+    createdBy: row?.createdBy || me?.uid || 'unknown',
     updatedAt: serverTimestamp(),
     updatedBy: me?.uid || 'unknown',
-    ...(row ? {} : { createdAt: serverTimestamp(), createdBy: me?.uid || 'unknown' }),
-  }, { merge: true });
+  };
 }
 
-async function reloadAssignments() {
-  if (!ctx) return;
-  invalidateStation(ctx.stationId);
-  ctx.assignments = await getAssignments(ctx.stationId, ctx.date).catch(() => ctx.assignments);
-  paintBoard();
-}
-
-// ── Assign picker (accessible alternative to dragging) ──────────────────
-function openAssignPicker(pumpId) {
-  const pump = ctx.pumps.find(p => p.id === pumpId);
-  if (!pump) return;
-  const current = new Set(uidsOn(pumpId));
-
-  const rows = ctx.staff.map(user => {
-    const elsewhere = findCurrentPump(user.id);
-    const busy = elsewhere && elsewhere !== pumpId
-      ? ` <span class="muted-note">on ${h(ctx.pumps.find(p => p.id === elsewhere)?.name || 'another pump')}</span>`
-      : '';
-    return `<div class="checkbox-item">
-      <input type="checkbox" id="roster-${h(user.id)}" value="${h(user.id)}" ${current.has(user.id) ? 'checked' : ''} />
-      <label for="roster-${h(user.id)}">${h(userDisplayName(user))}${busy}</label>
-    </div>`;
-  }).join('');
-
-  document.getElementById('modal-title').textContent = `Assign — ${pump.name}`;
-  document.getElementById('modal-body').innerHTML = `<form id="roster-form" novalidate>
-    <p class="modal-intro">Who works ${h(pump.name)} on ${h(ctx.date)}? Ticking someone already on another pump moves them here.</p>
-    ${ctx.staff.length ? `<div class="checkbox-list">${rows}</div>`
-      : '<p class="muted-note">No staff are assigned to this station yet. Add them from Config → Team.</p>'}
-    <p id="roster-error" class="form-error hidden" role="alert"></p>
-    <button type="submit" class="btn btn-primary btn-full mt-16" ${ctx.staff.length ? '' : 'disabled'}>Save roster</button>
-  </form>`;
-  openModal('generic-modal');
-
-  document.getElementById('roster-form').addEventListener('submit', async e => {
-    e.preventDefault();
-    const button = e.currentTarget.querySelector('button[type="submit"]');
-    const error = document.getElementById('roster-error');
-    const selected = Array.from(e.currentTarget.querySelectorAll('input:checked')).map(i => i.value);
-    setBusy(button, true, 'Saving…');
-    try {
-      // Someone ticked here must leave whatever pump they were on.
-      for (const uid of selected) {
-        const from = findCurrentPump(uid);
-        if (from && from !== pumpId) {
-          await writeAssignment(from, uids => uids.filter(id => id !== uid));
-        }
-      }
-      const names = {};
-      for (const uid of selected) {
-        const user = staffById(uid);
-        names[uid] = user ? userDisplayName(user) : 'Staff member';
-      }
-      await writeAssignmentExact(pumpId, selected, names);
-      invalidateStation(ctx.stationId);
-      closeModal('generic-modal');
-      toastSuccess(`Roster saved — ${pump.name}`);
-      await reloadAssignments();
-    } catch (err) {
-      error.textContent = `❌ ${formatFirebaseError(err)}`;
-      error.classList.remove('hidden');
-      setBusy(button, false);
-    }
-  });
-}
-
-async function writeAssignmentExact(pumpId, uids, names) {
-  const pump = ctx.pumps.find(p => p.id === pumpId);
+function queueRow(batch, pumpId, row) {
   const ref = doc(getDb(), 'stations', ctx.stationId, 'assignments', assignmentId(ctx.date, pumpId));
-  const me = getCurrentUserData();
-  if (!uids.length) {
-    await deleteDoc(ref).catch(err => { if (err?.code !== 'not-found') throw err; });
-    return;
-  }
-  await setDoc(ref, {
-    date: ctx.date,
-    pumpId,
-    pumpName: pump?.name || 'Pump',
-    product: pump?.product || '',
-    staffUids: uids,
-    staffNames: names,
-    createdAt: serverTimestamp(),
-    createdBy: me?.uid || 'unknown',
-    updatedAt: serverTimestamp(),
-    updatedBy: me?.uid || 'unknown',
-  }, { merge: true });
+  if (!row || !row.staffUids?.length) batch.delete(ref);
+  else batch.set(ref, row);
 }
 
-// ── Bulk helpers ────────────────────────────────────────────────────────
-async function copyPreviousDay() {
-  if (!ctx || !can('assignment.manage', { stationId: ctx.stationId })) return;
-  const previous = getTodayDate(-1) === ctx.date ? getTodayDate(-2) : shiftDate(ctx.date, -1);
-  const rows = await getAssignments(ctx.stationId, previous).catch(() => []);
-  if (!rows.length) { toast(`No roster found for ${previous}.`, 'info'); return; }
-
-  const ok = await confirmDialog({
-    title: 'Copy previous roster',
-    message: `Copy the roster from ${previous} onto ${ctx.date}? This replaces the current board for this date.`,
-    confirmLabel: 'Copy roster',
+function replaceLocalRows(changes) {
+  const changedIds = new Set(changes.keys());
+  ctx.assignments = ctx.assignments.filter(row => !changedIds.has(row.pumpId));
+  changes.forEach((row, pumpId) => {
+    if (row?.staffUids?.length) ctx.assignments.push({ id: assignmentId(ctx.date, pumpId), ...row });
   });
-  if (!ok) return;
-
-  try {
-    const batch = writeBatch(getDb());
-    const me = getCurrentUserData();
-    // Clear the day first so removals on the source day carry over.
-    for (const row of ctx.assignments) {
-      batch.delete(doc(getDb(), 'stations', ctx.stationId, 'assignments', assignmentId(ctx.date, row.pumpId)));
-    }
-    for (const row of rows) {
-      if (!(row.staffUids || []).length) continue;
-      batch.set(doc(getDb(), 'stations', ctx.stationId, 'assignments', assignmentId(ctx.date, row.pumpId)), {
-        date: ctx.date,
-        pumpId: row.pumpId,
-        pumpName: row.pumpName || '',
-        product: row.product || '',
-        staffUids: row.staffUids,
-        staffNames: row.staffNames || {},
-        createdAt: serverTimestamp(),
-        createdBy: me?.uid || 'unknown',
-        updatedAt: serverTimestamp(),
-        updatedBy: me?.uid || 'unknown',
-      });
-    }
-    await batch.commit();
-    toastSuccess(`Roster copied from ${previous}`);
-    await reloadAssignments();
-  } catch (err) {
-    toastError(formatFirebaseError(err));
-  }
+  paintBoard();
+  paintPickerList();
 }
 
-async function clearBoard() {
-  if (!ctx || !can('assignment.manage', { stationId: ctx.stationId })) return;
-  if (!ctx.assignments.length) { toast('The board is already empty.', 'info'); return; }
-  const ok = await confirmDialog({
-    title: '⚠️ Clear the board',
-    message: `Remove every roster card for ${ctx.date}? Shifts already recorded are not affected, and live pump locks stay as they are.`,
-    confirmLabel: 'Clear board',
+async function confirmLiveMove(uid, fromPumpId, toPumpId) {
+  const live = (ctx.sessions || []).find(session => session.status === 'active' && session.activeUid === uid);
+  if (!live || live.id !== fromPumpId) return true;
+  const name = nameFor(uid, fromPumpId);
+  const from = pumpFor(fromPumpId)?.name || 'this pump';
+  const destination = toPumpId ? pumpFor(toPumpId)?.name || 'another pump' : 'today’s list';
+  return confirmDialog({
+    title: '⚠️ This person is working now',
+    message: `${name} is using ${from}. This change only updates today’s staff list; it will not end their shift or unlock the pump. ${toPumpId ? `Move them to ${destination} anyway?` : 'Remove them anyway?'}`,
+    confirmLabel: toPumpId ? 'Move staff' : 'Remove staff',
     danger: true,
   });
-  if (!ok) return;
+}
+
+async function restoreRows(before) {
+  if (!ctx || !can('assignment.manage', { stationId: ctx.stationId })) {
+    const error = new Error(denyReason('assignment.manage', { stationId: ctx?.stationId }));
+    error.userMessage = error.message;
+    throw error;
+  }
   try {
     const batch = writeBatch(getDb());
-    for (const row of ctx.assignments) {
-      batch.delete(doc(getDb(), 'stations', ctx.stationId, 'assignments', assignmentId(ctx.date, row.pumpId)));
-    }
+    before.forEach((row, pumpId) => queueRow(batch, pumpId, row));
     await batch.commit();
-    toastSuccess('Board cleared');
-    await reloadAssignments();
+    invalidateStation(ctx.stationId);
+    replaceLocalRows(before);
+    toastSuccess('Change undone');
   } catch (err) {
-    toastError(formatFirebaseError(err));
+    err.userMessage = formatFirebaseError(err);
+    throw err;
   }
 }
 
-function shiftDate(date, days) {
-  const d = new Date(`${date}T12:00:00`);
-  d.setDate(d.getDate() + days);
-  const pad = n => String(n).padStart(2, '0');
-  return `${d.getFullYear()}-${pad(d.getMonth() + 1)}-${pad(d.getDate())}`;
+async function changePersonOnPump(uid, toPumpId, button) {
+  if (!ctx || !uid || !can('assignment.manage', { stationId: ctx.stationId })) {
+    toastError(denyReason('assignment.manage', { stationId: ctx?.stationId }));
+    return;
+  }
+
+  const fromPumpId = currentPumpFor(uid);
+  const removing = fromPumpId === toPumpId;
+  if (fromPumpId && !(await confirmLiveMove(uid, fromPumpId, removing ? '' : toPumpId))) return;
+
+  const name = nameFor(uid, fromPumpId || toPumpId);
+  const changedIds = new Set([toPumpId]);
+  if (fromPumpId && fromPumpId !== toPumpId) changedIds.add(fromPumpId);
+  const before = new Map([...changedIds].map(pumpId => [pumpId, cleanRow(rowFor(pumpId))]));
+  const after = new Map();
+
+  if (fromPumpId && fromPumpId !== toPumpId) {
+    after.set(fromPumpId, rowWithPerson(rowFor(fromPumpId), pumpFor(fromPumpId), uid, name, false));
+  }
+  after.set(toPumpId, rowWithPerson(rowFor(toPumpId), pumpFor(toPumpId), uid, name, !removing));
+
+  button.disabled = true;
+  button.setAttribute('aria-busy', 'true');
+  try {
+    const batch = writeBatch(getDb());
+    after.forEach((row, pumpId) => queueRow(batch, pumpId, row));
+    await batch.commit();
+    invalidateStation(ctx.stationId);
+    replaceLocalRows(after);
+
+    const pumpName = pumpFor(toPumpId)?.name || 'this pump';
+    const message = removing
+      ? `Removed ${name} from ${pumpName}`
+      : `Added ${name} to ${pumpName}`;
+    toastAction(message, {
+      label: 'Undo',
+      onAction: () => restoreRows(before),
+      type: 'success',
+      timeout: 9000,
+    });
+  } catch (err) {
+    const error = document.getElementById('board-picker-error');
+    if (error) {
+      error.textContent = `❌ ${formatFirebaseError(err)}`;
+      error.classList.remove('hidden');
+    } else {
+      toastError(formatFirebaseError(err));
+    }
+    button.disabled = false;
+    button.removeAttribute('aria-busy');
+  }
 }
 
-// ── Render ──────────────────────────────────────────────────────────────
+// ── Render and live updates ─────────────────────────────────────────────
 export async function renderBoard(stationId) {
   stopBoardLive();
   const content = document.getElementById('page-content');
 
   if (!stationId) {
-    content.innerHTML = emptyState('🗂️', 'Select a station to see its roster board.');
+    content.innerHTML = emptyState('⛽', 'Choose a station to see who is working on each pump.');
+    return;
+  }
+  if (!can('assignment.view', { stationId })) {
+    content.innerHTML = emptyState('🔒', 'This station is not assigned to you.');
     return;
   }
 
   showSkeleton(3);
   const date = getBoardDate();
-
   try {
     const mayManage = can('assignment.manage', { stationId });
-    const [pumps, staff, assignments, sessions, shifts, rateMap] = await Promise.all([
+    const [pumps, staff, assignments, sessions] = await Promise.all([
       getPumps(stationId),
-      getStaffForStation(stationId).catch(() => []),
-      getAssignments(stationId, date).catch(() => []),
+      mayManage ? getStaffForStation(stationId).catch(() => []) : Promise.resolve([]),
+      getAssignments(stationId, date),
       getPumpSessions(stationId),
-      getShifts(stationId, { from: date }).catch(() => []),
-      getCurrentRateMap(stationId).catch(() => ({})),
     ]);
+    ctx = { stationId, date, pumps, staff, assignments, sessions, mayManage };
 
-    ctx = {
-      stationId, date, pumps, staff, assignments, sessions,
-      shifts: shifts.filter(s => s.date === date),
-      rateMap, mayManage,
-    };
-
-    if (pumps.length === 0) {
-      content.innerHTML = `${boardHeaderHTML(date, mayManage)}${emptyState('⛽', can('pump.create', { stationId })
-        ? 'No pumps yet. Add them from Config → Pumps, then come back to build the roster.'
-        : 'No pumps configured yet. Ask your manager to add them.')}`;
-      wireBoardHeader();
-      return;
-    }
-
-    content.innerHTML = `${boardHeaderHTML(date, mayManage)}
-      <div id="board-columns" class="board-columns"></div>
-      <p id="board-note" class="section-hint" aria-live="polite"></p>`;
-
-    paintBoard();
+    content.innerHTML = `${boardHeaderHTML(date)}
+      ${pumps.length
+        ? '<div id="board-cards" class="board-cards"></div>'
+        : emptyState('⛽', mayManage
+          ? 'No pumps are set up yet. Add a pump in Settings first.'
+          : 'No pumps are set up yet. Ask your manager to add one.')}
+      <p id="board-note" class="section-hint" role="status" aria-live="polite"></p>`;
     wireBoardHeader();
-    startBoardLive(stationId, date);
+    if (pumps.length) {
+      paintBoard();
+      startBoardLive(stationId, date);
+    }
   } catch (err) {
-    content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
+    content.innerHTML = emptyState('⚠️', `${formatFirebaseError(err)} Refresh the page to try again.`);
   }
 }
 
-function boardHeaderHTML(date, mayManage) {
+function boardHeaderHTML(date) {
   const isToday = date === getTodayDate();
-  const hint = mayManage
-    ? 'Drag a staff card onto a pump — or tap the card, then tap a column. Changes are live on every device.'
-    : 'Your station roster for the day. Cards show who is on which pump and what they are doing right now.';
-
   return `<div class="page-head board-head">
-      <div>
-        <h2 class="page-title">Roster board</h2>
-        <p class="section-hint">${h(hint)}</p>
-      </div>
-      <span class="live-badge" role="status"><span class="live-dot" aria-hidden="true"></span>LIVE</span>
+    <div>
+      <h2 class="page-title">Who’s working where?</h2>
+      <p class="section-hint">${ctx?.mayManage
+        ? 'Tap Add staff on a pump, then tap a name. Everyone sees changes right away.'
+        : 'See who is working on every pump. Your manager makes any changes.'}</p>
     </div>
-    <div class="board-toolbar">
-      <div class="board-date-group">
-        <button type="button" class="icon-btn" id="board-prev" aria-label="Previous day" title="Previous day">‹</button>
-        <input type="date" id="board-date" class="dash-date-input" value="${h(date)}" aria-label="Roster date" />
-        <button type="button" class="icon-btn" id="board-next" aria-label="Next day" title="Next day">›</button>
-        ${isToday ? '<span class="tag tag-on">Today</span>'
-          : '<button type="button" class="btn btn-secondary btn-small" id="board-today">Jump to today</button>'}
-      </div>
-      ${mayManage ? `<div class="board-actions">
-        <button type="button" class="btn btn-secondary btn-small" id="board-copy">⧉ Copy previous day</button>
-        <button type="button" class="btn btn-secondary btn-small" id="board-clear">🧹 Clear</button>
-      </div>` : ''}
+    <span class="live-badge" role="status"><span class="live-dot" aria-hidden="true"></span>Live</span>
+  </div>
+  <div class="board-toolbar">
+    <button type="button" class="btn btn-secondary board-day-button" id="board-prev">‹ Previous day</button>
+    <div class="board-date-field">
+      <label for="board-date">Day</label>
+      <input type="date" id="board-date" class="dash-date-input" value="${h(date)}" />
     </div>
-    <p class="feed-summary" id="board-summary"></p>`;
+    <button type="button" class="btn btn-secondary board-day-button" id="board-next">Next day ›</button>
+    ${isToday ? '<span class="tag tag-on">Today</span>'
+      : '<button type="button" class="btn btn-primary" id="board-today">Go to today</button>'}
+  </div>
+  <p class="feed-summary" id="board-summary"></p>`;
 }
 
 function wireBoardHeader() {
   const input = document.getElementById('board-date');
-  const go = (date) => { setBoardDate(date); renderBoard(ctx?.stationId || null); };
-
-  input?.addEventListener('change', () => { if (input.value) go(input.value); });
+  const go = date => {
+    if (!date) return;
+    const stationId = ctx?.stationId || null;
+    setBoardDate(date);
+    renderBoard(stationId);
+  };
+  input?.addEventListener('change', () => go(input.value));
   document.getElementById('board-prev')?.addEventListener('click', () => go(shiftDate(input.value, -1)));
   document.getElementById('board-next')?.addEventListener('click', () => go(shiftDate(input.value, 1)));
   document.getElementById('board-today')?.addEventListener('click', () => go(getTodayDate()));
-  document.getElementById('board-copy')?.addEventListener('click', copyPreviousDay);
-  document.getElementById('board-clear')?.addEventListener('click', clearBoard);
 }
 
 function startBoardLive(stationId, date) {
@@ -701,35 +451,34 @@ function startBoardLive(stationId, date) {
       if (!ctx || ctx.stationId !== stationId || ctx.date !== date) return;
       ctx.assignments = rows;
       paintBoard();
+      paintPickerList();
     },
     onError: () => {
       const note = document.getElementById('board-note');
-      if (note) note.textContent = 'Live roster updates paused — use Refresh to re-sync.';
+      if (note) note.textContent = 'Live updates paused. Tap Refresh to reconnect.';
     },
   });
-
   sessionUnsub = watchPumpSessions(stationId, {
     onUpdate: rows => {
       if (!ctx || ctx.stationId !== stationId) return;
       ctx.sessions = rows;
       paintBoard();
     },
-    onError: () => {},
+    onError: () => {
+      const note = document.getElementById('board-note');
+      if (note) note.textContent = 'Pump status could not update. Tap Refresh to reconnect.';
+    },
   });
-
-  // Keep the "on shift for 42m" counters honest without a re-query.
   tickTimer = window.setInterval(() => { if (ctx) paintBoard(); }, 60_000);
 }
 
 /**
- * Load today's roster for the signed-in user and publish it to the RBAC
- * layer. Called at sign-in so Start shift works on the Pumps page without
- * the user having to open the board first.
+ * Publish today's pump list before the Pumps page first renders. This keeps
+ * Start shift available for staff who were added on the daily board.
  */
 export async function primeMyDailyPumps(stationId) {
   const me = getCurrentUserData();
-  if (!stationId || !me) return;
-  if (isStationOverseer()) return;         // overseers are never restricted
+  if (!stationId || !me || isStationOverseer()) return;
   try {
     const date = getTodayDate();
     const rows = await getAssignments(stationId, date);

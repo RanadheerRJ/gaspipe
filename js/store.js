@@ -214,8 +214,9 @@ const managesStationData = (stationId) => can('shift.update', { stationId });
  * Single-order query (date desc) keeps this on Firestore's built-in index —
  * the old two-field orderBy needed a composite index and silently failed.
  *
- * Staff get an equality-only query (createdBy == uid) with the date range
- * applied in memory, so it needs no composite index and passes the rules.
+ * Staff get an equality-only query (staffUid == uid) with the date range
+ * applied in memory, so manager-assisted clock-outs remain visible without a
+ * composite index and the query passes the rules.
  */
 export function getShifts(stationId, { from = null, max = 300 } = {}) {
   if (!stationId) return Promise.resolve([]);
@@ -227,9 +228,11 @@ export function getShifts(stationId, { from = null, max = 300 } = {}) {
     const db = getDb();
 
     if (ownOnly) {
+      // staffUid is the person whose shift this is. createdBy can be a Manager
+      // who ended it on their behalf, so querying createdBy hid valid records.
       const snap = await getDocs(query(
         collection(db, 'stations', stationId, 'shifts'),
-        where('createdBy', '==', me.uid),
+        where('staffUid', '==', me.uid),
       ));
       let rows = snapToArray(snap);
       if (from) rows = rows.filter(r => (r.date || '') >= from);
@@ -262,7 +265,7 @@ export function watchShifts(stationId, { onUpdate, onError, max = 200 } = {}) {
   const base = collection(getDb(), 'stations', stationId, 'shifts');
   const q = managesStationData(stationId)
     ? query(base, orderBy('date', 'desc'), limit(60))
-    : query(base, where('createdBy', '==', me.uid));
+    : query(base, where('staffUid', '==', me.uid));
 
   return onSnapshot(q, (snap) => {
     const rows = sortShiftRows(snapToArray(snap)).slice(0, max);

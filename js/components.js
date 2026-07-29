@@ -127,9 +127,9 @@ export function showGenericModal(title, bodyHTML) {
 }
 
 // ── Toasts (replaces blocking alert()) ──────────────────────────────────
-export function toast(message, type = 'info', timeout = 4000) {
+function makeToast(message, type = 'info') {
   const region = document.getElementById('toast-region');
-  if (!region) return;
+  if (!region) return null;
 
   const el = document.createElement('div');
   el.className = `toast toast-${type}`;
@@ -138,16 +138,58 @@ export function toast(message, type = 'info', timeout = 4000) {
   const icon = type === 'success' ? '✓' : type === 'error' ? '!' : 'i';
   el.innerHTML = `<span class="toast-icon" aria-hidden="true">${icon}</span><span class="toast-msg"></span>`;
   el.querySelector('.toast-msg').textContent = message;
+  region.appendChild(el);
+  return el;
+}
 
+function addToastDismiss(el) {
   const dismiss = document.createElement('button');
   dismiss.className = 'toast-close';
   dismiss.setAttribute('aria-label', 'Dismiss notification');
   dismiss.textContent = '×';
   dismiss.addEventListener('click', () => el.remove());
   el.appendChild(dismiss);
+}
 
-  region.appendChild(el);
+export function toast(message, type = 'info', timeout = 4000) {
+  const el = makeToast(message, type);
+  if (!el) return null;
+  addToastDismiss(el);
   window.setTimeout(() => el.remove(), timeout);
+  return el;
+}
+
+/**
+ * A toast with one clear follow-up action, used for reversible changes.
+ * `onAction` may be async; the button stays busy until it completes.
+ */
+export function toastAction(message, {
+  label = 'Undo', onAction, type = 'success', timeout = 8000,
+} = {}) {
+  const el = makeToast(message, type);
+  if (!el) return null;
+
+  const action = document.createElement('button');
+  action.className = 'toast-action';
+  action.textContent = label;
+  action.addEventListener('click', async () => {
+    if (action.disabled) return;
+    action.disabled = true;
+    const idle = action.textContent;
+    action.textContent = `${label}ing…`;
+    try {
+      await onAction?.();
+      el.remove();
+    } catch (err) {
+      action.disabled = false;
+      action.textContent = idle;
+      toastError(err?.userMessage || 'Could not undo that change. Check your connection and try again.');
+    }
+  });
+  el.appendChild(action);
+  addToastDismiss(el);
+  window.setTimeout(() => el.remove(), timeout);
+  return el;
 }
 
 /** Success toasts read “✅ User Created”; errors read “❌ Username already exists”. */

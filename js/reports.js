@@ -7,7 +7,8 @@
 
 import { getAllStations, getStationsByIds, getStation, getShifts, getManageableUsers } from './store.js';
 import {
-  getCurrentUserData, isSuperAdmin, isStationAdmin, isManager, isStationOverseer, isStaff, can, formatFirebaseError,
+  getCurrentUserData, isSuperAdmin, isStationAdmin, isManager, isStaff,
+  can, ifCan, formatFirebaseError,
 } from './auth.js';
 import {
   h, formatCurrency, formatVolume, formatDate, formatDateTime, knownHours,
@@ -108,8 +109,9 @@ function filterHTML() {
   const custom = reportState.range === 'custom';
   return `<div class="report-filters" aria-label="Report filters">
     ${reportState.stations.length > 1 ? `<div class="filter-field"><label for="report-station">Station</label><select id="report-station">${stationOptions}</select></div>` : ''}
-    <div class="filter-field"><label for="report-employee">Employee</label>
-      <select id="report-employee" ${isStaff() ? 'disabled aria-disabled="true"' : ''}>${employeeOptions()}</select></div>
+    ${ifCan('report.viewOthers', { stationId: reportState.stationId }, `
+      <div class="filter-field"><label for="report-employee">Staff member</label>
+        <select id="report-employee">${employeeOptions()}</select></div>`)}
     <div class="filter-field report-range-field"><span class="filter-label">Date range</span>
       <div class="report-range-chips" role="group" aria-label="Report date range">
         ${[['today', 'Today'], ['week', '7 days'], ['month', '30 days'], ['all', 'All time'], ['custom', 'Custom']].map(([value, label]) =>
@@ -144,8 +146,9 @@ function paintReport() {
   const pendingShifts = rows.filter(s => s.status === 'pending');
   const pendingSales = pendingShifts.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
   const pendingCount = pendingShifts.length;
-  const pendingLine = pendingCount > 0 && isStationOverseer()
-    ? `<p class="pending-approval-line">⏳ ${pendingCount} shift${pendingCount === 1 ? '' : 's'} pending approval — ${formatCurrency(pendingSales)}</p>`
+  const pendingLine = pendingCount > 0
+    ? ifCan('shift.update', { stationId: reportState.stationId },
+      `<p class="pending-approval-line">⏳ ${pendingCount} shift${pendingCount === 1 ? '' : 's'} waiting for approval — ${formatCurrency(pendingSales)}</p>`)
     : '';
   container.innerHTML = `<section class="report-printable" aria-labelledby="report-card-title">
     <div class="report-card-head"><div><p class="eyebrow">PumpLog Report Card</p><h3 id="report-card-title">${h(reportEmployeeLabel(rows))}</h3>

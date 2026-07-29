@@ -14,7 +14,7 @@ import {
   getAssignments, pumpIdsForUser,
 } from './store.js';
 import {
-  can, canUsePump, filterMyPumps, getCurrentUserData, formatFirebaseError,
+  can, ifCan, canUsePump, filterMyPumps, getCurrentUserData, formatFirebaseError,
   isSuperAdmin, isStationOverseer, userDisplayName,
   setMyDailyPumps,
 } from './auth.js';
@@ -189,8 +189,9 @@ function stationInfoCardHTML(station, rateMap, shifts, ownShifts, stationId, ran
   const pendingShifts = shifts.filter(s => s.status === 'pending');
   const pendingSales = pendingShifts.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
   const pendingCount = pendingShifts.length;
-  const pendingLine = pendingCount > 0 && isStationOverseer()
-    ? `<p class="pending-approval-line">⏳ ${pendingCount} shift${pendingCount === 1 ? '' : 's'} pending — ${formatCurrency(pendingSales)}</p>`
+  const pendingLine = pendingCount > 0
+    ? ifCan('shift.update', { stationId },
+      `<p class="pending-approval-line">⏳ ${pendingCount} shift${pendingCount === 1 ? '' : 's'} waiting for approval — ${formatCurrency(pendingSales)}</p>`)
     : '';
 
   // Active session count
@@ -253,7 +254,7 @@ function quickStartHTML(quick) {
       `<option value="${h(row.station.id)}" ${row.station.id === quick.selected ? 'selected' : ''}>${h(row.station.name)}</option>`).join('')}</select>` : '';
   return `<section class="quick-start-card" aria-labelledby="quick-start-title"><div class="quick-start-copy">
     <span class="quick-start-icon" aria-hidden="true">☀️</span><div><h3 id="quick-start-title">Start my day</h3>
-    <p>No active pump session. Choose a pump to clock in.</p></div></div>
+    <p>You have not started a shift. Choose a pump to begin.</p></div></div>
     <div class="quick-start-controls">${stationSelect}<div id="quick-start-pumps">${quickPumpButtons(quick.stations[0])}</div></div></section>`;
 }
 
@@ -264,9 +265,10 @@ function quickPumpButtons(row) {
     const session = row.sessions.find(s => s.id === pump.id && s.status === 'active');
     const other = session && session.activeUid !== me?.uid;
     const rate = row.rateMap[pump.product];
-    return `<button type="button" class="quick-pump-btn" data-quick-pump="${h(pump.id)}" ${other ? 'disabled' : ''}>
-      <span aria-hidden="true">⛽</span><span><strong>${h(pump.name)}</strong><small>${h(pump.product || 'No product')}${rate ? ` · ${h(formatCurrency(rate.rate))}/L` : ''}</small></span>
-      <span>${other ? 'In use' : 'Start shift →'}</span></button>`;
+    return ifCan('pumpSession.start', { stationId: row.station.id, pumpId: pump.id },
+      `<button type="button" class="quick-pump-btn" data-quick-pump="${h(pump.id)}" ${other ? 'disabled' : ''}>
+        <span aria-hidden="true">⛽</span><span><strong>${h(pump.name)}</strong><small>${h(pump.product || 'No product')}${rate ? ` · ${h(formatCurrency(rate.rate))}/L` : ''}</small></span>
+        <span>${other ? 'In use' : '▶️ Start shift'}</span></button>`);
   }).join('')}</div>`;
 }
 
@@ -456,7 +458,7 @@ function pumpVisual(pump, status) {
 }
 
 function feedListHTML(pumps, rows, sessions, stationId) {
-  if (!pumps.length) return emptyState('⛽', 'No pumps to show. ' + (can('pump.create', { stationId }) ? 'Add them from Config → Pumps.' : 'Ask your admin or manager to assign pumps to you.'));
+  if (!pumps.length) return emptyState('⛽', 'No pumps to show. ' + (can('pump.create', { stationId }) ? 'Add them in Settings → Pumps.' : 'Ask your admin or manager to assign pumps to you.'));
   const items = pumps.map(pump => {
     const status = pumpStatus(pump.id, rows, sessions); const meta = STATUS_META[status.state]; const activeName = visibleActiveName(status.session);
     const liveLine = status.session ? `Started ${formatTimeAgo(status.session.clockInAt) || 'just now'}${activeName ? ` · ${activeName}` : ''}` : status.last ? `Last reading ${shiftTime(status.last.createdAt, status.last.date)}` : 'No readings logged yet';
@@ -485,7 +487,11 @@ function openPumpDetail(pumpId) {
   const recentList = recent.length ? `<ul class="feed-detail-list">${recent.map(s => `<li><span class="shift-badge">S${h(s.shiftLabel || '?')}</span><span class="feed-detail-main"><strong>${formatVolume(s.volume)}</strong> · ${formatCurrency(s.sales)}<small>${h(formatDate(s.date))}${formatTime(s.createdAt) ? ` · ${h(formatTime(s.createdAt))}` : ''}${s.hoursWorked != null ? ` · ${h(Number(s.hoursWorked).toFixed(2))} h` : ''}</small></span></li>`).join('')}</ul>` : '<p class="muted-note">No readings recorded for this pump yet.</p>';
   const sessionLine = status.session ? `Started ${formatDateTime(status.session.clockInAt) || 'just now'}${visibleActiveName(status.session) ? ` by ${visibleActiveName(status.session)}` : ''}` : 'No active shift';
   document.getElementById('modal-title').textContent = pump.name;
-  document.getElementById('modal-body').innerHTML = `<div class="feed-detail-head"><span class="status-chip ${meta.cls}">${meta.icon} ${h(meta.chip)}</span><span class="muted-note">${h(pump.product || 'No product')}${rate ? ` · ${formatCurrency(rate.rate)}/L` : ''}</span></div><p class="session-reference">${h(sessionLine)}</p><div class="feed-detail-today"><div><span class="label">Today</span><strong>${status.todayCount} reading${status.todayCount === 1 ? '' : 's'}</strong></div><div><span class="label">Volume</span><strong>${formatVolume(status.todayVol)}</strong></div><div><span class="label">Sales</span><strong>${formatCurrency(status.todaySales)}</strong></div></div><h4 class="feed-detail-subhead">Recent readings</h4>${recentList}${mayLog ? `<button type="button" id="feed-log-btn" class="btn btn-primary btn-full mt-16">${status.session ? 'End shift' : 'Start shift'}</button>` : ''}`;
+  const action = status.session ? 'pumpSession.end' : 'pumpSession.start';
+  const logButton = mayLog ? ifCan(action, {
+    stationId, pumpId: pump.id, activeUid: status.session?.activeUid,
+  }, `<button type="button" id="feed-log-btn" class="btn btn-primary btn-full mt-16">${status.session ? '⏹️ End shift' : '▶️ Start shift'}</button>`) : '';
+  document.getElementById('modal-body').innerHTML = `<div class="feed-detail-head"><span class="status-chip ${meta.cls}">${meta.icon} ${h(meta.chip)}</span><span class="muted-note">${h(pump.product || 'No product')}${rate ? ` · ${formatCurrency(rate.rate)}/L` : ''}</span></div><p class="session-reference">${h(sessionLine)}</p><div class="feed-detail-today"><div><span class="label">Today</span><strong>${status.todayCount} reading${status.todayCount === 1 ? '' : 's'}</strong></div><div><span class="label">Volume</span><strong>${formatVolume(status.todayVol)}</strong></div><div><span class="label">Sales</span><strong>${formatCurrency(status.todaySales)}</strong></div></div><h4 class="feed-detail-subhead">Recent readings</h4>${recentList}${logButton}`;
   openModal('generic-modal');
   document.getElementById('feed-log-btn')?.addEventListener('click', () => { closeModal('generic-modal'); openShiftForm(stationId, pump, rate, status.session); });
 }
