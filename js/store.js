@@ -126,6 +126,49 @@ export function watchPumpSessions(stationId, { onUpdate, onError } = {}) {
   });
 }
 
+// ── Daily pump assignments (the Kanban board) ───────────────────────────
+//
+// One document per pump per day: stations/{id}/assignments/{date}_{pumpId}
+//   { date, pumpId, pumpName, product, staffUids: [...], staffNames: {uid: name} }
+//
+// Keeping the date in the document id makes a day's board a single range
+// query with no composite index, and makes "copy yesterday" a plain read.
+
+export const assignmentId = (date, pumpId) => `${date}_${pumpId}`;
+
+export function getAssignments(stationId, date) {
+  if (!stationId || !date) return Promise.resolve([]);
+  return cached(`station:${stationId}:assignments:${date}`, async () => {
+    const snap = await getDocs(query(
+      collection(getDb(), 'stations', stationId, 'assignments'),
+      where('date', '==', date),
+    ));
+    return snapToArray(snap);
+  });
+}
+
+export function watchAssignments(stationId, date, { onUpdate, onError } = {}) {
+  if (!stationId || !date || !getCurrentUserData()) return () => {};
+  const q = query(
+    collection(getDb(), 'stations', stationId, 'assignments'),
+    where('date', '==', date),
+  );
+  return onSnapshot(q, snap => {
+    onUpdate?.(snapToArray(snap), { fromCache: snap.metadata.fromCache, at: Date.now() });
+  }, err => {
+    onError?.(err);
+  });
+}
+
+/** Pump ids the given user is rostered on for `date`. */
+export function pumpIdsForUser(assignments, uid) {
+  if (!uid) return [];
+  return (assignments || [])
+    .filter(row => (row.staffUids || []).includes(uid))
+    .map(row => row.pumpId)
+    .filter(Boolean);
+}
+
 // ── Rates ───────────────────────────────────────────────────────────────
 export function getRates(stationId) {
   if (!stationId) return Promise.resolve([]);
@@ -171,8 +214,9 @@ const managesStationData = (stationId) => can('shift.update', { stationId });
  * Single-order query (date desc) keeps this on Firestore's built-in index —
  * the old two-field orderBy needed a composite index and silently failed.
  *
- * Staff get an equality-only query (createdBy == uid) with the date range
- * applied in memory, so it needs no composite index and passes the rules.
+ * Staff get an equality-only query (staffUid == uid) with the date range
+ * applied in memory, so manager-assisted clock-outs remain visible without a
+ * composite index and the query passes the rules.
  */
 export function getShifts(stationId, { from = null, max = 300 } = {}) {
   if (!stationId) return Promise.resolve([]);
@@ -184,9 +228,11 @@ export function getShifts(stationId, { from = null, max = 300 } = {}) {
     const db = getDb();
 
     if (ownOnly) {
+      // staffUid is the person whose shift this is. createdBy can be a Manager
+      // who ended it on their behalf, so querying createdBy hid valid records.
       const snap = await getDocs(query(
         collection(db, 'stations', stationId, 'shifts'),
-        where('createdBy', '==', me.uid),
+        where('staffUid', '==', me.uid),
       ));
       let rows = snapToArray(snap);
       if (from) rows = rows.filter(r => (r.date || '') >= from);
@@ -219,7 +265,7 @@ export function watchShifts(stationId, { onUpdate, onError, max = 200 } = {}) {
   const base = collection(getDb(), 'stations', stationId, 'shifts');
   const q = managesStationData(stationId)
     ? query(base, orderBy('date', 'desc'), limit(60))
-    : query(base, where('createdBy', '==', me.uid));
+    : query(base, where('staffUid', '==', me.uid));
 
   return onSnapshot(q, (snap) => {
     const rows = sortShiftRows(snapToArray(snap)).slice(0, max);
@@ -251,14 +297,68 @@ export function getUsersCreatedBy(uid) {
   });
 }
 
-/** Staff records a Station Admin/Super Admin may assign from the Pumps board. */
+const byDisplayName = (a, b) =>
+  (a.fullName || a.email || a.username || '').localeCompare(b.fullName || b.email || b.username || '');
+
+/**
+ * Every account the signed-in user may administer.
+ *
+ * Super Admin sees everyone. A Station Admin or Manager sees the accounts
+ * they created PLUS everyone attached to one of their stations — otherwise a
+ * Station Admin cannot see (or roster) staff that their own Manager created,
+ * which made half the team invisible on the board.
+ */
+export async function getManageableUsers(stationIds = []) {
+  const me = getCurrentUserData();
+  if (!me) return [];
+  if (me.role === 'superadmin') return getAllUsers();
+
+  const mine = await getUsersCreatedBy(me.uid).catch(() => []);
+  const perStation = await Promise.all(
+    (stationIds || []).map(id => getUsersAtStation(id).catch(() => []))
+  );
+
+  const merged = new Map();
+  for (const user of [...mine, ...perStation.flat()]) merged.set(user.id, user);
+  return [...merged.values()].sort(byDisplayName);
+}
+
+/** Every active user profile attached to a station (any role). Disabled and
+ *  invited profiles are excluded so roster tallies and staff pickers never
+ *  surface accounts that cannot sign in. */
+export function getUsersAtStation(stationId) {
+  if (!stationId) return Promise.resolve([]);
+  return cached(`users:station:${stationId}`, async () => {
+    const snap = await getDocs(query(
+      collection(getDb(), 'users'),
+      where('stationIds', 'array-contains', stationId),
+    ));
+    return snapToArray(snap).filter(u => u.status !== 'disabled' && u.status !== 'invited');
+  });
+}
+
+/**
+ * Staff a manager/admin may roster onto pumps at this station.
+ *
+ * Queried by station rather than by creator: a Station Admin must be able to
+ * roster staff that one of their Managers created, and vice versa. Falls back
+ * to the creator-scoped query if the station query is denied by rules that
+ * have not been re-published yet.
+ */
 export async function getStaffForStation(stationId) {
   const me = getCurrentUserData();
   if (!stationId || !me || !can('config.view')) return [];
-  const users = me.role === 'superadmin'
-    ? await getAllUsers()
-    : await getUsersCreatedBy(me.uid);
-  return users
+
+  const onlyStaffHere = users => users
     .filter(user => user.role === 'staff' && (user.stationIds || []).includes(stationId))
-    .sort((a, b) => (a.email || '').localeCompare(b.email || ''));
+    .sort(byDisplayName);
+
+  try {
+    return onlyStaffHere(await getUsersAtStation(stationId));
+  } catch {
+    const fallback = me.role === 'superadmin'
+      ? await getAllUsers().catch(() => [])
+      : await getUsersCreatedBy(me.uid).catch(() => []);
+    return onlyStaffHere(fallback);
+  }
 }

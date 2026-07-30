@@ -1,7 +1,12 @@
-/* PumpLog — History / reports */
+/* PumpLog — History / reports
+ *
+ * Part D: Shift approval workflow. Managers/admins can approve pending shifts
+ * individually or in bulk (per day, per pump). History shows pending/approved/
+ * rejected badges, and a status filter is available.
+ */
 
-import { getDb, doc, updateDoc, deleteDoc, serverTimestamp } from './firebase.js';
-import { can, denyReason, formatFirebaseError } from './auth.js';
+import { getDb, doc, updateDoc, deleteDoc, writeBatch, serverTimestamp } from './firebase.js';
+import { can, ifCan, getCurrentUserData, denyReason, formatFirebaseError } from './auth.js';
 import { getPumps, getShifts, invalidateStation } from './store.js';
 import {
   h, formatCurrency, formatVolume, formatDate, formatDateTime, getTodayDate,
@@ -14,8 +19,16 @@ let currentStationId = null;
 let allShifts = [];
 let currentRange = 'today';
 let filteredShifts = [];
+let currentStatusFilter = '';
 
 export function initHistory() {}
+
+function statusBadge(status) {
+  if (status === 'pending') return '<span class="tag tag-pending">⏳ Pending</span>';
+  if (status === 'approved') return '<span class="tag tag-approved">✅ Approved</span>';
+  if (status === 'rejected') return '<span class="tag tag-rejected">❌ Rejected</span>';
+  return '';
+}
 
 export async function renderHistory(stationId, range = 'today') {
   currentStationId = stationId;
@@ -35,6 +48,8 @@ export async function renderHistory(stationId, range = 'today') {
       getShifts(stationId, { from: rangeStart(range) }),
     ]);
     allShifts = shifts;
+
+    const mayApprove = can('shift.update', { stationId });
 
     content.innerHTML = `
       <div class="page-head">
@@ -61,6 +76,16 @@ export async function renderHistory(stationId, range = 'today') {
             <option value="3">Shift 3</option>
           </select>
         </div>
+        ${ifCan('shift.update', { stationId }, `
+        <div class="filter-field">
+          <label for="filter-status">Approval</label>
+          <select id="filter-status">
+            <option value="">Show all</option>
+            <option value="pending">⏳ Waiting</option>
+            <option value="approved">✅ Approved</option>
+            <option value="rejected">❌ Rejected</option>
+          </select>
+        </div>`)}
         <div class="filter-field">
           <label for="filter-search">Search</label>
           <input type="search" id="filter-search" placeholder="Pump or product" />
@@ -74,12 +99,16 @@ export async function renderHistory(stationId, range = 'today') {
     const applyFilters = () => {
       const pumpId = document.getElementById('filter-pump').value;
       const shiftLabel = document.getElementById('filter-shift').value;
+      const statusFilter = document.getElementById('filter-status')?.value || '';
       const term = document.getElementById('filter-search').value.trim().toLowerCase();
+
+      currentStatusFilter = statusFilter;
 
       // Filtering happens in memory — instant, and no composite index needed.
       const filtered = allShifts.filter(s =>
         (!pumpId || s.pumpId === pumpId) &&
         (!shiftLabel || s.shiftLabel === shiftLabel) &&
+        (!statusFilter || s.status === statusFilter) &&
         (!term ||
           (s.pumpName || '').toLowerCase().includes(term) ||
           (s.product || '').toLowerCase().includes(term))
@@ -89,6 +118,7 @@ export async function renderHistory(stationId, range = 'today') {
 
     document.getElementById('filter-pump').addEventListener('change', applyFilters);
     document.getElementById('filter-shift').addEventListener('change', applyFilters);
+    document.getElementById('filter-status')?.addEventListener('change', applyFilters);
     document.getElementById('filter-search').addEventListener('input', debounce(applyFilters, 200));
     document.getElementById('export-csv-btn').addEventListener('click', () => exportCSV(filteredShifts));
 
@@ -122,6 +152,7 @@ function paint(list) {
 
   const mayEdit = can('shift.update', { stationId: currentStationId });
   const mayDelete = can('shift.delete', { stationId: currentStationId });
+  const mayApprove = can('shift.update', { stationId: currentStationId });
 
   const byDate = new Map();
   for (const s of list) {
@@ -134,31 +165,58 @@ function paint(list) {
     .sort((a, b) => b[0].localeCompare(a[0]))
     .map(([date, rows]) => {
       const dayTotal = rows.reduce((sum, s) => sum + (Number(s.sales) || 0), 0);
+      const pendingCount = rows.filter(s => s.status === 'pending').length;
+      const bulkApproveBtn = mayApprove && pendingCount > 0
+        ? `<button class="btn btn-small btn-secondary bulk-approve-day" data-date="${h(date)}" title="Approve all ${pendingCount} pending shift${pendingCount === 1 ? '' : 's'} for ${h(formatDate(date) || date)}">
+            ✅ Approve all (${pendingCount})
+          </button>`
+        : '';
       return `
         <section class="date-group">
           <h3 class="date-header">
             <span>${h(formatDate(date) || date)}</span>
-            <span>${formatCurrency(dayTotal)}</span>
+            <span>${formatCurrency(dayTotal)} ${bulkApproveBtn}</span>
           </h3>
-          ${rows.map(s => `
-            <div class="shift-record">
+          ${rows.map(s => {
+            const badge = statusBadge(s.status);
+            const approvedNote = s.status === 'approved' && s.approvedBy
+              ? `<small class="approved-by-note">Approved ${s.approvedAt ? formatDateTime(s.approvedAt) : ''}</small>`
+              : '';
+            return `
+            <div class="shift-record ${s.status === 'pending' ? 'shift-pending' : ''} ${s.status === 'rejected' ? 'shift-rejected' : ''}">
               <span class="shift-badge">S${h(s.shiftLabel || '?')}</span>
               <span class="shift-main">
-                <span class="pump-name">${h(s.pumpName || 'Pump')}</span>
+                <span class="pump-name">${h(s.pumpName || 'Pump')} ${badge} ${approvedNote}</span>
                 <span class="shift-details">${formatVolume(s.volume)} · ${formatCurrency(s.rate)}/L · Hours: ${knownHours(s) == null ? '—' : h(Number(s.hoursWorked).toFixed(2) + ' h')}${s.clockInAt ? ` · In ${h(formatDateTime(s.clockInAt))}` : ''}</span>
+                ${s.notes ? `<span class="shift-notes">📝 ${h(s.notes)}</span>` : ''}
+                ${s.expensesTotal > 0 ? `<span class="shift-expenses">💰 Expenses: ${formatCurrency(s.expensesTotal)}${s.cashDue != null ? ` · Cash due: ${formatCurrency(s.cashDue)}` : ''}</span>` : ''}
               </span>
               <span class="shift-amount">${formatCurrency(s.sales)}</span>
-              ${(mayEdit || mayDelete) ? `<span class="shift-actions">
-                ${mayEdit ? `<button class="icon-btn edit-shift" data-id="${h(s.id)}"
-                    aria-label="Edit ${h(s.pumpName)} shift ${h(s.shiftLabel)}" title="Edit">✏️</button>` : ''}
-                ${mayDelete ? `<button class="icon-btn delete-shift" data-id="${h(s.id)}"
-                    aria-label="Delete ${h(s.pumpName)} shift ${h(s.shiftLabel)}" title="Delete">🗑️</button>` : ''}
+              ${(mayEdit || mayDelete || (mayApprove && s.status === 'pending')) ? `<span class="shift-actions">
+                ${s.status === 'pending' ? ifCan('shift.update', { stationId: currentStationId }, `<button class="btn btn-secondary btn-small approve-shift" data-id="${h(s.id)}">✅ Approve</button>`) : ''}
+                ${ifCan('shift.update', { stationId: currentStationId }, `<button class="btn btn-secondary btn-small edit-shift" data-id="${h(s.id)}">✏️ Edit</button>`)}
+                ${ifCan('shift.delete', { stationId: currentStationId }, `<button class="btn btn-secondary btn-small delete-shift danger-text" data-id="${h(s.id)}">🗑️ Delete</button>`)}
               </span>` : ''}
-            </div>
-          `).join('')}
+            </div>`;
+          }).join('')}
         </section>
       `;
     }).join('');
+
+  // Wire approve single
+  container.querySelectorAll('.approve-shift').forEach(btn =>
+    btn.addEventListener('click', () => {
+      const s = allShifts.find(x => x.id === btn.dataset.id);
+      if (s) approveShift(s, btn);
+    }));
+
+  // Wire bulk approve day
+  container.querySelectorAll('.bulk-approve-day').forEach(btn =>
+    btn.addEventListener('click', () => {
+      const date = btn.dataset.date;
+      const pending = allShifts.filter(s => s.date === date && s.status === 'pending');
+      if (pending.length) bulkApproveShifts(pending, `all pending shifts for ${formatDate(date) || date}`);
+    }));
 
   container.querySelectorAll('.edit-shift').forEach(btn =>
     btn.addEventListener('click', () => {
@@ -171,6 +229,57 @@ function paint(list) {
       const s = allShifts.find(x => x.id === btn.dataset.id);
       if (s) removeShift(s);
     }));
+}
+
+// ── Approve single shift ───────────────────────────────────────────────
+async function approveShift(shift, button = null) {
+  if (!can('shift.update', { stationId: currentStationId })) {
+    toastError(denyReason('shift.update'));
+    return;
+  }
+  const ok = await confirmSave(`${shift.staffName || 'this staff member'}’s shift on ${shift.pumpName || 'this pump'}`);
+  if (!ok) return;
+  setBusy(button, true, 'Approving…');
+  try {
+    const me = getCurrentUserData();
+    await updateDoc(doc(getDb(), 'stations', currentStationId, 'shifts', shift.id), {
+      status: 'approved',
+      approvedBy: me?.uid || 'unknown',
+      approvedAt: serverTimestamp(),
+    });
+    invalidateStation(currentStationId);
+    toastSuccess(`Shift approved — ${formatCurrency(shift.sales)}`);
+    renderHistory(currentStationId, currentRange);
+  } catch (err) {
+    toastError(formatFirebaseError(err));
+    setBusy(button, false);
+  }
+}
+
+// ── Bulk approve shifts ────────────────────────────────────────────────
+async function bulkApproveShifts(shifts, label) {
+  if (!shifts.length) return;
+  const ok = await confirmSave(`approving ${shifts.length} pending shift${shifts.length === 1 ? '' : 's'} (${label})`);
+  if (!ok) return;
+  try {
+    const db = getDb();
+    const batch = writeBatch(db);
+    const me = getCurrentUserData();
+    shifts.forEach(s => {
+      const ref = doc(db, 'stations', currentStationId, 'shifts', s.id);
+      batch.update(ref, {
+        status: 'approved',
+        approvedBy: me?.uid || 'unknown',
+        approvedAt: serverTimestamp(),
+      });
+    });
+    await batch.commit();
+    invalidateStation(currentStationId);
+    toastSuccess(`Approved ${shifts.length} shift${shifts.length === 1 ? '' : 's'}`);
+    renderHistory(currentStationId, currentRange);
+  } catch (err) {
+    toastError(formatFirebaseError(err));
+  }
 }
 
 // ── Edit ────────────────────────────────────────────────────────────────
@@ -307,7 +416,7 @@ async function removeShift(shift) {
 function exportCSV(shifts) {
   if (!shifts.length) return;
 
-  const headers = ['Date', 'Pump', 'Product', 'Shift', 'Opening', 'Closing', 'Volume (L)', 'Rate', 'Sales', 'Recorded'];
+  const headers = ['Date', 'Pump', 'Product', 'Shift', 'Opening', 'Closing', 'Volume (L)', 'Rate', 'Sales', 'Status', 'Recorded'];
   const cell = (v) => `"${String(v ?? '').replace(/"/g, '""')}"`;
 
   const csv = [
@@ -318,12 +427,13 @@ function exportCSV(shifts) {
       (Number(s.volume) || 0).toFixed(2),
       (Number(s.rate) || 0).toFixed(2),
       (Number(s.sales) || 0).toFixed(2),
+      s.status || '',
       formatDateTime(s.createdAt),
     ].map(cell).join(',')),
-  ].join('\r\n');
+  ].join('\\r\\n');
 
   // BOM keeps ₹ and other non-ASCII characters readable in Excel.
-  const blob = new Blob(['\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
+  const blob = new Blob(['\\uFEFF' + csv], { type: 'text/csv;charset=utf-8;' });
   const url = URL.createObjectURL(blob);
   const a = document.createElement('a');
   a.href = url;

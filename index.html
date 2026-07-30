@@ -6,7 +6,7 @@
   <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
   <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
   <meta name="description" content="PumpLog — multi-station fuel shift tracker" />
-  <meta name="application-version" content="1.0.0" />
+  <meta name="application-version" content="1.7.0" />
   <meta name="color-scheme" content="light dark" />
 
   <title>PumpLog</title>
@@ -76,29 +76,19 @@
         <span class="chevron" aria-hidden="true">⌄</span>
       </button>
       <div class="top-right">
-        <button id="btn-refresh" class="icon-btn" title="Refresh data" aria-label="Refresh data">
-          <span class="icon" aria-hidden="true">↻</span>
+        <button id="btn-refresh" class="top-action" aria-label="Refresh data">
+          <span class="icon" aria-hidden="true">↻</span><span>Refresh</span>
         </button>
-        <button id="btn-profile" class="icon-btn" title="Profile and sign out" aria-label="Profile and sign out" aria-haspopup="dialog">
-          <span class="icon" aria-hidden="true">👤</span>
+        <button id="btn-profile" class="top-action" aria-label="Open profile and sign out" aria-haspopup="dialog">
+          <span class="icon" aria-hidden="true">👤</span><span>Profile</span>
         </button>
       </div>
     </header>
 
     <!-- Date-range filter, applies to Dashboard + History -->
-    <div id="quick-chips" class="chips-row" role="group" aria-label="Date range filter">
-      <button class="chip chip-active" data-range="today" aria-pressed="true">Today</button>
-      <button class="chip" data-range="week" aria-pressed="false">7 days</button>
-      <button class="chip" data-range="month" aria-pressed="false">30 days</button>
-      <button class="chip" data-range="all" aria-pressed="false">All time</button>
-    </div>
+    <div id="quick-chips" class="chips-row hidden" role="group" aria-label="Date range filter"></div>
 
     <main id="page-content" tabindex="-1" aria-live="polite" aria-busy="false"></main>
-
-    <!-- Floating refresh -->
-    <button id="fab-refresh" class="fab" aria-label="Refresh data">
-      <span class="fab-icon" aria-hidden="true">↻</span>
-    </button>
 
     <nav id="tab-bar" aria-label="Primary">
       <button class="tab tab-active" data-page="dashboard" aria-current="page">
@@ -109,9 +99,13 @@
         <span class="tab-icon" aria-hidden="true">⛽</span>
         <span class="tab-label">Pumps</span>
       </button>
+      <button class="tab" data-page="board">
+        <span class="tab-icon" aria-hidden="true">🗂️</span>
+        <span class="tab-label">Team Board</span>
+      </button>
       <button class="tab" data-page="config" hidden>
         <span class="tab-icon" aria-hidden="true">⚙️</span>
-        <span class="tab-label">Config</span>
+        <span class="tab-label">Settings</span>
       </button>
       <button class="tab" data-page="history">
         <span class="tab-icon" aria-hidden="true">📋</span>

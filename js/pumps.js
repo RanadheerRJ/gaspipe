@@ -3,37 +3,49 @@
  * This is the staff-first screen. A pump has one live session document which
  * acts as its lock; the transaction in start/endShift is the final authority,
  * not the button state a device happened to render.
+ *
+ * Part B: Managers/admins may start a shift themselves OR assign a pump to
+ * a staff member. They may also end another staff member's active shift
+ * (attributing the shift to the original staff member), not just force-release.
+ *
+ * Part C: Clock-out form now collects Notes, Expenses (repeatable rows), and
+ * computes Cash to hand over.
  */
 
 import {
   getDb, collection, doc, runTransaction, serverTimestamp,
 } from './firebase.js';
 import {
-  getCurrentUserData, isSuperAdmin, isStationAdmin, can, denyReason, formatFirebaseError,
-  hasPumpRestriction, canUsePump, filterMyPumps,
+  getCurrentUserData, isStationOverseer,
+  can, ifCan, denyReason, formatFirebaseError,
+  canUsePump, filterMyPumps, userDisplayName,
+  pumpAccessMode, setMyDailyPumps,
 } from './auth.js';
-import { updateUserAccount } from './staff-auth.js';
 import {
   getPumps, getCurrentRateMap, getPumpSessions, getStaffForStation, watchPumpSessions,
-  invalidateStation, invalidateUsers,
+  getShifts, invalidateStation,
+  getAssignments, watchAssignments, pumpIdsForUser,
 } from './store.js';
 import {
   h, formatCurrency, formatVolume, formatDateTime, formatTimeAgo,
-  getTodayDate, openModal, closeModal, emptyState, toast, toastSuccess, toastError,
-  confirmSave, setBusy, showSkeleton,
+  getTodayDate, openModal, closeModal, emptyState, toastSuccess, toastError,
+  confirmDialog, setBusy, showSkeleton,
 } from './components.js';
+import { selectTodayOnBoard } from './board.js';
 
 let currentStationId = null;
 let pumpContext = null;
 let sessionUnsub = null;
+let assignmentUnsub = null;
 
 export function initPumps() {}
 
 export function stopPumpsLive() {
-  if (sessionUnsub) {
-    try { sessionUnsub(); } catch { /* already closed */ }
-  }
+  [sessionUnsub, assignmentUnsub].forEach(unsub => {
+    if (unsub) { try { unsub(); } catch { /* already closed */ } }
+  });
   sessionUnsub = null;
+  assignmentUnsub = null;
   pumpContext = null;
 }
 
@@ -49,45 +61,54 @@ function isMine(session) {
   return !!session && session.activeUid === getCurrentUserData()?.uid;
 }
 
-function isPumpManager() {
-  return isSuperAdmin() || isStationAdmin();
-}
-
 function sessionLabel(session) {
   if (!session || session.status !== 'active') return { text: 'Idle', cls: 'idle', icon: '○' };
   if (isMine(session)) return { text: 'Active — your shift', cls: 'mine', icon: '●' };
-  const admin = ['superadmin', 'stationadmin'].includes(getCurrentUserData()?.role);
   return {
-    text: admin && session.activeName ? `In use by ${session.activeName}` : 'In use — try again shortly',
+    text: session.activeName ? `In use by ${session.activeName}` : 'In use — try again shortly',
     cls: 'other',
     icon: '🔒',
   };
 }
 
-function actionFor(pump, session, mayLog) {
-  if (isPumpManager()) return { label: 'Assign pump to available staff member', disabled: false, mode: 'assign' };
-  if (!mayLog) return { label: 'View only', disabled: true, mode: 'none' };
-  if (!session) return { label: 'Start shift →', disabled: false, mode: 'start' };
-  if (isMine(session)) return { label: 'End shift →', disabled: false, mode: 'end' };
-  const admin = ['superadmin', 'stationadmin'].includes(getCurrentUserData()?.role);
-  return {
-    label: admin && session.activeName ? `In use by ${session.activeName} →` : 'In use — try again shortly',
-    disabled: true,
-    mode: 'none',
-  };
+function actionFor(pump, session, mayLog, stationId) {
+  if (!session && can('pumpSession.start', { stationId, pumpId: pump.id })
+      && (isStationOverseer() || mayLog)) {
+    return { label: '▶️ Start shift', mode: isStationOverseer() ? 'manager-start' : 'start' };
+  }
+  if (session && can('pumpSession.end', {
+    stationId, pumpId: pump.id, activeUid: session.activeUid,
+  }) && (isStationOverseer() || isMine(session))) {
+    return {
+      label: isMine(session) ? '⏹️ End shift' : `⏹️ End ${session.activeName || 'staff'}’s shift`,
+      mode: isStationOverseer() ? 'manager-end' : 'end',
+    };
+  }
+  // The status chip already explains why there is no action. Do not show a
+  // disabled button that looks tappable but can never succeed.
+  return null;
 }
 
 function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
   const session = sessionFor(pump.id, sessions);
   const state = sessionLabel(session);
-  const mayLog = !isPumpManager() && can('shift.create', { stationId })
+  const mayLog = !isStationOverseer() && can('shift.create', { stationId })
     && (canUsePump(pump.id) || isMine(session));
-  const action = actionFor(pump, session, mayLog);
-  const assigned = isPumpManager()
-    ? staff.filter(user => (user.pumpIds || []).includes(pump.id))
-    : [];
-  const assignmentLine = isPumpManager()
-    ? `<span class="pump-assignment-line">${assigned.length ? `Assigned to ${assigned.map(user => h(user.email || 'staff')).join(', ')}` : 'No staff assigned to this pump'}</span>`
+  const action = actionFor(pump, session, mayLog, stationId);
+  // Who is rostered on this pump today, per the board. Falls back to the
+  // standing pumpIds list so stations that never open the board still see
+  // their assignments here.
+  const roster = (pumpContext?.assignments || []).find(row => row.pumpId === pump.id);
+  const rosterNames = (roster?.staffUids || []).map(uid =>
+    userDisplayName(staff.find(user => user.id === uid)) || roster.staffNames?.[uid] || 'Staff');
+  const standingNames = staff
+    .filter(user => (user.pumpIds || []).includes(pump.id))
+    .map(user => userDisplayName(user));
+  const names = rosterNames.length ? rosterNames : standingNames;
+  const assignmentLine = isStationOverseer()
+    ? `<span class="pump-assignment-line">${names.length
+        ? `${rosterNames.length ? 'Working here today' : 'Usual staff'}: ${names.map(h).join(', ')}`
+        : 'Nobody added yet — use the Team Board tab'}</span>`
     : '';
   const rate = rateMap[pump.product];
   const detail = session
@@ -95,11 +116,22 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
     : rate
       ? `${h(formatCurrency(rate.rate))}/L configured rate`
       : 'No rate configured';
-  const disabledTitle = !mayLog
-    ? denyReason('shift.create', { stationId })
-    : action.disabled
-      ? 'This pump is locked by another staff member.'
-      : '';
+  const primaryPermission = session ? 'pumpSession.end' : 'pumpSession.start';
+  const primaryAction = action ? ifCan(primaryPermission, {
+    stationId, pumpId: pump.id, activeUid: session?.activeUid,
+  }, `
+    <button type="button" class="btn pump-action ${action.mode === 'end' || action.mode === 'manager-end' ? 'btn-danger' : 'btn-primary'}"
+            data-pump-id="${h(pump.id)}" data-mode="${h(action.mode)}">
+      ${h(action.label)}
+    </button>`) : '';
+  const assignAction = ifCan('assignment.manage', { stationId }, `
+    <button type="button" class="btn btn-secondary pump-secondary-action" data-action="open-board" data-pump-id="${h(pump.id)}">
+      👥 Open today’s staff board
+    </button>`);
+  const releaseAction = session ? ifCan('pumpSession.forceRelease', { stationId }, `
+    <button type="button" class="btn btn-secondary pump-secondary-action danger-text" data-action="force-release" data-pump-id="${h(pump.id)}">
+      🔓 Release without saving
+    </button>`) : '';
 
   return `<li>
     <article class="pump-card ${state.cls}">
@@ -112,12 +144,9 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
         <span class="status-chip pump-status ${state.cls}" role="status">${state.icon} ${h(state.text)}</span>
       </div>
       <p class="pump-card-detail">${detail}${assignmentLine}</p>
-      <button type="button" class="btn pump-action ${action.mode === 'end' ? 'btn-danger' : 'btn-primary'}"
-              data-pump-id="${h(pump.id)}" data-mode="${h(action.mode)}"
-              ${action.disabled ? 'disabled' : ''}
-              ${disabledTitle ? `title="${h(disabledTitle)}"` : ''}>
-        ${h(action.label)}
-      </button>
+      ${(primaryAction || assignAction || releaseAction) ? `<div class="pump-card-actions">
+        ${primaryAction}${assignAction}${releaseAction}
+      </div>` : ''}
     </article>
   </li>`;
 }
@@ -135,10 +164,98 @@ function paintPumpBoard() {
       const pump = pumps.find(p => p.id === button.dataset.pumpId);
       if (!pump) return;
       const session = sessionFor(pump.id, sessions);
-      if (button.dataset.mode === 'start') openClockInForm(stationId, pump, rateMap[pump.product]);
-      if (button.dataset.mode === 'end') openClockOutForm(stationId, pump, rateMap[pump.product], session);
-      if (button.dataset.mode === 'assign') openPumpAssignmentForm(stationId, pump, staff);
+      const mode = button.dataset.mode;
+      if (mode === 'start') openClockInForm(stationId, pump, rateMap[pump.product]);
+      if (mode === 'end') openClockOutForm(stationId, pump, rateMap[pump.product], session);
+      if (mode === 'manager-start') openClockInForm(stationId, pump, rateMap[pump.product]);
+      if (mode === 'manager-end') openClockOutForm(stationId, pump, rateMap[pump.product], session);
     });
+  });
+  board.querySelectorAll('.pump-secondary-action').forEach(item => {
+    item.addEventListener('click', () => {
+      const pump = pumps.find(p => p.id === item.dataset.pumpId);
+      if (!pump) return;
+      const session = sessionFor(pump.id, sessions);
+      if (item.dataset.action === 'open-board') {
+        selectTodayOnBoard();
+        document.querySelector('[data-page="board"]')?.click();
+      }
+      if (item.dataset.action === 'force-release') forceReleasePumpAtStation(stationId, pump, session, item);
+    });
+  });
+}
+
+async function forceReleasePumpAtStation(stationId, pump, session, button = null) {
+  if (!pump || !session || !can('pumpSession.forceRelease', { stationId })) {
+    toastError(denyReason('pumpSession.forceRelease'));
+    return;
+  }
+  const started = formatDateTime(session.clockInAt) || 'an unknown time';
+  const startedBy = session.activeName || 'an unknown staff member';
+  const ok = await confirmDialog({
+    title: '⚠️ Force-Release Pump',
+    message: `Pump ${pump.name} has been active since ${started}, started by ${startedBy}. Force-release it without saving a shift record?`,
+    confirmLabel: 'Force release 🔓',
+    danger: true,
+  });
+  if (!ok) return;
+  setBusy(button, true, 'Releasing…');
+  try {
+    const db = getDb();
+    const ref = doc(db, 'stations', stationId, 'pumpSessions', pump.id);
+    await runTransaction(db, async (transaction) => {
+      const snap = await transaction.get(ref);
+      const current = snap.exists() ? snap.data() : null;
+      transaction.update(ref, {
+        status: 'idle',
+        activeUid: null,
+        activeName: null,
+        clockInAt: null,
+        opening: null,
+        date: null,
+        shiftLabel: null,
+        pumpName: current?.pumpName || pump.name || 'Pump',
+        product: current?.product || pump.product || '',
+        updatedAt: serverTimestamp(),
+        updatedBy: getCurrentUserData()?.uid || 'unknown',
+      });
+    });
+    invalidateStation(stationId);
+    toastSuccess(`${pump.name} released`);
+    window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId } }));
+    renderPumps(stationId);
+  } catch (err) {
+    toastError(formatFirebaseError(err));
+    setBusy(button, false);
+  }
+}
+
+/**
+ * Watch today's roster so a manager rostering someone from the board unlocks
+ * Start shift on that person's device within a second, with no refresh.
+ */
+function startAssignmentWatch(stationId, date) {
+  assignmentUnsub = watchAssignments(stationId, date, {
+    onUpdate: (rows) => {
+      if (!pumpContext || pumpContext.stationId !== stationId) return;
+      pumpContext.assignments = rows;
+      const me = getCurrentUserData();
+      if (!me) return;
+
+      if (!isStationOverseer()) {
+        const all = pumpContext.allPumps || pumpContext.pumps;
+        const before = filterMyPumps(all).map(p => p.id).join(',');
+        setMyDailyPumps(pumpIdsForUser(rows, me.uid), date);
+        // A roster change can add or remove whole pumps from this page, which
+        // paintPumpBoard() alone cannot express — re-render in that case.
+        if (filterMyPumps(all).map(p => p.id).join(',') !== before) {
+          renderPumps(stationId);
+          return;
+        }
+      }
+      paintPumpBoard();
+    },
+    onError: () => { /* roster is advisory here; the lock still governs */ },
   });
 }
 
@@ -168,17 +285,28 @@ export async function renderPumps(stationId) {
 
   showSkeleton(3);
 
+  const today = getTodayDate();
+
   try {
-    const [pumps, rateMap, sessions, staff] = await Promise.all([
+    const [pumps, rateMap, sessions, staff, assignments] = await Promise.all([
       getPumps(stationId),
       getCurrentRateMap(stationId),
       getPumpSessions(stationId),
-      isPumpManager() ? getStaffForStation(stationId) : [],
+      isStationOverseer() ? getStaffForStation(stationId).catch(() => []) : [],
+      getAssignments(stationId, today).catch(() => []),
     ]);
+
+    // Publish today's roster to the RBAC layer before any permission check
+    // runs — this is what makes Start shift work for a rostered staff member.
+    const me = getCurrentUserData();
+    if (me && !isStationOverseer()) {
+      setMyDailyPumps(pumpIdsForUser(assignments, me.uid), today);
+    }
+
     const mayConfigure = can('pump.create', { stationId });
     const assignedPumps = filterMyPumps(pumps);
     const activeMineIds = new Set(sessions
-      .filter(session => session.status === 'active' && session.activeUid === getCurrentUserData()?.uid)
+      .filter(session => session.status === 'active' && session.activeUid === me?.uid)
       .map(session => session.id));
     // Keep an in-progress pump visible to its owner if a manager removes the
     // assignment mid-shift. The owner may still end it, but cannot start it
@@ -187,23 +315,26 @@ export async function renderPumps(stationId) {
 
     if (pumps.length === 0) {
       content.innerHTML = `<h2 class="page-title">Pumps</h2>${emptyState('⛽', mayConfigure
-        ? 'No pumps yet. Add them from Config → Pumps.'
+        ? 'No pumps yet. Add them in Settings → Pumps.'
         : 'No pumps configured yet. Ask your station admin to add them.')}`;
       return;
     }
 
     if (myPumps.length === 0) {
       content.innerHTML = `<h2 class="page-title">Pumps</h2>${emptyState('🔒',
-        'No pumps are assigned to you at this station. Ask your admin or manager to assign pumps from Config → Team.')}`;
+        'No pumps are assigned to you today. Ask your manager to add you on the Team Board page.')}`;
       return;
     }
 
-    const mayLog = !isPumpManager() && can('shift.create', { stationId });
-    const hint = isPumpManager()
-      ? 'Live status is shared across devices. Assign or remove staff directly from each pump.'
-      : hasPumpRestriction()
-        ? `Showing the ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} assigned to you.`
-        : mayLog ? 'Choose a pump to start or end your shift. Live locks update on every device.' : 'You have read-only access.';
+    const mayLog = !isStationOverseer() && can('shift.create', { stationId });
+    const mode = pumpAccessMode();
+    const hint = isStationOverseer()
+      ? 'Live status is shared across devices. Start or end a shift, or open Team Board to plan the day.'
+      : mode === 'daily'
+        ? `You are on ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} today. Tap one to start your shift.`
+        : mode === 'standing'
+          ? `Showing the ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} assigned to you.`
+          : mayLog ? 'Choose a pump to start or end your shift. Live locks update on every device.' : 'You have read-only access.';
 
     content.innerHTML = `
       <div class="page-head">
@@ -217,9 +348,13 @@ export async function renderPumps(stationId) {
       <ul id="pump-board" class="pump-grid"></ul>
     `;
 
-    pumpContext = { stationId, pumps: myPumps, rateMap, sessions, staff };
+    pumpContext = {
+      stationId, pumps: myPumps, allPumps: pumps, rateMap, sessions, staff,
+      assignments, date: today,
+    };
     paintPumpBoard();
     startSessionWatch(stationId);
+    startAssignmentWatch(stationId, today);
   } catch (err) {
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
@@ -227,84 +362,50 @@ export async function renderPumps(stationId) {
 
 // Kept as the shared entry point for Dashboard's pump detail action.
 export function openShiftForm(stationId, pump, rate, session = null) {
-  if (session && isMine(session)) {
+  if (isStationOverseer()) {
+    // Overseers: show clock-in if idle, clock-out if active (anyone's)
+    if (session && session.status === 'active') {
+      openClockOutForm(stationId, pump, rate, session);
+    } else {
+      openClockInForm(stationId, pump, rate);
+    }
+  } else if (session && isMine(session)) {
     openClockOutForm(stationId, pump, rate, session);
   } else {
     openClockInForm(stationId, pump, rate);
   }
 }
 
-async function openPumpAssignmentForm(stationId, pump, staff) {
-  if (!isPumpManager()) {
-    toastError('Only Station Admins and Super Admins can assign pumps.');
-    return;
-  }
-  const activeSession = sessionFor(pump.id, pumpContext?.sessions || []);
-  const activeUser = staff.find(user => user.id === activeSession?.activeUid);
-  const assignedIds = new Set(staff.filter(user => (user.pumpIds || []).includes(pump.id)).map(user => user.id));
-  const warning = activeSession
-    ? `<p class="assignment-warning" role="status">⚠️ ${h(activeUser?.email || activeSession.activeName || 'A staff member')} is currently active on this pump. Removing their assignment will not end the shift; the lock remains until clock-out or manager force-release.</p>`
-    : '';
-  const options = staff.length
-    ? `<div class="checkbox-list">${staff.map(user => `<div class="checkbox-item"><input type="checkbox" id="assign-pump-${h(user.id)}" value="${h(user.id)}" ${assignedIds.has(user.id) ? 'checked' : ''} /><label for="assign-pump-${h(user.id)}">${h(user.email || 'Staff member')}</label></div>`).join('')}</div>`
-    : '<p class="muted-note">No staff accounts are assigned to this station yet. Add staff from Config → Team first.</p>';
-  document.getElementById('modal-title').textContent = `Assign ${pump.name}`;
-  document.getElementById('modal-body').innerHTML = `<form id="pump-assignment-form" novalidate>
-    <p class="modal-intro">Choose the staff members who can use ${h(pump.name)}. This updates their existing pump assignment list.</p>
-    ${warning}${options}
-    <p id="pump-assignment-error" class="form-error hidden" role="alert"></p>
-    <button type="submit" class="btn btn-primary btn-full mt-16" ${staff.length ? '' : 'disabled'}>Save assignments</button>
-  </form>`;
-  openModal('generic-modal');
-  document.getElementById('pump-assignment-form').addEventListener('submit', async event => {
-    event.preventDefault();
-    const form = event.currentTarget;
-    const button = form.querySelector('button[type="submit"]');
-    const error = document.getElementById('pump-assignment-error');
-    const selected = new Set(Array.from(form.querySelectorAll('input[type="checkbox"]:checked')).map(input => input.value));
-    error.classList.add('hidden');
-    if (!(await confirmSave(`the pump assignments for ${pump.name}`))) return;
-    setBusy(button, true, 'Saving…');
-    try {
-      await Promise.all(staff.map(async user => {
-        const current = [...new Set(user.pumpIds || [])];
-        const next = selected.has(user.id)
-          ? [...new Set([...current, pump.id])]
-          : current.filter(id => id !== pump.id);
-        if (next.length === current.length && next.every((id, index) => id === current[index])) return;
-        await updateUserAccount(user.id, { pumpIds: next });
-      }));
-      invalidateUsers();
-      closeModal('generic-modal');
-      toastSuccess('Changes Saved — pump assignments updated');
-      await renderPumps(stationId);
-    } catch (err) {
-      error.textContent = `❌ ${formatFirebaseError(err)}`;
-      error.classList.remove('hidden');
-      setBusy(button, false);
-    }
-  });
-}
-
+// ── Clock-in form (now open to managers/admins too) ──────────────────────
 function openClockInForm(stationId, pump, rate) {
-  if (isPumpManager()) {
-    toast('Station managers assign pumps from this page instead of starting staff shifts.', 'info');
-    return;
-  }
-  if (!can('pumpSession.start', { stationId, pumpId: pump.id }) || !canUsePump(pump.id)) {
+  if (!isStationOverseer() && (!can('pumpSession.start', { stationId, pumpId: pump.id }) || !canUsePump(pump.id))) {
     toastError(canUsePump(pump.id) ? denyReason('shift.create', { stationId }) : 'This pump is not assigned to you.');
     return;
   }
 
   const rateLocked = !can('rate.update', { stationId });
   const missingRate = rateLocked && !rate;
+
+  // E2: Prefill initialReading for the pump's genuine first shift (no prior history)
+  const prefillOpening = async () => {
+    try {
+      const shifts = await getShifts(stationId, { max: 1 });
+      const hasHistory = shifts.some(s => s.pumpId === pump.id);
+      return !hasHistory && pump.initialReading != null ? pump.initialReading : '';
+    } catch {
+      return pump.initialReading != null ? pump.initialReading : '';
+    }
+  };
+
+  let openingPrefillPromise = prefillOpening();
+
   document.getElementById('modal-title').textContent = `Start shift — ${pump.name}`;
   document.getElementById('modal-body').innerHTML = `
     <form id="clock-in-form" novalidate>
       <p class="modal-intro">Enter the opening meter reading. The pump will be reserved for you until you end this shift.</p>
       <div class="form-row">
         <div class="field"><label for="clock-in-date">Date</label>
-          <input type="date" id="clock-in-date" value="${getTodayDate()}" max="${getTodayDate()}" required /></div>
+          <input type="date" id="clock-in-date" value="${getTodayDate()}" max="${getTodayDate()}" ${isStationOverseer() ? '' : `min="${getTodayDate()}" readonly aria-readonly="true"`} required /></div>
         <div class="field"><label for="clock-in-shift">Shift</label>
           <select id="clock-in-shift" required><option value="1">Shift 1</option><option value="2">Shift 2</option><option value="3">Shift 3</option></select></div>
       </div>
@@ -319,6 +420,12 @@ function openClockInForm(stationId, pump, rate) {
     </form>`;
   openModal('generic-modal');
 
+  // Prefill the opening reading once resolved
+  openingPrefillPromise.then(val => {
+    const el = document.getElementById('clock-in-opening');
+    if (el && val !== '') el.value = val;
+  });
+
   document.getElementById('clock-in-form').addEventListener('submit', async e => {
     e.preventDefault();
     const form = e.currentTarget;
@@ -329,6 +436,7 @@ function openClockInForm(stationId, pump, rate) {
     const openingRaw = document.getElementById('clock-in-opening').value;
     const opening = Number(openingRaw);
     if (!date || date > getTodayDate()) return fail('Choose today or an earlier date.');
+    if (!isStationOverseer() && date !== getTodayDate()) return fail('Staff shifts must start today. Refresh the page and try again.');
     if (openingRaw === '' || !Number.isFinite(opening) || opening < 0) return fail('Enter a valid opening reading.');
     if (missingRate) return fail('No rate configured — ask a manager or admin to set one first.');
 
@@ -349,7 +457,7 @@ function openClockInForm(stationId, pump, rate) {
         transaction.set(sessionRef, {
           status: 'active',
           activeUid: me.uid,
-          activeName: me.email || me.displayName || 'Staff member',
+          activeName: userDisplayName(me),
           pumpName: pump.name || 'Pump',
           product: pump.product || '',
           clockInAt: serverTimestamp(),
@@ -377,26 +485,39 @@ function openClockInForm(stationId, pump, rate) {
   });
 }
 
+// ── Clock-out form (Part B: manager can close others' shifts)
+// ── Part C: adds Notes, Expenses, Cash to hand over
 function openClockOutForm(stationId, pump, rate, session) {
   const me = getCurrentUserData();
-  if (!session || session.activeUid !== me?.uid) {
+  const isOverseerClosing = isStationOverseer() && session && session.activeUid !== me?.uid;
+  const isSelfClosing = session && session.activeUid === me?.uid;
+
+  // Allow closing: self OR station overseer
+  if (!session) {
+    toastError('This pump has no active session to end.');
+    return;
+  }
+  if (!isSelfClosing && !isOverseerClosing) {
     toastError('This shift is no longer assigned to you. The pump status was refreshed.');
     return;
   }
   if (!can('pumpSession.end', { stationId, pumpId: pump.id, activeUid: session.activeUid })) {
-    toastError(denyReason('pumpSession.end', { stationId }));
+    toastError(denyReason('pumpSession.end', { stationId, pumpId: pump.id, activeUid: session.activeUid }));
     return;
   }
 
   const rateLocked = !can('rate.update', { stationId });
   const missingRate = rateLocked && !rate;
   const opening = Number(session.opening);
-  document.getElementById('modal-title').textContent = `End shift — ${pump.name}`;
+  const actualStaffName = session.activeName || userDisplayName(me);
+  const actualStaffUid = session.activeUid || me?.uid;
+
+  document.getElementById('modal-title').textContent = `End shift — ${pump.name}${isOverseerClosing ? ` (for ${actualStaffName})` : ''}`;
   document.getElementById('modal-body').innerHTML = `
     <form id="clock-out-form" novalidate>
       <div class="session-reference" role="status">
         <strong>Started ${h(formatTimeAgo(session.clockInAt) || formatDateTime(session.clockInAt) || 'just now')}</strong>
-        <span>Opening reading: ${Number.isFinite(opening) ? opening.toFixed(2) : '—'}</span>
+        <span>Opening reading: ${Number.isFinite(opening) ? opening.toFixed(2) : '—'} ${isOverseerClosing ? `· Staff: ${h(actualStaffName)}` : ''}</span>
       </div>
       <div class="field"><label for="clock-out-closing">Closing reading</label>
         <input type="number" id="clock-out-closing" step="0.01" min="0" inputmode="decimal" placeholder="0.00" required /></div>
@@ -409,20 +530,98 @@ function openClockOutForm(stationId, pump, rate, session) {
       </div>
       <div class="computed-row"><span class="label">Volume</span><output class="value" id="clock-out-volume">0.0 L</output></div>
       <div class="computed-row"><span class="label">Sale amount</span><output class="value green" id="clock-out-sales">₹0.00</output></div>
+
+      <!-- Part C: Notes & Expenses -->
+      <hr class="form-divider" />
+      <div class="field">
+        <label for="clock-out-notes">Notes <span class="optional">(optional)</span></label>
+        <textarea id="clock-out-notes" rows="3" placeholder="Anything worth flagging about this shift?" maxlength="500"></textarea>
+      </div>
+      <div class="field">
+        <label>Expenses <span class="optional">(optional)</span></label>
+        <div id="expense-rows">
+          <div class="expense-row" data-index="0">
+            <input type="text" class="expense-item" placeholder="Item" maxlength="60" />
+            <input type="number" class="expense-cost" step="0.01" min="0" placeholder="₹0.00" inputmode="decimal" />
+            <button type="button" class="btn btn-secondary btn-small expense-remove" hidden>✕ Remove</button>
+          </div>
+        </div>
+        <button type="button" id="add-expense-btn" class="btn btn-secondary btn-small mt-8">+ Add expense</button>
+      </div>
+      <div class="computed-row"><span class="label">Total expenses</span><output class="value" id="clock-out-expenses-total">₹0.00</output></div>
+      <div class="computed-row"><span class="label">Cash to hand over</span><output class="value green" id="clock-out-cash-due">₹0.00</output></div>
+      <p id="cash-warning" class="form-error hidden" role="alert">⚠️ Expenses exceed sales — check the entries.</p>
+
       <p class="form-error ${missingRate ? '' : 'hidden'}" id="clock-out-error" role="alert">${missingRate
         ? 'No rate configured — a manager or admin must set one first.' : ''}</p>
       <button type="submit" class="btn btn-danger btn-full mt-16" ${missingRate ? 'disabled' : ''}>End shift</button>
     </form>`;
   openModal('generic-modal');
 
+  // Read helpers
   const read = id => Number(document.getElementById(id).value);
+  const readText = id => (document.getElementById(id)?.value || '').trim();
+
+  function computeExpenses() {
+    let total = 0;
+    document.querySelectorAll('.expense-cost').forEach(input => {
+      const val = parseFloat(input.value);
+      if (Number.isFinite(val) && val >= 0) total += val;
+    });
+    return total;
+  }
+
   const compute = () => {
     const closing = read('clock-out-closing');
     const rateValue = read('clock-out-rate');
     const volume = Number.isFinite(closing) && Number.isFinite(opening) ? Math.max(0, closing - opening) : 0;
+    const sales = volume * (Number.isFinite(rateValue) ? rateValue : 0);
     document.getElementById('clock-out-volume').textContent = formatVolume(volume);
-    document.getElementById('clock-out-sales').textContent = formatCurrency(volume * (Number.isFinite(rateValue) ? rateValue : 0));
+    document.getElementById('clock-out-sales').textContent = formatCurrency(sales);
+
+    // Expenses and cash due
+    const expensesTotal = computeExpenses();
+    const cashDue = Math.max(0, sales - expensesTotal);
+    document.getElementById('clock-out-expenses-total').textContent = formatCurrency(expensesTotal);
+    document.getElementById('clock-out-cash-due').textContent = formatCurrency(cashDue);
+    const warning = document.getElementById('cash-warning');
+    if (expensesTotal > sales && sales > 0) {
+      warning.classList.remove('hidden');
+    } else {
+      warning.classList.add('hidden');
+    }
   };
+
+  // Wire expense add/remove
+  function addExpenseRow() {
+    const container = document.getElementById('expense-rows');
+    const index = container.children.length;
+    const row = document.createElement('div');
+    row.className = 'expense-row';
+    row.dataset.index = index;
+    row.innerHTML = `
+      <input type="text" class="expense-item" placeholder="Item" maxlength="60" />
+      <input type="number" class="expense-cost" step="0.01" min="0" placeholder="₹0.00" inputmode="decimal" />
+      <button type="button" class="btn btn-secondary btn-small expense-remove">✕ Remove</button>`;
+    container.appendChild(row);
+    row.querySelector('.expense-cost').addEventListener('input', compute);
+    row.querySelector('.expense-item').addEventListener('input', compute);
+    row.querySelector('.expense-remove').addEventListener('click', () => {
+      row.remove();
+      compute();
+    });
+    compute();
+  }
+
+  document.getElementById('add-expense-btn').addEventListener('click', addExpenseRow);
+
+  // Wire initial expense fields
+  document.querySelectorAll('.expense-cost').forEach(el => el.addEventListener('input', compute));
+  document.querySelectorAll('.expense-item').forEach(el => el.addEventListener('input', compute));
+
+  const removalBtns = document.querySelectorAll('.expense-remove');
+  if (removalBtns.length === 1) removalBtns[0].hidden = true; // hide remove on initial lone row
+
   ['clock-out-closing', 'clock-out-rate'].forEach(id => document.getElementById(id).addEventListener('input', compute));
 
   document.getElementById('clock-out-form').addEventListener('submit', async e => {
@@ -442,23 +641,43 @@ function openClockOutForm(stationId, pump, rate, session) {
     const finalRate = rateLocked ? Number(rate.rate) : rateValue;
     setBusy(button, true, 'Saving…');
 
+    // Collect expense data
+    const expenseItems = [];
+    document.querySelectorAll('.expense-row').forEach(row => {
+      const item = (row.querySelector('.expense-item')?.value || '').trim();
+      const cost = parseFloat(row.querySelector('.expense-cost')?.value);
+      if (item && Number.isFinite(cost) && cost >= 0) {
+        expenseItems.push({ item, cost });
+      }
+    });
+    const notes = readText('clock-out-notes');
+    const expensesTotal = computeExpenses();
+    const volume = Number.isFinite(opening) ? Math.max(0, closing - opening) : 0;
+    const sales = volume * finalRate;
+    const cashDue = Math.max(0, sales - expensesTotal);
+
+    // Part D: if a manager/admin is closing on behalf of staff, auto-approve
+    const shiftStatus = isOverseerClosing ? 'approved' : 'pending';
+    const reviewedBy = isOverseerClosing ? me.uid : null;
+    const reviewedAt = isOverseerClosing ? serverTimestamp() : null;
+
     const sessionRef = doc(getDb(), 'stations', stationId, 'pumpSessions', pump.id);
     const meNow = getCurrentUserData();
     try {
       await runTransaction(getDb(), async transaction => {
         const snapshot = await transaction.get(sessionRef);
         const current = snapshot.exists() ? snapshot.data() : null;
-        if (!current || current.status !== 'active' || current.activeUid !== meNow.uid) {
+        if (!current || current.status !== 'active' || current.activeUid !== actualStaffUid) {
           const released = new Error('This pump session changed before it could be ended.');
           released.code = 'session-released';
           throw released;
         }
+        // E1: Include pumpName and product explicitly so sessionFieldsOk() passes
         const clockInDate = current.clockInAt && typeof current.clockInAt.toDate === 'function'
           ? current.clockInAt.toDate() : null;
         const hoursWorked = clockInDate
           ? Math.round(Math.max(0, Date.now() - clockInDate.getTime()) / 3600000 * 100) / 100
           : 0;
-        const volume = closing - Number(current.opening);
         const shiftRef = doc(collection(getDb(), 'stations', stationId, 'shifts'));
         transaction.set(shiftRef, {
           pumpId: pump.id,
@@ -470,16 +689,27 @@ function openClockOutForm(stationId, pump, rate, session) {
           closing,
           volume,
           rate: finalRate,
-          sales: volume * finalRate,
+          sales,
           createdBy: meNow.uid,
-          staffId: meNow.uid,
-          staffUid: meNow.uid,
-          staffName: meNow.fullName || meNow.email || meNow.displayName || 'Staff member',
+          // Part B: attribute shift to the original session owner, not the manager
+          staffId: actualStaffUid,
+          staffUid: actualStaffUid,
+          staffName: actualStaffName,
           clockInAt: current.clockInAt || null,
           clockOutAt: serverTimestamp(),
           hoursWorked,
           createdAt: serverTimestamp(),
+          // Part C: new fields
+          notes: notes || '',
+          expenses: expenseItems,
+          expensesTotal,
+          cashDue,
+          // Part D: approval status
+          status: shiftStatus,
+          ...(reviewedBy ? { approvedBy: reviewedBy } : {}),
+          ...(reviewedAt ? { approvedAt: reviewedAt } : {}),
         });
+        // E1: Include pumpName and product explicitly in the idle-session write
         transaction.update(sessionRef, {
           status: 'idle',
           activeUid: null,
@@ -488,18 +718,28 @@ function openClockOutForm(stationId, pump, rate, session) {
           opening: null,
           date: null,
           shiftLabel: null,
+          pumpName: current.pumpName || pump.name || 'Pump',
+          product: current.product || pump.product || '',
           updatedAt: serverTimestamp(),
           updatedBy: meNow.uid,
         });
       });
       invalidateStation(stationId);
       closeModal('generic-modal');
-      const volume = closing - opening;
-      toastSuccess(`Shift Ended — ${formatVolume(volume)} · ${formatCurrency(volume * finalRate)}`);
+      toastSuccess(`Shift Ended — ${formatVolume(volume)} · ${formatCurrency(sales)}`);
       window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId } }));
     } catch (err) {
-      if (err.code === 'session-released') fail('This pump session is no longer yours. It may have been force-released by an admin.');
-      else fail(formatFirebaseError(err));
+      const permissionDenied = err?.code === 'permission-denied'
+        || String(err?.message || '').includes('Missing or insufficient permissions');
+      if (err.code === 'session-released') {
+        fail("This shift isn't showing as yours anymore. Refresh the page and try again.");
+      } else if (permissionDenied) {
+        fail(denyReason('pumpSession.end', {
+          stationId, pumpId: pump.id, activeUid: session?.activeUid,
+        }));
+      } else {
+        fail(formatFirebaseError(err));
+      }
       setBusy(button, false);
     }
   });

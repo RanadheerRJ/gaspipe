@@ -16,6 +16,9 @@ import {
   signOut,
   updatePassword,
   reauthenticateWithCredential,
+  sendPasswordResetEmail,
+  confirmPasswordReset,
+  verifyPasswordResetCode,
   EmailAuthProvider,
 } from 'https://www.gstatic.com/firebasejs/10.14.1/firebase-auth.js';
 import {
@@ -125,6 +128,9 @@ export {
   signOut,
   updatePassword,
   reauthenticateWithCredential,
+  sendPasswordResetEmail,
+  confirmPasswordReset,
+  verifyPasswordResetCode,
   EmailAuthProvider,
   collection,
   collectionGroup,

@@ -4,15 +4,17 @@ rules_version = '2';
  * PumpLog security rules — server-side source of truth for RBAC.
  * The client mirrors this logic in js/auth.js `can()` purely for rendering.
  *
- * Roles
- *   superadmin   — full control everywhere from world
- *   stationadmin — rates/pumps/shifts + staff they created, on assigned stations
+ * Roles (hierarchy, highest → lowest)
+ *   superadmin    — full control everywhere from world
+ *   stationadmin  — rates/pumps/shifts + staff they created, on assigned
+ *                   stations; can also create managers for their stations
+ *   manager       — Station Manager: same operational powers as stationadmin
+ *                   (pumps, rates, shifts, staff they created, shift approvals)
+ *                   EXCEPT cannot create/edit/delete stations, cannot create
+ *                   other managers or station admins, and only manages staff
+ *                   they personally created
  *   staff        — read assigned stations, log shifts on their assigned pumps,
  *                  and read ONLY their own shift records
- *
- * Rates are exclusively controlled by Super Admin / Station Admin.
- * Staff may be restricted to specific pumps via the `pumpIds` list on their
- * profile (empty list = all pumps at their assigned stations).
  */
 service cloud.firestore {
   match /databases/{database}/documents {
@@ -43,6 +45,7 @@ service cloud.firestore {
 
     function isSuperAdmin()   { return myRole() == 'superadmin'; }
     function isStationAdmin() { return myRole() == 'stationadmin'; }
+    function isManager()      { return myRole() == 'manager'; }
 
     function myStations() {
       return hasProfile() && me().stationIds is list ? me().stationIds : [];
@@ -54,7 +57,9 @@ service cloud.firestore {
     }
 
     function canManageStation(stationId) {
-      return isSuperAdmin() || (isStationAdmin() && stationId in myStations());
+      return isSuperAdmin()
+        || (isStationAdmin() && stationId in myStations())
+        || (isManager() && stationId in myStations());
     }
 
     // Staff pump restrictions are enforced here as well as in js/auth.js.
@@ -67,11 +72,60 @@ service cloud.firestore {
         ? me().pumpIds : [];
     }
 
+    // Daily roster: stations/{id}/assignments/{date}_{pumpId}
+    function assignmentPath(stationId, date, pumpId) {
+      return /databases/$(database)/documents/stations/$(stationId)/assignments/$(date + '_' + pumpId);
+    }
+
+    function rosteredOn(stationId, date, pumpId) {
+      return exists(assignmentPath(stationId, date, pumpId))
+        && get(assignmentPath(stationId, date, pumpId)).data.staffUids is list
+        && request.auth.uid in get(assignmentPath(stationId, date, pumpId)).data.staffUids;
+    }
+
+    // True when the board rosters the caller onto this pump for the shift
+    // date carried by the document being written.
+    //
+    // The date is taken from the request rather than from request.time
+    // because board dates are the station's LOCAL calendar day while
+    // request.time is UTC — the two disagree for part of every day in any
+    // non-UTC zone (a 01:00 IST shift is still "yesterday" in UTC). Both the
+    // session lock and the shift record carry a validated `date` string, and
+    // being rostered on a pump is a genuine assignment whichever day it is,
+    // so this stays accurate without a timezone guess. The atomic pump-lock
+    // transaction remains the real authority over who holds a pump.
+    function rosteredForRequest(stationId, pumpId) {
+      return request.resource.data.keys().hasAny(['date'])
+        && request.resource.data.date is string
+        && request.resource.data.date.size() == 10
+        && rosteredOn(stationId, request.resource.data.date, pumpId);
+    }
+
+    // A staff member may use a pump when the daily board rosters them onto it,
+    // OR their standing pumpIds list includes it, OR they have no restriction
+    // at all (empty standing list). The last case keeps brand-new accounts
+    // working before anyone has touched the roster.
     function canUsePump(stationId, pumpId) {
       return canManageStation(stationId)
         || (myRole() == 'staff'
             && canAccessStation(stationId)
-            && (myPumps().size() == 0 || pumpId in myPumps()));
+            && (myPumps().size() == 0
+                || pumpId in myPumps()
+                || rosteredForRequest(stationId, pumpId)));
+    }
+
+    function assignmentFieldsOk() {
+      return request.resource.data.keys().hasAll(['date', 'pumpId', 'staffUids'])
+        && request.resource.data.keys().hasOnly([
+             'date', 'pumpId', 'pumpName', 'product', 'staffUids', 'staffNames',
+             'note', 'createdAt', 'createdBy', 'updatedAt', 'updatedBy'
+           ])
+        && request.resource.data.date is string
+        && request.resource.data.pumpId is string
+        && request.resource.data.staffUids is list
+        && request.resource.data.staffUids.size() <= 20
+        && (!request.resource.data.keys().hasAny(['note'])
+            || (request.resource.data.note is string && request.resource.data.note.size() <= 300));
     }
 
     function sessionPath(stationId, pumpId) {
@@ -101,6 +155,15 @@ service cloud.firestore {
       return sessionFieldsOk() && request.resource.data.status == 'idle';
     }
 
+    // Clock-out authority comes from the active lock, not from a roster entry
+    // that may be changed after clock-in. The shift create still has to happen
+    // atomically with that exact lock becoming idle (see /shifts below).
+    function ownsActiveSession(stationId, pumpId) {
+      return exists(sessionPath(stationId, pumpId))
+        && get(sessionPath(stationId, pumpId)).data.status == 'active'
+        && get(sessionPath(stationId, pumpId)).data.activeUid == request.auth.uid;
+    }
+
     function bootstrapPath() {
       return /databases/$(database)/documents/app/bootstrap;
     }
@@ -111,13 +174,12 @@ service cloud.firestore {
 
     // ── Validation helpers ──────────────────────────────────────────
     function isValidRole(role) {
-      return role in ['superadmin', 'stationadmin', 'staff'];
+      return role in ['superadmin', 'stationadmin', 'manager', 'staff'];
     }
 
     function userFieldsOk() {
       return request.resource.data.keys().hasAll(['role', 'stationIds'])
-        && (request.resource.data.keys().hasAny(['email'])
-            || request.resource.data.keys().hasAny(['username']))
+        && request.resource.data.keys().hasAny(['email', 'username', 'phoneNumber'])
         && request.resource.data.keys().hasOnly([
              'email', 'firstName', 'lastName', 'fullName', 'username', 'phoneNumber',
              'employeeId', 'avatarUrl', 'role', 'stationIds', 'pumpIds',
@@ -132,7 +194,11 @@ service cloud.firestore {
                 && request.resource.data.pumpIds.size() <= 200))
         && (!request.resource.data.keys().hasAny(['fullName']) || request.resource.data.fullName is string)
         && (!request.resource.data.keys().hasAny(['username']) || request.resource.data.username is string)
-        && (!request.resource.data.keys().hasAny(['phoneNumber']) || request.resource.data.phoneNumber is string)
+        && (!request.resource.data.keys().hasAny(['email']) || request.resource.data.email is string)
+        // Phone is stored as E.164-ish digits (optional leading +, 7-15 digits).
+        && (!request.resource.data.keys().hasAny(['phoneNumber'])
+            || (request.resource.data.phoneNumber is string
+                && request.resource.data.phoneNumber.matches('^[+]?[0-9]{7,15}$')))
         && (!request.resource.data.keys().hasAny(['status'])
             || request.resource.data.status in ['invited', 'active', 'disabled'])
         && (!request.resource.data.keys().hasAny(['pin_reset_required'])
@@ -180,6 +246,25 @@ service cloud.firestore {
         && request.resource.data.stationIds.hasOnly(myStations());
     }
 
+    // A Station Admin may mint a manager for stations they hold.
+    function stationAdminCreatingManager() {
+      return isStationAdmin()
+        && userFieldsOk()
+        && request.resource.data.role == 'manager'
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.stationIds.hasOnly(myStations());
+    }
+
+    // A Manager may only mint staff (not other managers/admins), only for
+    // stations they hold.
+    function managerCreatingStaff() {
+      return isManager()
+        && userFieldsOk()
+        && request.resource.data.role == 'staff'
+        && request.resource.data.createdBy == request.auth.uid
+        && request.resource.data.stationIds.hasOnly(myStations());
+    }
+
     // Station Admins may edit only the staff accounts they created, and may
     // never escalate a role or grant a station they do not hold themselves.
     function stationAdminUpdatingOwnStaff() {
@@ -194,8 +279,49 @@ service cloud.firestore {
         && userFieldsOk();
     }
 
+    // A Manager may edit only the staff accounts they created.
+    function managerUpdatingOwnStaff() {
+      return isManager()
+        && resource.data.role == 'staff'
+        && resource.data.createdBy == request.auth.uid
+        && request.resource.data.role == 'staff'
+        && ((!resource.data.keys().hasAny(['email']) && !request.resource.data.keys().hasAny(['email']))
+            || request.resource.data.email == resource.data.email)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.stationIds.hasOnly(myStations())
+        && userFieldsOk();
+    }
+
+    // Team management is station-scoped, not creator-scoped: a Station Admin
+    // must be able to roster and edit staff that one of their Managers
+    // created (and vice versa), otherwise the daily board can only ever show
+    // half the team. Role escalation is still blocked — the target stays
+    // 'staff' and may only hold stations the caller holds.
+    function targetIsMyStationStaff() {
+      return resource.data.role == 'staff'
+        && resource.data.stationIds is list
+        && resource.data.stationIds.hasAny(myStations());
+    }
+
+    function overseerUpdatingStationStaff() {
+      return (isStationAdmin() || isManager())
+        && targetIsMyStationStaff()
+        && request.resource.data.role == 'staff'
+        && ((!resource.data.keys().hasAny(['email']) && !request.resource.data.keys().hasAny(['email']))
+            || request.resource.data.email == resource.data.email)
+        && request.resource.data.createdBy == resource.data.createdBy
+        && request.resource.data.stationIds.hasOnly(myStations())
+        && userFieldsOk();
+    }
+
     function stationAdminDeletingOwnStaff() {
       return isStationAdmin()
+        && resource.data.role == 'staff'
+        && resource.data.createdBy == request.auth.uid;
+    }
+
+    function managerDeletingOwnStaff() {
+      return isManager()
         && resource.data.role == 'staff'
         && resource.data.createdBy == request.auth.uid;
     }
@@ -237,25 +363,44 @@ service cloud.firestore {
              request.auth.uid == uid
           || isSuperAdmin()
           || (isStationAdmin() && resource.data.createdBy == request.auth.uid)
+          || (isManager() && resource.data.createdBy == request.auth.uid)
+          // Anyone sharing a station with the caller, so the roster board can
+          // resolve names for staff someone else created.
+          || ((isStationAdmin() || isManager())
+              && resource.data.stationIds is list
+              && resource.data.stationIds.hasAny(myStations()))
         );
 
-      // Super Admin lists everyone. A Station Admin's query must be scoped to
-      // the staff they created; an unscoped list returns a doc that fails this
-      // condition, so Firestore rejects the whole query.
+      // Super Admin lists everyone. Managers and Station Admins must scope
+      // their query — either to the accounts they created, or to one of their
+      // own stations (array-contains). An unscoped list returns a doc that
+      // fails this condition, so Firestore rejects the whole query. Phone
+      // sign-in authenticates directly against the synthetic
+      // `phone:<digits>@pumplog.local` Auth email and never performs a
+      // pre-auth Firestore lookup, so no public read on phoneNumber is
+      // required.
       allow list: if isSuperAdmin()
-        || (isStationAdmin() && resource.data.createdBy == request.auth.uid);
+        || (isStationAdmin() && resource.data.createdBy == request.auth.uid)
+        || (isManager() && resource.data.createdBy == request.auth.uid)
+        || ((isStationAdmin() || isManager())
+            && resource.data.stationIds is list
+            && resource.data.stationIds.hasAny(myStations()));
 
       allow create: if isSignedIn() && (
            (isSuperAdmin() && userFieldsOk())
         || isBootstrapSuperAdmin(uid)
         || isSelfSignupStaff(uid)
         || stationAdminCreatingStaff()
+        || stationAdminCreatingManager()
+        || managerCreatingStaff()
       );
 
       // Super Admin may edit anyone except their own role (no self-lockout).
       allow update: if isSignedIn() && (
            (isSuperAdmin() && request.auth.uid != uid && userFieldsOk())
         || stationAdminUpdatingOwnStaff()
+        || managerUpdatingOwnStaff()
+        || overseerUpdatingStationStaff()
         || selfUpdatingRuntimeFields(uid)
       );
 
@@ -266,6 +411,7 @@ service cloud.firestore {
         && (
              (isSuperAdmin() && resource.data.role != 'superadmin')
           || stationAdminDeletingOwnStaff()
+          || managerDeletingOwnStaff()
         );
     }
 
@@ -325,6 +471,49 @@ service cloud.firestore {
         allow create, update, delete: if isSignedIn() && canManageStation(stationId);
       }
 
+      // ── Daily pump assignments (Kanban roster) ────────────────────
+      // Every station member reads the board so staff can see where they are
+      // rostered; only managers and admins change it.
+      match /assignments/{assignmentId} {
+        allow read: if isSignedIn() && canAccessStation(stationId);
+
+        allow create, update: if isSignedIn()
+          && canManageStation(stationId)
+          && assignmentFieldsOk()
+          && assignmentId == request.resource.data.date + '_' + request.resource.data.pumpId;
+
+        allow delete: if isSignedIn() && canManageStation(stationId);
+      }
+
+      // ── Fuel stock (inventory) ────────────────────────────────────
+      // `stock/current` holds per-product tank levels; `stockLog/{id}`
+      // records every delivery/dip/adjustment. Manager-only writes; any
+      // signed-in station member may read so the Dashboard can show the
+      // current level.
+      match /stock/{docId} {
+        allow read: if isSignedIn() && canAccessStation(stationId);
+        allow create, update, delete: if isSignedIn() && canManageStation(stationId)
+          && docId == 'current'
+          && request.resource.data.keys().hasOnly(['levels', 'updatedAt', 'updatedBy'])
+          && request.resource.data.levels is map;
+      }
+      match /stockLog/{logId} {
+        allow read: if isSignedIn() && canAccessStation(stationId);
+        allow create: if isSignedIn() && canManageStation(stationId)
+          && request.resource.data.keys().hasOnly([
+               'product', 'type', 'amount', 'previousLevel', 'newLevel',
+               'note', 'staffName', 'at', 'createdBy'
+             ])
+          && request.resource.data.product is string
+          && request.resource.data.type in ['delivery', 'dip', 'adjust', 'test']
+          && request.resource.data.amount is number
+          && request.resource.data.previousLevel is number
+          && request.resource.data.newLevel is number
+          && request.resource.data.newLevel >= 0
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update, delete: if false;
+      }
+
       // ── Rates ─────────────────────────────────────────────────────
       match /rates/{rateId} {
         allow read: if isSignedIn() && canAccessStation(stationId);
@@ -359,10 +548,14 @@ service cloud.firestore {
         allow update: if isSignedIn()
           && canAccessStation(stationId)
           && (
-               (resource.data.status == 'idle'
+               // Missing document (read by transaction, then set) — treat as create.
+               (resource == null
                 && request.resource.data.status == 'active'
                 && writesActiveSession(stationId, pumpId))
-            || (resource.data.status == 'active'
+            || (resource != null && resource.data.status == 'idle'
+                && request.resource.data.status == 'active'
+                && writesActiveSession(stationId, pumpId))
+            || (resource != null && resource.data.status == 'active'
                 && writesIdleSession()
                 && (resource.data.activeUid == request.auth.uid || canManageStation(stationId)))
           );
@@ -374,25 +567,32 @@ service cloud.firestore {
       // ── Shifts ────────────────────────────────────────────────────
       match /shifts/{shiftId} {
         // Managers (Super/Station Admin) read every record at the station.
-        // Staff read ONLY their own records, so their list queries must
-        // include where('createdBy', '==', <uid>) — an unscoped query would
-        // match other users' records and be rejected outright.
+        // Staff read ONLY their own records, so their list queries use
+        // where('staffUid', '==', <uid>). createdBy may be a Manager who
+        // performed clock-out on their behalf.
         allow read: if isSignedIn()
           && canAccessStation(stationId)
           && (canManageStation(stationId)
+              // `createdBy` is the person who performed clock-out. When a
+              // manager ends a shift for Staff, ownership is in staffUid.
+              || (resource.data.keys().hasAny(['staffUid'])
+                  && resource.data.staffUid == request.auth.uid)
               || resource.data.createdBy == request.auth.uid);
 
         // Any user with station access may log a reading, but only as
-        // themselves and only with sane numbers.
+        // themselves and only with sane numbers. A manager may close a shift
+        // on behalf of a staff member (the session's activeUid).
         allow create: if isSignedIn()
           && canAccessStation(stationId)
-          && canUsePump(stationId, request.resource.data.pumpId)
+          // Starting a shift is assignment-gated, but ending one is lock-gated.
+          // Keep a legitimate owner able to finish after midnight or after a
+          // manager edits/removes the day's board entry or standing pump list.
+          && (canUsePump(stationId, request.resource.data.pumpId)
+              || ownsActiveSession(stationId, request.resource.data.pumpId))
           && request.resource.data.createdBy == request.auth.uid
           && request.resource.data.keys().hasAll([
                'staffId', 'staffUid', 'staffName', 'clockInAt', 'clockOutAt', 'hoursWorked'
              ])
-          && request.resource.data.staffId == request.auth.uid
-          && request.resource.data.staffUid == request.auth.uid
           && request.resource.data.staffName is string
           && request.resource.data.clockInAt is timestamp
           && request.resource.data.clockOutAt is timestamp
@@ -403,12 +603,28 @@ service cloud.firestore {
           && request.resource.data.rate is number
           && request.resource.data.rate >= 0
           && request.resource.data.date is string
+          // New Part C fields — optional but type-checked if present
+          && (!request.resource.data.keys().hasAny(['notes']) || request.resource.data.notes is string)
+          && (!request.resource.data.keys().hasAny(['expenses']) || request.resource.data.expenses is list)
+          && (!request.resource.data.keys().hasAny(['expensesTotal']) || (request.resource.data.expensesTotal is number && request.resource.data.expensesTotal >= 0))
+          && (!request.resource.data.keys().hasAny(['cashDue']) || (request.resource.data.cashDue is number && request.resource.data.cashDue >= 0))
+          && (!request.resource.data.keys().hasAny(['status']) || request.resource.data.status in ['pending', 'approved', 'rejected'])
           // A new shift is valid only as the same atomic operation that
           // closes this user's active session. This prevents direct writes
           // from bypassing the pump lock.
           && exists(sessionPath(stationId, request.resource.data.pumpId))
           && get(sessionPath(stationId, request.resource.data.pumpId)).data.status == 'active'
-          && get(sessionPath(stationId, request.resource.data.pumpId)).data.activeUid == request.auth.uid
+          && (
+               // Self clock-out: the writer is the session owner
+               (get(sessionPath(stationId, request.resource.data.pumpId)).data.activeUid == request.auth.uid
+                && request.resource.data.staffId == request.auth.uid
+                && request.resource.data.staffUid == request.auth.uid)
+               // Manager closing on behalf of staff: writer manages the station
+               // and shift staff fields match the session owner
+            || (canManageStation(stationId)
+                && request.resource.data.staffId == get(sessionPath(stationId, request.resource.data.pumpId)).data.activeUid
+                && request.resource.data.staffUid == get(sessionPath(stationId, request.resource.data.pumpId)).data.activeUid)
+          )
           && getAfter(sessionPath(stationId, request.resource.data.pumpId)).data.status == 'idle'
           && getAfter(sessionPath(stationId, request.resource.data.pumpId)).data.activeUid == null;
 

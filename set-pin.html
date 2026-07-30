@@ -1,0 +1,146 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+  <meta charset="UTF-8" />
+  <meta name="viewport" content="width=device-width, initial-scale=1, viewport-fit=cover" />
+  <meta name="theme-color" content="#ffffff" media="(prefers-color-scheme: light)" />
+  <meta name="theme-color" content="#0f172a" media="(prefers-color-scheme: dark)" />
+  <meta name="robots" content="noindex" />
+  <title>Set your Cloud PIN — PumpLog</title>
+  <link rel="stylesheet" href="css/style.css" />
+  <link rel="icon" type="image/png" sizes="192x192" href="icons/icon-192.png" />
+</head>
+<body class="reset-body">
+  <main class="auth-container reset-container">
+    <div class="auth-logo">
+      <div class="auth-icon" aria-hidden="true">
+        <img src="icons/logo-512.png" alt="" width="72" height="72" />
+      </div>
+      <h1>PumpLog</h1>
+      <p class="auth-tagline">Set a new Cloud PIN</p>
+    </div>
+
+    <div class="auth-card">
+      <h2 id="reset-title">Choose a new Cloud PIN</h2>
+      <p id="reset-subtitle" class="auth-subtitle">Enter a new 4–8 digit PIN to regain access to your account.</p>
+      <p id="reset-error" class="auth-msg hidden" role="alert" aria-live="assertive"></p>
+
+      <form id="reset-form" novalidate>
+        <div class="field">
+          <label for="new-pin">New Cloud PIN</label>
+          <div class="input-affix">
+            <input type="password" id="new-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required />
+            <button type="button" class="affix-btn" data-password-toggle="new-pin" aria-label="Show PIN" aria-pressed="false">Show</button>
+          </div>
+          <small class="hint">4–8 digits. Pick something you won't write on the pump.</small>
+        </div>
+        <div class="field">
+          <label for="confirm-pin">Confirm Cloud PIN</label>
+          <div class="input-affix">
+            <input type="password" id="confirm-pin" inputmode="numeric" autocomplete="new-password" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required />
+            <button type="button" class="affix-btn" data-password-toggle="confirm-pin" aria-label="Show PIN" aria-pressed="false">Show</button>
+          </div>
+        </div>
+        <button type="submit" id="reset-submit" class="btn btn-primary btn-full">Save new Cloud PIN</button>
+      </form>
+
+      <div id="reset-links" class="auth-links">
+        <a href="index.html" class="link-btn">← Back to sign in</a>
+      </div>
+
+      <div id="reset-done" class="hidden">
+        <div class="success-check" aria-hidden="true" style="margin:0 auto 12px">✓</div>
+        <p><strong>Your Cloud PIN has been updated.</strong></p>
+        <p class="muted-note">You can now sign in with your email and the new PIN.</p>
+        <a href="index.html" class="btn btn-primary btn-full">Go to sign in</a>
+      </div>
+    </div>
+  </main>
+
+  <script type="module">
+    import './js/firebase.js';
+    import { verifyPinResetCode, completePinReset } from './js/staff-auth.js';
+
+    const $ = id => document.getElementById(id);
+
+    function showError(message) {
+      const el = $('reset-error');
+      el.textContent = message;
+      el.className = 'auth-msg auth-error';
+    }
+
+    function showInfo(message) {
+      const el = $('reset-error');
+      el.textContent = message;
+      el.className = 'auth-msg auth-info';
+    }
+
+    function setBusy(busy, label) {
+      const btn = $('reset-submit');
+      btn.disabled = busy;
+      btn.setAttribute('aria-busy', String(busy));
+      btn.textContent = label || (busy ? 'Saving…' : 'Save new Cloud PIN');
+    }
+
+    // Show/hide toggles
+    document.querySelectorAll('[data-password-toggle]').forEach(toggle => {
+      toggle.addEventListener('click', () => {
+        const field = document.getElementById(toggle.dataset.passwordToggle);
+        if (!field) return;
+        const show = field.type === 'password';
+        field.type = show ? 'text' : 'password';
+        toggle.textContent = show ? 'Hide' : 'Show';
+        toggle.setAttribute('aria-pressed', String(show));
+      });
+    });
+
+    // Extract the oobCode from the URL that Firebase emails.
+    const params = new URLSearchParams(window.location.search);
+    const code = params.get('oobCode') || '';
+
+    if (!code) {
+      $('reset-form').classList.add('hidden');
+      $('reset-title').textContent = 'Invalid reset link';
+      $('reset-subtitle').textContent = 'This link is missing the reset code. Request a new reset email from your PumpLog sign-in screen or ask your manager.';
+    } else {
+      // Verify the code before showing the form so typos/expired links
+      // fail fast with a clear message.
+      (async () => {
+        try {
+          const { email } = await verifyPinResetCode(code);
+          showInfo(`Ready to reset the PIN for ${email}.`);
+        } catch (err) {
+          $('reset-form').classList.add('hidden');
+          $('reset-title').textContent = 'This link has expired';
+          $('reset-subtitle').textContent = 'Password reset links expire after 1 hour or after they are used. Request a new one from your manager or the PumpLog sign-in screen.';
+        }
+      })();
+    }
+
+    $('reset-form').addEventListener('submit', async (event) => {
+      event.preventDefault();
+      const newPin = $('new-pin').value.trim();
+      const confirm = $('confirm-pin').value.trim();
+      if (!/^\d{4,8}$/.test(newPin)) return showError('Cloud PIN must be 4–8 digits.');
+      if (newPin !== confirm) return showError('The two PINs do not match.');
+      setBusy(true, 'Saving…');
+      try {
+        await completePinReset({ code, newPin });
+        $('reset-form').classList.add('hidden');
+        $('reset-links').classList.add('hidden');
+        $('reset-error').classList.add('hidden');
+        $('reset-done').classList.remove('hidden');
+        $('reset-title').textContent = 'PIN updated';
+        $('reset-subtitle').textContent = 'Sign in with your email and new Cloud PIN.';
+      } catch (err) {
+        const message = String(err?.message || 'Something went wrong.');
+        const code2 = err?.code || '';
+        if (code2.includes('expired') || message.includes('expired')) showError('This reset link has expired. Request a new one.');
+        else if (code2.includes('invalid') || message.includes('invalid')) showError('This reset link is no longer valid. Request a new one.');
+        else showError(`Could not update PIN: ${message}`);
+        setBusy(false);
+      }
+    });
+  </script>
+</body>
+</html>

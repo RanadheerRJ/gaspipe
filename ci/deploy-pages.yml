@@ -48,7 +48,7 @@ jobs:
         # rules, or docs — so the deployed site stays a clean static bundle.
         run: |
           mkdir -p _site
-          cp -r index.html manifest.json sw.js version.json css js icons _site/
+          cp -r index.html set-pin.html manifest.json sw.js version.json css js icons _site/
 
       - name: Setup Pages
         uses: actions/configure-pages@v5

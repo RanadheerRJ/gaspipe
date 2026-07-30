@@ -12,7 +12,7 @@
 
 import {
   getCurrentUser, getCurrentUserData, isSuperAdmin, ROLES, ROLE_BADGE,
-  formatFirebaseError, doSignOut,
+  formatFirebaseError, doSignOut, myDailyPumpIds,
 } from './auth.js';
 import {
   changeCloudPin, getMyPinStatus,
@@ -30,7 +30,7 @@ import {
   confirmDelete, ICONS,
 } from './components.js';
 
-export const APP_VERSION = '1.0.0';
+export const APP_VERSION = '1.7.0';
 
 const byId = id => document.getElementById(id);
 const APP_VERSION_LABEL = `v${APP_VERSION}`;
@@ -102,10 +102,13 @@ export async function openProfileModal({ stations = [], onSignOut } = {}) {
     : stations.length
       ? stations.map(s => s.name).join(', ')
       : 'None assigned';
+  const rostered = myDailyPumpIds().length;
   const pumpText = userData.role === 'staff'
-    ? (userData.pumpIds?.length
-        ? `${userData.pumpIds.length} assigned pump${userData.pumpIds.length === 1 ? '' : 's'}`
-        : 'All pumps at your stations')
+    ? (rostered
+        ? `${rostered} pump${rostered === 1 ? '' : 's'} assigned to you today`
+        : userData.pumpIds?.length
+          ? `${userData.pumpIds.length} usual pump${userData.pumpIds.length === 1 ? '' : 's'}`
+          : 'No pump assigned today — ask your manager')
     : 'All pumps';
 
   const lockStatus = getAppLockStatus(uid);
@@ -122,6 +125,7 @@ export async function openProfileModal({ stations = [], onSignOut } = {}) {
 
     <dl class="profile-settings-list profile-detail-grid">
       <dt>Email</dt><dd>${h(userData.email || '—')}</dd>
+      <dt>Phone</dt><dd>${h(userData.phoneNumber || '—')}</dd>
       <dt>Stations</dt><dd>${h(stationText)}</dd>
       <dt>Pumps</dt><dd>${h(pumpText)}</dd>
       <dt>App version</dt><dd>${APP_VERSION_LABEL}</dd>
@@ -133,7 +137,7 @@ export async function openProfileModal({ stations = [], onSignOut } = {}) {
       <div class="security-row">
         <div class="security-row-text">
           <strong>Cloud PIN</strong>
-          <small>Used with your email to sign in through Firebase Authentication.</small>
+          <small>Used with your email or phone to sign in through Firebase Authentication. Changing it here updates it for every device.</small>
         </div>
         <button type="button" id="profile-change-pin" class="btn btn-secondary btn-small">${ICONS.pin} Change</button>
       </div>
