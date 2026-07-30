@@ -34,8 +34,10 @@ import { initConfig, renderConfig } from './config-page.js';
 import { initHistory, renderHistory } from './history.js';
 import { initReports, renderReports } from './reports.js';
 import {
-  signInWithEmailPin, recordLogout, getMyPinStatus,
+  signInWithEmailPin, signInWithPhonePin, recordLogout, getMyPinStatus,
+  sendPinResetEmail,
 } from './staff-auth.js';
+import { normalizePhone, isValidPhone } from './station-settings.js';
 import {
   openProfileModal, openForcedCloudPinChange,
   openAppLockSetupModal,
@@ -239,7 +241,7 @@ function initFreeModeLogin() {
   const stationField = $('auth-station-field');
   if (stationField) stationField.classList.add('hidden');
   const subtitle = $('auth-subtitle');
-  if (subtitle) subtitle.textContent = 'Sign in with your email and Cloud PIN.';
+  if (subtitle) subtitle.textContent = 'Sign in with your email or phone and Cloud PIN.';
   renderAuthFields();
 }
 
@@ -345,10 +347,8 @@ async function refreshData(source) {
   if (refreshing) return;
   refreshing = true;
 
-  const fab = $('fab-refresh');
   const topBtn = $('btn-refresh');
-  [fab, topBtn].forEach(b => b?.classList.add('is-spinning'));
-  fab?.setAttribute('aria-busy', 'true');
+  topBtn?.classList.add('is-spinning');
 
   try {
     invalidate();               // drop every cached query
@@ -363,8 +363,7 @@ async function refreshData(source) {
     toastError(formatFirebaseError(err));
   } finally {
     refreshing = false;
-    [fab, topBtn].forEach(b => b?.classList.remove('is-spinning'));
-    fab?.removeAttribute('aria-busy');
+    topBtn?.classList.remove('is-spinning');
   }
 }
 
@@ -421,9 +420,11 @@ function setAuthSubmitting(busy) {
   }
 }
 
-function pinFieldHTML({ id, label, autocomplete = 'current-password' }) {
+function pinFieldHTML({ id, label, autocomplete = 'current-password', length }) {
+  const min = length || 4;
+  const max = length || 8;
   return `<div class="field"><label for="${id}">${label}</label><div class="input-affix">
-    <input type="password" id="${id}" inputmode="numeric" autocomplete="${autocomplete}" pattern="[0-9]{4,8}" minlength="4" maxlength="8" required />
+    <input type="password" id="${id}" inputmode="numeric" autocomplete="${autocomplete}" pattern="[0-9]{${min},${max}}" minlength="${min}" maxlength="${max}" required />
     <button type="button" class="affix-btn" data-password-toggle="${id}" aria-label="Show PIN" aria-pressed="false">Show</button></div></div>`;
 }
 
@@ -464,9 +465,21 @@ function renderMethodTabs() {
 
 function signinFieldsHTML() {
   const remember = '<label class="remember-row"><input type="checkbox" id="auth-remember" checked /> <span>Remember me on this device</span></label>';
+  if (authMethod === 'phone-pin') {
+    return `<div class="field"><label for="auth-phone">Phone</label>
+        <input type="tel" id="auth-phone" autocomplete="tel" inputmode="tel" placeholder="+919876543210" required />
+        <small class="hint">Include the country code (e.g. +91 for India).</small></div>
+      ${pinFieldHTML({ id: 'auth-pin', label: 'Cloud PIN', length: 8 })}${remember}`;
+  }
   return `<div class="field"><label for="auth-email">Email</label>
       <input type="email" id="auth-email" autocomplete="email" autocapitalize="off" spellcheck="false" required /></div>
     ${pinFieldHTML({ id: 'auth-pin', label: 'Cloud PIN' })}${remember}`;
+}
+
+function forgotFieldsHTML() {
+  return `<div class="field"><label for="forgot-email">Email</label>
+      <input type="email" id="forgot-email" autocomplete="email" autocapitalize="off" spellcheck="false" required />
+      <small class="hint">We will email you a secure link to set a new 4–8 digit Cloud PIN. Phone-only accounts cannot receive email — ask your admin to reset the account.</small></div>`;
 }
 
 function renderAuthFields() {
@@ -476,24 +489,32 @@ function renderAuthFields() {
   renderMethodTabs();
 
   const methods = enabledLoginMethods(loginPolicy);
+  const hasPhone = methods.some(m => m.id === 'phone-pin');
+  const hasEmail = methods.some(m => m.id === 'email-pin');
   if (authMode === 'signin') {
+    // Make sure the selected method is still enabled after a policy change.
+    if (!methods.some(m => m.id === authMethod)) {
+      authMethod = methods[0]?.id || 'email-pin';
+    }
     if (methods.length === 0) {
       fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🚫</span>
-        <p>Email + Cloud PIN sign-in is disabled for this station. Contact your admin.</p></div>`;
+        <p>No sign-in methods are enabled for this station. Contact your admin.</p></div>`;
     } else {
       fields.innerHTML = signinFieldsHTML();
     }
-    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="forgot">Forgot Cloud PIN?</button>`;
+    links.innerHTML = hasEmail
+      ? `<button type="button" class="link-btn" data-auth-mode="forgot">Forgot Cloud PIN?</button>`
+      : '';
   } else {
-    fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🔐</span><p>Ask your admin to create a new testing account if you forget your Cloud PIN. Signed-in users can change their own Cloud PIN from Profile.</p></div>
-      <div class="auth-info-card"><span aria-hidden="true">📱</span><p>Forgot your <strong>App Lock</strong> PIN? Use “Forgot App Lock PIN?” on the lock screen and answer your security questions.</p></div>`;
+    fields.innerHTML = forgotFieldsHTML();
     links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
   }
   wireAuthFields();
   document.querySelectorAll('[data-auth-mode]').forEach(button =>
     button.addEventListener('click', () => setAuthMode(button.dataset.authMode)));
   resetAuthSubmit();
-  $('auth-submit').hidden = authMode === 'forgot' || (authMode === 'signin' && methods.length === 0);
+  $('auth-submit').hidden = methods.length === 0;
+  if (authMode === 'forgot') $('auth-submit').textContent = 'Send reset link';
 }
 
 
@@ -502,9 +523,17 @@ function setAuthMode(mode) {
   const titles = {
     signin: 'Sign in', forgot: 'Forgot your Cloud PIN',
   };
+  const methods = enabledLoginMethods(loginPolicy);
+  const hasPhone = methods.some(m => m.id === 'phone-pin');
+  const hasEmail = methods.some(m => m.id === 'email-pin');
   const subtitles = {
-    signin: 'Sign in with email + Cloud PIN.',
-    forgot: 'How account recovery works.',
+    signin: hasPhone && hasEmail
+      ? 'Sign in with your email or phone and Cloud PIN.'
+      : hasPhone ? 'Sign in with your phone and Cloud PIN.'
+      : 'Sign in with your email and Cloud PIN.',
+    forgot: hasEmail
+      ? 'Enter the email on your account. We will send a secure link to pick a new Cloud PIN.'
+      : 'Phone-only accounts cannot receive a reset email. Ask your manager to reset your account.',
   };
   $('auth-title').textContent = titles[authMode] || 'Sign in';
   $('auth-subtitle').textContent = subtitles[authMode] || '';
@@ -518,11 +547,11 @@ function setupAuthForm() {
   $('auth-form').addEventListener('submit', async e => {
     e.preventDefault();
     if (authSubmitting) return;
-    if (authMode !== 'signin') return;
     const fail = message => showAuthMessage(message, 'error');
     try {
       setAuthSubmitting(true);
-      await handleSignIn(fail);
+      if (authMode === 'forgot') await handleForgotPin(fail);
+      else await handleSignIn(fail);
     } catch (err) {
       showAuthMessage(formatFirebaseError(err), 'error');
       resetAuthSubmit();
@@ -533,13 +562,35 @@ function setupAuthForm() {
 
 async function handleSignIn(fail) {
   const remember = $('auth-remember')?.checked !== false;
-  const email = $('auth-email')?.value.trim().toLowerCase() || '';
   const pin = $('auth-pin')?.value || '';
-  if (!email || !pin) { resetAuthSubmit(); return fail('❌ Enter your email and Cloud PIN.'); }
+  if (!pin) { resetAuthSubmit(); return fail('❌ Enter your Cloud PIN.'); }
 
   await setAuthPersistence(remember);
   showAuthMessage('Signing you in…', 'info');
+
+  if (authMethod === 'phone-pin') {
+    const phoneRaw = $('auth-phone')?.value || '';
+    const phone = normalizePhone(phoneRaw);
+    if (!isValidPhone(phone)) {
+      resetAuthSubmit();
+      return fail('❌ Enter a valid phone number including the country code (e.g. +919876543210).');
+    }
+    await signInWithPhonePin({ phone, pin, remember });
+    return;
+  }
+  const email = $('auth-email')?.value.trim().toLowerCase() || '';
+  if (!email) { resetAuthSubmit(); return fail('❌ Enter your email.'); }
   await signInWithEmailPin({ email, pin, remember });
+}
+
+async function handleForgotPin(fail) {
+  const email = $('forgot-email')?.value.trim().toLowerCase() || '';
+  if (!email) return fail('❌ Enter your email address.');
+  showAuthMessage('Sending reset link…', 'info');
+  await sendPinResetEmail(email);
+  showAuthMessage(`Reset link sent to ${email}. Check your inbox (and spam) — the link expires in 1 hour.`, 'info');
+  resetAuthSubmit();
+  $('auth-submit').textContent = 'Resend reset link';
 }
 
 
@@ -570,7 +621,6 @@ function setupUI() {
   });
 
   $('btn-refresh').addEventListener('click', () => refreshData('user'));
-  $('fab-refresh').addEventListener('click', () => refreshData('user'));
 
   // Dashboard range change from the new filter bar
   window.addEventListener('pumplog:dashRangeChange', (e) => {

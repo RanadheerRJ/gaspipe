@@ -323,7 +323,9 @@ export async function getManageableUsers(stationIds = []) {
   return [...merged.values()].sort(byDisplayName);
 }
 
-/** Every user profile attached to a station (any role). */
+/** Every active user profile attached to a station (any role). Disabled and
+ *  invited profiles are excluded so roster tallies and staff pickers never
+ *  surface accounts that cannot sign in. */
 export function getUsersAtStation(stationId) {
   if (!stationId) return Promise.resolve([]);
   return cached(`users:station:${stationId}`, async () => {
@@ -331,7 +333,7 @@ export function getUsersAtStation(stationId) {
       collection(getDb(), 'users'),
       where('stationIds', 'array-contains', stationId),
     ));
-    return snapToArray(snap);
+    return snapToArray(snap).filter(u => u.status !== 'disabled' && u.status !== 'invited');
   });
 }
 

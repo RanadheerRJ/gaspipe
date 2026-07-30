@@ -398,22 +398,24 @@ export function can(action, ctx = {}) {
 
     case 'user.update':
       if (!target) return false;
-      // Nobody edits their own role/stations from the team list —
-      // prevents an admin locking themselves out by accident.
+      // Self-service PIN changes (handled through Profile) are allowed;
+      // nobody edits their own role/stations from the team list.
       if (target.id === me.uid) return false;
       if (superAdmin) return true;
-      // Station Admin manages only the staff accounts they created.
-      if (stationAdmin && target.role === 'staff' && target.createdBy === me.uid) return true;
-      // Manager manages only the staff accounts they created.
+      // Station Admin manages staff accounts at their stations (team-scoped
+      // via overseerUpdatingStationStaff), but the team-list can() only
+      // gates UI visibility; Firestore rules enforce the real check.
+      if (stationAdmin && target.role === 'staff') return true;
       if (manager && target.role === 'staff' && target.createdBy === me.uid) return true;
       return false;
 
     case 'user.delete':
+    case 'user.pin.reset':
       if (!target) return false;
-      if (target.id === me.uid) return false;                 // never delete yourself
-      if (target.role === 'superadmin') return false;          // super admins are protected
-      if (target.role === 'stationadmin') return manager ? false : false; // only superadmin (checked below)
-      if (target.role === 'manager') return manager ? false : false;        // only superadmin/stationadmin
+      if (target.id === me.uid) return action === 'user.pin.reset'; // self-service PIN reset via Profile
+      if (target.role === 'superadmin') return false;
+      if (target.role === 'stationadmin') return superAdmin;
+      if (target.role === 'manager') return superAdmin || stationAdmin;
       if (superAdmin) return true;
       if (stationAdmin && target.role === 'staff' && target.createdBy === me.uid) return true;
       if (manager && target.role === 'staff' && target.createdBy === me.uid) return true;

@@ -14,8 +14,11 @@ import { getCurrentUserData } from './auth.js';
 export const SETTINGS_VERSION = 1;
 
 export const DEFAULT_SECURITY = Object.freeze({
-  // Free mode supports one sign-in method: email + Cloud PIN.
+  // Sign-in methods: email + Cloud PIN is always available in free mode;
+  // phone + Cloud PIN is a per-station toggle that uses the same
+  // synthetic-password trick as email login.
   enableEmailLogin: true,
+  enablePhoneLogin: false,
   enableUsernameLogin: false,
   enablePasswordLogin: false,
   enablePinLogin: true,
@@ -54,6 +57,7 @@ const clampInt = (value, min, max, fallback) => {
 export function normalizeSecurity(raw = {}) {
   const merged = { ...DEFAULT_SECURITY, ...(raw || {}) };
   merged.enableEmailLogin = merged.enableEmailLogin !== false;
+  merged.enablePhoneLogin = merged.enablePhoneLogin === true;
   merged.enableUsernameLogin = merged.enableUsernameLogin === true;
   merged.enablePasswordLogin = merged.enablePasswordLogin === true;
   merged.enablePinLogin = merged.enablePinLogin !== false;
@@ -114,6 +118,7 @@ export function mergeSecurity(list) {
     values.reduce((best, v) => (order.indexOf(v) > order.indexOf(best) ? v : best), order[0]);
   const merged = {
     enableEmailLogin: items.some(s => s.enableEmailLogin),
+    enablePhoneLogin: items.some(s => s.enablePhoneLogin),
     enableUsernameLogin: items.some(s => s.enableUsernameLogin),
     enablePasswordLogin: items.some(s => s.enablePasswordLogin),
     enablePinLogin: items.some(s => s.enablePinLogin),
@@ -177,13 +182,35 @@ export function watchSecuritySettings(stationId, onUpdate) {
 // ── Login method matrix ─────────────────────────────────────────────────
 export const LOGIN_METHODS = Object.freeze([
   { id: 'email-pin', identifier: 'email', secret: 'pin', label: 'Email + Cloud PIN', icon: '📧' },
+  { id: 'phone-pin', identifier: 'phone', secret: 'pin', label: 'Phone + Cloud PIN', icon: '📱' },
 ]);
 
 export function enabledLoginMethods(settings) {
   const s = normalizeSecurity(settings);
-  return LOGIN_METHODS.filter(m =>
-    (m.identifier === 'email' ? s.enableEmailLogin : s.enableUsernameLogin) &&
-    (m.secret === 'password' ? s.enablePasswordLogin : s.enablePinLogin));
+  const idEnabled = m =>
+    m.identifier === 'email' ? s.enableEmailLogin
+    : m.identifier === 'phone' ? s.enablePhoneLogin
+    : s.enableUsernameLogin;
+  const secretEnabled = m =>
+    m.secret === 'password' ? s.enablePasswordLogin : s.enablePinLogin;
+  return LOGIN_METHODS.filter(m => idEnabled(m) && secretEnabled(m));
+}
+
+/** Normalize a phone input to E.164-ish digits only — strips everything but
+ *  digits and a leading +. Does NOT hardcode a country code; users must
+ *  enter their number with the country prefix (e.g. +91 for India). */
+export function normalizePhone(value) {
+  const raw = String(value || '').trim();
+  const digits = raw.replace(/[^\d+]/g, '');
+  const leading = digits.startsWith('+') ? '+' : '';
+  const rest = (leading ? digits.slice(1) : digits).replace(/\D/g, '');
+  return leading + rest;
+}
+
+/** Lightweight phone validation: an optional + followed by 7–15 digits. */
+export function isValidPhone(value) {
+  const phone = normalizePhone(value);
+  return /^\+?\d{7,15}$/.test(phone);
 }
 
 // ── Policy validators (return a friendly error string or null) ──────────

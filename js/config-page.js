@@ -24,9 +24,11 @@ import {
   PIN_COMPLEXITY_OPTIONS, isValidEmail,
 } from './station-settings.js';
 import {
-  createUserAccount, updateUserAccount, removeUserAccount,
+  createUserAccount, updateUserAccount, removeUserAccount, sendPinResetEmail,
 } from './staff-auth.js';
+import { normalizePhone, isValidPhone } from './station-settings.js';
 import { openProfileModal, avatarHTML } from './profile.js';
+import { getStock, openStockManagerModal } from './stock.js';
 
 let currentStationId = null;
 let stationsCache = [];
@@ -70,11 +72,14 @@ export async function renderConfig(stationId) {
     // Config is intentionally a shared page, but every topic has its own
     // permission gate. Passing config.view never exposes unrelated controls.
     const selectedStation = stations.find(station => station.id === stationId) || null;
+    const stock = stationId ? await getStock(stationId).catch(() => ({ levels: {}, updatedAt: null })) : { levels: {}, updatedAt: null };
+
     const sections = [
       renderProfileSection(me, stations, pumps),
       ifCan('stationSecurity.update', { stationId }, renderStationSecuritySection(stationId, security)),
       ifCan('rate.update', { stationId }, renderRatesSection(stationId, rates)),
       ifCan('pump.update', { stationId }, renderPumpsSection(stationId, pumps, sessions)),
+      ifCan('stationSecurity.update', { stationId }, renderStockSection(stationId, pumps, stock)),
       ifCan('station.create', {}, renderStationsSection(stations)),
       ifCan('station.reset', { stationId }, renderStationDataSection(selectedStation)),
       ifCan('team.view', {}, renderTeamSection(users, me)),
@@ -96,7 +101,7 @@ function renderProfileSection(me, stations, pumps) {
   const pumpText = me.role === 'staff'
     ? (me.pumpIds?.length
         ? `${me.pumpIds.length} usual pump${me.pumpIds.length === 1 ? '' : 's'} · plus today’s staff board`
-        : 'Set on the Who’s where page')
+        : 'Set on the Team Board page')
     : `${(pumps || []).length || 'All'} pumps visible at this station`;
   return section('Profile', '', `<div class="profile-card-grid">
     <div class="profile-card-identity">${avatarHTML(me, 'medium')}<div><strong>${h(me.fullName || me.email || 'PumpLog user')}</strong><small>${h(me.email || (me.username ? `@${me.username}` : ''))}</small></div></div>
@@ -131,9 +136,10 @@ function renderStationSecuritySection(stationId, security) {
 
   const body = `
     <div class="settings-group">
-      <h4 class="settings-group-title">🔑 Sign-in method</h4>
-      <p class="section-hint">Free mode keeps sign-in simple: email + Cloud PIN using Firebase Authentication. No Cloud Functions or pay-as-you-go APIs are used.</p>
-      ${toggle('enablePinLogin', 'Enable Cloud PIN Login', 'Allow email + Cloud PIN sign-in for this station.', s.enablePinLogin)}
+      <h4 class="settings-group-title">🔑 Sign-in methods</h4>
+      <p class="section-hint">Spark plan — email and/or phone sign-in, both using a Cloud PIN stored through Firebase Authentication. No SMS, no Cloud Functions.</p>
+      ${toggle('enableEmailLogin', 'Email + Cloud PIN', 'Allow sign-in with email address and Cloud PIN.', s.enableEmailLogin)}
+      ${toggle('enablePhoneLogin', 'Phone + Cloud PIN', 'Allow sign-in with a phone number (include country code, e.g. +91…) and Cloud PIN.', s.enablePhoneLogin)}
     </div>
     <div class="settings-group">
       <h4 class="settings-group-title">📱 App Lock (device-level)</h4>
@@ -173,9 +179,10 @@ function wireStationSecurity(stationId) {
     };
     const patch = normalizeSecurity({
       enableEmailLogin: read('enableEmailLogin'),
+      enablePhoneLogin: read('enablePhoneLogin'),
       enableUsernameLogin: false,
       enablePasswordLogin: false,
-      enablePinLogin: read('enablePinLogin'),
+      enablePinLogin: true,
       appLockEnabled: read('appLockEnabled'),
       appLockOnRefresh: read('appLockOnRefresh'),
       appLockOnPwaReopen: read('appLockOnPwaReopen'),
@@ -187,8 +194,8 @@ function wireStationSecurity(stationId) {
       pinComplexity: read('pinComplexity'),
       pinRotationDays: read('pinRotationDays'),
     });
-    if (!patch.enableEmailLogin || !patch.enablePinLogin) {
-      toastError('Validation failed — email + Cloud PIN sign-in must stay enabled in free mode.');
+    if (!patch.enableEmailLogin && !patch.enablePhoneLogin) {
+      toastError('Enable at least one sign-in method (email or phone).');
       return;
     }
     const station = stationsCache.find(s => s.id === stationId);
@@ -269,6 +276,29 @@ function renderPumpsSection(stationId, pumps, sessions = []) {
   return section('Pumps', addBtn, items);
 }
 
+// ── Fuel stock ─────────────────────────────────────────────────────────
+function renderStockSection(stationId, pumps, stock) {
+  if (!stationId) {
+    return section('Fuel stock', '', emptyState('⛽', 'Select a station to manage fuel stock.'));
+  }
+  const products = [...new Set((pumps || []).map(p => p.product).filter(Boolean))];
+  const levels = stock?.levels || {};
+  const rows = products.length
+    ? products.map(product => {
+        const level = Number(levels[product]) || 0;
+        return `<div class="stock-row"><span class="stock-product">${h(product)}</span><strong class="stock-level ${level === 0 ? 'stock-empty' : level < 500 ? 'stock-warn' : 'stock-ok'}">${h(level.toFixed(2))} L</strong></div>`;
+      }).join('')
+    : '<p class="muted-note">Add pumps with a product to start tracking stock.</p>';
+  const updated = stock?.updatedAt
+    ? `<p class="muted-note">Last updated ${formatDateTime(stock.updatedAt) || ''}.</p>`
+    : '<p class="muted-note">No readings yet.</p>';
+  const action = `<button type="button" id="manage-stock-btn" class="btn btn-primary btn-small">${ICONS.edit} Manage stock</button>`;
+  return section('Fuel stock', action, `
+    <p class="section-hint">Log fuel deliveries and dip readings to keep tank levels accurate. Totals appear on the Dashboard.</p>
+    <div class="stock-rows">${rows}</div>
+    ${updated}`);
+}
+
 // ── Stations (Super Admin) ──────────────────────────────────────────────
 function renderStationsSection(stations) {
   const addBtn = ifCan('station.create', {},
@@ -325,14 +355,14 @@ function renderTeamSection(users, me) {
     <div class="field search-field">
       <label for="team-search" class="sr-only">Search team</label>
       <div class="input-affix search-affix">
-        <input type="search" id="team-search" placeholder="Search by name, username, or email" value="${h(teamSearch)}" />
+        <input type="search" id="team-search" placeholder="Search by name, email, phone, or ID" value="${h(teamSearch)}" />
         <span class="affix-btn affix-static" aria-hidden="true">${ICONS.search}</span>
       </div>
     </div>` : '';
 
   const term = teamSearch.trim().toLowerCase();
   const visible = term
-    ? users.filter(u => [u.fullName, u.email, u.username, u.employeeId].some(v => (v || '').toLowerCase().includes(term)))
+    ? users.filter(u => [u.fullName, u.email, u.username, u.employeeId, u.phoneNumber].some(v => (v || '').toLowerCase().includes(term)))
     : users;
 
   const listBody = users.length === 0
@@ -349,7 +379,7 @@ function repaintTeamList(me) {
   if (!host) return;
   const term = teamSearch.trim().toLowerCase();
   const visible = term
-    ? teamCache.filter(u => [u.fullName, u.email, u.username, u.employeeId].some(v => (v || '').toLowerCase().includes(term)))
+    ? teamCache.filter(u => [u.fullName, u.email, u.username, u.employeeId, u.phoneNumber].some(v => (v || '').toLowerCase().includes(term)))
     : teamCache;
   host.innerHTML = visible.length
     ? visible.map(user => teamItemHTML(user, me)).join('')
@@ -372,10 +402,11 @@ function teamItemHTML(u, me) {
 
   const targetCtx = { target: u };
   const actions = [
-    { action: 'user.update', ctx: targetCtx, cls: 'edit-user', id: u.id, icon: ICONS.edit, text: 'Edit', label: `Edit ${u.fullName || u.email}` },
+    { action: 'user.update', ctx: targetCtx, cls: 'edit-user', id: u.id, icon: ICONS.edit, text: 'Edit', label: `Edit ${u.fullName || u.email || u.phoneNumber}` },
+    { action: 'user.pin.reset', ctx: targetCtx, cls: 'reset-pin-user', id: u.id, icon: '🔑', text: 'Reset PIN', label: `Reset Cloud PIN for ${u.fullName || u.email || u.phoneNumber}` },
     u.status === 'disabled'
-      ? { action: 'user.update', ctx: targetCtx, cls: 'activate-user', id: u.id, icon: '▶️', text: 'Activate', label: `Activate ${u.fullName || u.email}` }
-      : { action: 'user.delete', ctx: targetCtx, cls: 'remove-user', id: u.id, icon: ICONS.delete, text: 'Remove access', label: `Remove access for ${u.fullName || u.email}` },
+      ? { action: 'user.update', ctx: targetCtx, cls: 'activate-user', id: u.id, icon: '▶️', text: 'Activate', label: `Activate ${u.fullName || u.email || u.phoneNumber}` }
+      : { action: 'user.delete', ctx: targetCtx, cls: 'remove-user', id: u.id, icon: ICONS.delete, text: 'Remove access', label: `Remove access for ${u.fullName || u.email || u.phoneNumber}` },
   ];
   const actionButtons = actions.map(a => ifCan(a.action, a.ctx, `
     <button class="btn btn-secondary btn-small item-action-btn ${a.cls}" data-id="${h(a.id)}" aria-label="${h(a.label)}">${a.icon} <span>${h(a.text || a.label)}</span></button>`)).join('');
@@ -383,8 +414,8 @@ function teamItemHTML(u, me) {
   return `<div class="config-item team-item">
     ${avatarHTML(u, 'small')}
     <div class="item-info">
-      <div class="item-title">${h(u.fullName || u.email || u.username || 'Unnamed user')}${isMe ? ' <span class="tag tag-you">You</span>' : ''} ${statusTag(u)}${u.pwaLoginAllowed === false ? ' <span class="tag tag-off">PWA off</span>' : ''}</div>
-      <div class="item-meta">${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''}${u.email ? ` · ${h(u.email)}` : ''}${u.employeeId ? ` · ID ${h(u.employeeId)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}</div>
+      <div class="item-title">${h(u.fullName || u.email || u.username || u.phoneNumber || 'Unnamed user')}${isMe ? ' <span class="tag tag-you">You</span>' : ''} ${statusTag(u)}${u.pwaLoginAllowed === false ? ' <span class="tag tag-off">PWA off</span>' : ''}</div>
+      <div class="item-meta">${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''}${u.email ? ` · ${h(u.email)}` : ''}${u.phoneNumber ? ` · ${h(u.phoneNumber)}` : ''}${u.employeeId ? ` · ID ${h(u.employeeId)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}</div>
     </div>
     ${actionButtons ? `<div class="item-actions">${actionButtons}</div>` : ''}
   </div>`;
@@ -409,6 +440,7 @@ const SECTION_META = {
   Stations: { icon: '🏪', description: 'Create, rename, or remove stations.' },
   'Station data': { icon: '♻️', description: 'Clear shift history and stuck pump locks for this station.' },
   Team: { icon: '👥', description: 'Create and manage people and their station access.' },
+  'Fuel stock': { icon: '⛽', description: 'Track tank levels, log deliveries, and record dip readings.' },
   Security: { icon: '🔒', description: 'How Firebase protects PumpLog accounts and data.' },
 };
 
@@ -474,6 +506,17 @@ function wireHandlers(rates, pumps, sessions, stations, users) {
   onClick('add-rate-btn', () => showRateForm(null));
   onEach('.edit-rate', id => showRateForm(rates.find(r => r.id === id)));
   onEach('.delete-rate', id => deleteRate(rates.find(r => r.id === id)));
+  onClick('manage-stock-btn', async (event) => {
+    setBusy(event.currentTarget, true, 'Loading…');
+    try {
+      const [p, s] = await Promise.all([getPumps(currentStationId), getStock(currentStationId)]);
+      openStockManagerModal({ stationId: currentStationId, pumps: p, stock: s });
+    } catch (err) {
+      toastError(formatFirebaseError(err));
+    } finally {
+      setBusy(event.currentTarget, false);
+    }
+  });
 
   onClick('add-pump-btn-cfg', () => showPumpForm(null));
   onEach('.edit-pump', id => showPumpForm(pumps.find(p => p.id === id)));
@@ -509,6 +552,7 @@ function wireTeamActions(users) {
     catch (err) { toastError(formatFirebaseError(err)); }
     finally { setBusy(button, false); }
   });
+  onEach('.reset-pin-user', (id, button) => resetUserPin(users.find(u => u.id === id), button));
   onEach('.activate-user', (id, button) => activateUser(users.find(u => u.id === id), button));
   onEach('.remove-user', (id, button) => removeUser(users.find(u => u.id === id), button));
 }
@@ -944,8 +988,9 @@ async function showUserForm(user) {
         <small class="hint">Emails are managed by Firebase Authentication.</small></div>
     </div>
     <div class="form-row">
-      <div class="field"><label for="user-phone">Phone <span class="optional">(optional)</span></label>
-        <input type="tel" id="user-phone" autocomplete="off" inputmode="tel" value="${h(user.phoneNumber || '')}" /></div>
+      <div class="field"><label for="user-phone">Phone ${user.email ? '<span class="optional">(optional)</span>' : ''}</label>
+        <input type="tel" id="user-phone" autocomplete="off" inputmode="tel" placeholder="+919876543210" value="${h(user.phoneNumber || '')}" />
+        <small class="hint">Include country code (e.g. +91 for India).${user.email ? '' : ' Required when no email is set. To change the sign-in identifier (add/remove email, change phone), deactivate and re-create the account.'}</small></div>
       <div class="field"><label for="user-employee-id">Employee ID <span class="optional">(optional)</span></label>
         <input type="text" id="user-employee-id" maxlength="40" autocomplete="off" value="${h(user.employeeId || '')}" /></div>
     </div>
@@ -959,11 +1004,18 @@ async function showUserForm(user) {
         <input type="text" id="user-last-name" maxlength="50" autocomplete="off" required /></div>
     </div>
     <div class="form-row">
-      <div class="field"><label for="user-email">Email</label>
-        <input type="email" id="user-email" placeholder="name@example.com" autocomplete="off" autocapitalize="off" spellcheck="false" required /></div>
+      <div class="field"><label for="user-email">Email <span class="optional">(recommended)</span></label>
+        <input type="email" id="user-email" placeholder="name@example.com" autocomplete="off" autocapitalize="off" spellcheck="false" />
+        <small class="hint">Needed for self-service PIN reset by email.</small></div>
+      <div class="field"><label for="user-phone">Phone <span class="optional">(optional)</span></label>
+        <input type="tel" id="user-phone" inputmode="tel" placeholder="+919876543210" autocomplete="off" />
+        <small class="hint">Include country code. If no email is set, the account signs in with phone only and PIN resets require admin help.</small></div>
+    </div>
+    <div class="form-row">
       <div class="field"><label for="user-temp-pin">Cloud PIN</label>
         <input type="text" id="user-temp-pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="off" required />
         <small id="pin-policy-hint" class="hint"></small></div>
+      <div class="field"></div>
     </div>
     <div class="settings-group user-options">
       <label class="toggle-row"><span class="toggle-text">Active<small>Inactive accounts cannot sign in.</small></span><input type="checkbox" id="user-active" class="toggle-input" role="switch" checked /></label>
@@ -1091,7 +1143,7 @@ async function showUserForm(user) {
       </div>`;
     }).join('');
 
-    pumpHint.textContent = 'Optional usual pumps. Use Who’s where for daily changes. Leave every box unticked to allow this person on any pump at their stations.';
+    pumpHint.textContent = 'Optional usual pumps. Use Team Board for daily changes. Leave every box unticked to allow this person on any pump at their stations.';
     pumpList.querySelectorAll('input[type="checkbox"]').forEach(cb =>
       cb.addEventListener('change', () => {
         if (cb.checked) selectedPumps.add(cb.value);
@@ -1141,44 +1193,51 @@ async function showUserForm(user) {
     }
 
     try {
-      if (isEdit) {
-        await updateUserAccount(user.id, {
-          firstName,
-          lastName,
-          phoneNumber: byId('user-phone').value.trim(),
-          employeeId: byId('user-employee-id').value.trim(),
-          avatarUrl: byId('user-avatar').value.trim(),
-          role,
-          stationIds: role === 'superadmin' ? [] : stationIds,
-          pumpIds,
-          active,
-          allowPwaLogin,
-        });
-        invalidateUsers();
-        closeModal('generic-modal');
-        toastSuccess('User Updated');
-        rerender();
-      } else {
-        const email = byId('user-email').value.trim().toLowerCase();
-        const temporaryCloudPin = byId('user-temp-pin').value;
+    if (isEdit) {
+      const phoneVal = normalizePhone(byId('user-phone').value.trim());
+      if (phoneVal && !isValidPhone(phoneVal)) return showFieldError(err, '❌ Enter a valid phone number including the country code (e.g. +919876543210).');
+      await updateUserAccount(user.id, {
+        firstName,
+        lastName,
+        phoneNumber: phoneVal,
+        employeeId: byId('user-employee-id').value.trim(),
+        avatarUrl: byId('user-avatar')?.value?.trim?.() || '',
+        role,
+        stationIds: role === 'superadmin' ? [] : stationIds,
+        pumpIds,
+        active,
+        allowPwaLogin,
+      });
+      invalidateUsers();
+      closeModal('generic-modal');
+      toastSuccess('User Updated');
+      rerender();
+    } else {
+      const emailRaw = byId('user-email').value.trim();
+      const email = emailRaw ? emailRaw.toLowerCase() : '';
+      const phoneVal = normalizePhone(byId('user-phone')?.value?.trim?.() || '');
+      const temporaryCloudPin = byId('user-temp-pin').value;
 
-        if (!isValidEmail(email)) return failInline('❌ Validation failed — enter a valid email address.');
-        const policy = await policyForSelection();
-        const pinError = validateCloudPinPolicy(temporaryCloudPin, policy);
-        if (pinError) return failInline(pinError);
+      if (!email && !phoneVal) return failInline('❌ Provide an email or a phone number (or both).');
+      if (email && !isValidEmail(email)) return failInline('❌ Enter a valid email address.');
+      if (phoneVal && !isValidPhone(phoneVal)) return failInline('❌ Enter a valid phone number including the country code (e.g. +919876543210).');
+      const policy = await policyForSelection();
+      const pinError = validateCloudPinPolicy(temporaryCloudPin, policy);
+      if (pinError) return failInline(pinError);
 
-        const result = await createUserAccount({
-          firstName,
-          lastName,
-          email,
-          role,
-          stationIds: role === 'superadmin' ? [] : stationIds,
-          pumpIds,
-          temporaryCloudPin,
-          mustChangePin: false,
-          active,
-          allowPwaLogin,
-        });
+      const result = await createUserAccount({
+        firstName,
+        lastName,
+        email: email || undefined,
+        phoneNumber: phoneVal || undefined,
+        role,
+        stationIds: role === 'superadmin' ? [] : stationIds,
+        pumpIds,
+        temporaryCloudPin,
+        mustChangePin: false,
+        active,
+        allowPwaLogin,
+      });
         invalidateUsers();
         closeModal('generic-modal');
         toastSuccess('User Created');
@@ -1194,13 +1253,17 @@ async function showUserForm(user) {
 
 function showUserCreated(result, credentials) {
   byId('modal-title').textContent = '✅ User Created';
+  const phoneLogin = !result.email && result.phoneNumber;
+  const signInLine = phoneLogin
+    ? `Phone: <strong>${h(result.phoneNumber)}</strong> + Cloud PIN`
+    : `Email: <strong>${h(result.email)}</strong> + Cloud PIN`;
   byId('modal-body').innerHTML = `<div class="staff-created-success">
     <div class="success-check" aria-hidden="true">✓</div>
     <h3>Share these credentials privately</h3>
-    <p class="muted-note">${h(result.fullName)} signs in with email + Cloud PIN. This is the only time the Cloud PIN is shown.</p>
+    <p class="muted-note">${h(result.fullName)} signs in with ${phoneLogin ? 'phone' : 'email'} + Cloud PIN. This is the only time the Cloud PIN is shown.</p>
     <dl class="staff-created-details credentials-details">
       <dt>Name</dt><dd>${h(result.fullName)}</dd>
-      <dt>Email</dt><dd>${h(result.email)}</dd>
+      ${phoneLogin ? `<dt>Phone</dt><dd>${h(result.phoneNumber)}</dd>` : `<dt>Email</dt><dd>${h(result.email)}</dd>`}
       <dt>Role</dt><dd>${h(ROLES[result.role] || result.role)}</dd>
       <dt>Cloud PIN</dt><dd><output>${h(credentials.temporaryCloudPin)}</output></dd>
     </dl>
@@ -1214,7 +1277,7 @@ function showUserCreated(result, credentials) {
   byId('copy-user-credentials')?.addEventListener('click', async event => {
     const text = [
       `PumpLog account for ${result.fullName}`,
-      `Sign in: ${result.email}`,
+      phoneLogin ? `Sign in (phone): ${result.phoneNumber}` : `Sign in: ${result.email}`,
       `Cloud PIN: ${credentials.temporaryCloudPin}`,
     ].join('\n');
     try {
@@ -1257,6 +1320,58 @@ async function activateUser(user, button = null) {
     rerender();
   } catch (err) {
     toastError(formatFirebaseError(err));
+    setBusy(button, false);
+  }
+}
+
+async function resetUserPin(user, button = null) {
+  if (!user || !can('user.pin.reset', { target: user })) {
+    toastError(denyReason('user.pin.reset', { target: user }));
+    return;
+  }
+  const name = user.fullName || user.email || user.phoneNumber || 'this user';
+
+  // Phone-only accounts have a synthetic @pumplog.local Auth email which is
+  // not a real mailbox — Firebase cannot deliver a reset link there. Tell
+  // the admin to recreate the account instead.
+  if (!user.email) {
+    document.getElementById('modal-title').textContent = '🔑 Reset Cloud PIN';
+    document.getElementById('modal-body').innerHTML = `
+      <p><strong>${h(name)}</strong> signs in with a phone number only, so there is no email inbox to deliver a reset link to.</p>
+      <p class="muted-note">To reset their Cloud PIN, deactivate this account and create a new one with the same details and a fresh PIN. Existing shift history stays linked to the old account.</p>
+      <p class="muted-note">Tip: if you add an email address to the account (requires recreating it), future resets arrive by email instantly.</p>
+      <div class="confirm-actions">
+        <button type="button" id="close-temp-pin" class="btn btn-primary btn-full">OK</button>
+      </div>`;
+    openModal('generic-modal');
+    document.getElementById('close-temp-pin')?.addEventListener('click', () => closeModal('generic-modal'));
+    return;
+  }
+
+  const ok = await confirmDialog({
+    title: '🔑 Reset Cloud PIN?',
+    message: `Send a Cloud PIN reset link to ${name} at ${user.email}? They will open the link and choose a brand-new 4–8 digit PIN themselves. The link expires in 1 hour and can only be used once.`,
+    confirmLabel: 'Send reset email',
+    danger: false,
+  });
+  if (!ok) return;
+  setBusy(button, true, 'Sending email…');
+  try {
+    await sendPinResetEmail(user.email);
+    toastSuccess('Reset email sent');
+    document.getElementById('modal-title').textContent = '📧 Reset email sent';
+    document.getElementById('modal-body').innerHTML = `
+      <p>A password-reset email is on its way to <strong>${h(user.email)}</strong>.</p>
+      <p class="muted-note">${h(name)} opens the link, chooses a new 4–8 digit Cloud PIN, and can immediately sign in with it. The old PIN stops working once the new one is set. If they don't see the email, ask them to check spam and then resend.</p>
+      <div class="confirm-actions">
+        <button type="button" id="close-temp-pin" class="btn btn-primary btn-full">Done</button>
+      </div>`;
+    openModal('generic-modal');
+    document.getElementById('close-temp-pin')?.addEventListener('click', () => closeModal('generic-modal'));
+  } catch (err) {
+    toastError(formatFirebaseError(err));
+    setBusy(button, false);
+  } finally {
     setBusy(button, false);
   }
 }

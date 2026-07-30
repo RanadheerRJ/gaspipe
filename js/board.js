@@ -1,11 +1,12 @@
-/* PumpLog — Who is working on each pump today
+/* PumpLog — Team Board
  *
  * Touch-first daily board. One document per pump per day is kept at:
  *   stations/{stationId}/assignments/{YYYY-MM-DD}_{pumpId}
  *
- * Every station member sees the same pump cards. Managers and admins get an
- * “Add staff” button; staff get the complete board without edit controls.
- * Changes use taps (not drag-and-drop), write in one batch, and offer Undo.
+ * Every station member sees the same flat list of pump rows. Managers and
+ * admins get an “Add or remove staff” button; staff get the complete board
+ * without edit controls. Changes use taps (not drag-and-drop), write in one
+ * batch, and offer Undo.
  */
 
 import {
@@ -16,13 +17,14 @@ import {
   formatFirebaseError, userDisplayName, setMyDailyPumps,
 } from './auth.js';
 import {
-  getPumps, getStaffForStation, getAssignments, getPumpSessions,
-  watchAssignments, watchPumpSessions, assignmentId, pumpIdsForUser,
+  getPumps, getUsersAtStation, getAssignments, getPumpSessions, getShifts,
+  watchAssignments, watchPumpSessions, watchShifts, assignmentId, pumpIdsForUser,
   invalidateStation,
 } from './store.js';
 import {
   h, formatDate, getTodayDate, openModal, emptyState,
   toastAction, toastSuccess, toastError, confirmDialog, showSkeleton,
+  formatCurrency, formatVolume,
 } from './components.js';
 import { avatarHTML } from './profile.js';
 
@@ -35,17 +37,19 @@ const ASSIGNMENT_FIELDS = [
 let ctx = null;
 let assignUnsub = null;
 let sessionUnsub = null;
+let shiftsUnsub = null;
 let tickTimer = null;
 let pickerPumpId = null;
 
 export function initBoard() {}
 
 export function stopBoardLive() {
-  [assignUnsub, sessionUnsub].forEach(unsub => {
+  [assignUnsub, sessionUnsub, shiftsUnsub].forEach(unsub => {
     if (unsub) { try { unsub(); } catch { /* already closed */ } }
   });
   assignUnsub = null;
   sessionUnsub = null;
+  shiftsUnsub = null;
   if (tickTimer) clearInterval(tickTimer);
   tickTimer = null;
   ctx = null;
@@ -108,59 +112,91 @@ function elapsed(value) {
   return `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
 }
 
-// ── Pump cards ──────────────────────────────────────────────────────────
-function personHTML(uid, pumpId) {
-  const person = staffById(uid);
-  const name = nameFor(uid, pumpId);
-  const live = sessionOn(pumpId);
-  const working = live?.activeUid === uid;
-  return `<li class="board-person ${working ? 'is-working' : ''}">
-    ${avatarHTML(person || { fullName: name }, 'small')}
-    <span class="board-person-copy">
-      <strong>${h(name)}</strong>
-      <small>${working ? `🟢 Working now${elapsed(live.clockInAt) ? ` · ${h(elapsed(live.clockInAt))}` : ''}` : `⚪ Added here ${h(selectedDayText())}`}</small>
-    </span>
-  </li>`;
+// ── Today's per-pump sales totals ───────────────────────────────────────
+function pumpTodayTotals(pumpId) {
+  if (!ctx || ctx.date !== getTodayDate()) return { vol: 0, sales: 0, count: 0 };
+  const today = ctx.date;
+  let vol = 0, sales = 0, count = 0;
+  for (const shift of ctx.shifts || []) {
+    if (shift.pumpId !== pumpId) continue;
+    if (shift.date !== today) continue;
+    vol += Number(shift.volume) || 0;
+    sales += Number(shift.sales) || 0;
+    count += 1;
+  }
+  return { vol, sales, count };
 }
 
-function pumpCardHTML(pump) {
+// ── Pump rows (flat list) ───────────────────────────────────────────────
+function pumpRowHTML(pump) {
   const uids = uidsOn(pump.id);
   const session = sessionOn(pump.id);
-  const status = session
-    ? `<span class="board-pump-status is-active" role="status">🔒 Active now · ${h(session.activeName || 'In use')}${elapsed(session.clockInAt) ? ` · ${h(elapsed(session.clockInAt))}` : ''}</span>`
-    : '<span class="board-pump-status is-idle" role="status">✅ Idle now · ready</span>';
-  const people = uids.length
-    ? `<ul class="board-people">${uids.map(uid => personHTML(uid, pump.id)).join('')}</ul>`
-    : emptyState('👤', ctx.mayManage
-      ? `No one is added here ${selectedDayText()} — tap Add staff.`
-      : `No one is added here ${selectedDayText()}.`);
-  const addButton = ifCan('assignment.manage', { stationId: ctx.stationId }, `
-    <button type="button" class="btn btn-primary board-add" data-pump-id="${h(pump.id)}">
-      ➕ Add or remove staff
-    </button>`);
+  const todayTotals = pumpTodayTotals(pump.id);
+  const isToday = ctx.date === getTodayDate();
 
-  return `<article class="board-pump-card" aria-labelledby="board-pump-${h(pump.id)}">
-    <header class="board-pump-head">
-      <span class="board-pump-icon" aria-hidden="true">⛽</span>
-      <div class="board-pump-title">
-        <h3 id="board-pump-${h(pump.id)}">${h(pump.name || 'Pump')}</h3>
-        <p>${h(pump.product || 'Product not set')}</p>
+  let statusDotClass = 'board-dot board-dot-unassigned';
+  let statusLabel = 'Unassigned';
+  let statusExtra = '';
+  if (session) {
+    statusDotClass = 'board-dot board-dot-active';
+    statusLabel = 'Active';
+    const el = elapsed(session.clockInAt);
+    statusExtra = el ? `${h(session.activeName || 'In use')} · ${h(el)}` : h(session.activeName || 'In use');
+  } else if (uids.length) {
+    statusDotClass = 'board-dot board-dot-idle';
+    statusLabel = 'Idle';
+    statusExtra = uids.map(uid => h(nameFor(uid, pump.id))).join(', ');
+  }
+
+  const names = uids.length
+    ? uids.map(uid => {
+        const person = staffById(uid);
+        const name = nameFor(uid, pump.id);
+        const live = sessionOn(pump.id);
+        const working = live?.activeUid === uid;
+        return `<span class="board-assignee ${working ? 'is-working' : ''}">${h(name)}${working ? ' <em>(now)</em>' : ''}</span>`;
+      }).join('')
+    : `<span class="board-assignee-empty">—</span>`;
+
+  const elapsedCell = session
+    ? h(elapsed(session.clockInAt) || 'just now')
+    : '—';
+
+  const totalsCell = isToday && todayTotals.count
+    ? `<strong>${formatVolume(todayTotals.vol)}</strong><small>${formatCurrency(todayTotals.sales)}</small>`
+    : isToday
+      ? '<span class="muted">—</span>'
+      : '<span class="muted">n/a</span>';
+
+  const assignButton = ifCan('assignment.manage', { stationId: ctx.stationId }, `
+    <button type="button" class="icon-btn board-row-assign" data-pump-id="${h(pump.id)}" aria-label="Assign staff to ${h(pump.name || 'pump')}">＋</button>`);
+
+  return `<article class="board-row" aria-labelledby="board-pump-${h(pump.id)}">
+    <div class="board-row-main">
+      <span class="${statusDotClass}" aria-hidden="true"></span>
+      <div class="board-row-pump">
+        <h3 id="board-pump-${h(pump.id)}" class="board-row-name">${h(pump.name || 'Pump')}</h3>
+        <p class="board-row-product">${h(pump.product || '')}</p>
       </div>
-      ${status}
-    </header>
-    <div class="board-pump-people">
-      <h4>Who’s on ${h(pump.name || 'this pump')} ${h(selectedDayText())}</h4>
-      ${people}
+      <div class="board-row-assignees">
+        ${names}
+      </div>
+      <div class="board-row-status">
+        <span class="board-status-label">${statusLabel}</span>
+        ${statusExtra ? `<small>${statusExtra}</small>` : ''}
+      </div>
+      <div class="board-row-elapsed">${elapsedCell}</div>
+      <div class="board-row-totals">${totalsCell}</div>
+      ${assignButton ? `<div class="board-row-actions">${assignButton}</div>` : ''}
     </div>
-    ${addButton ? `<footer class="board-pump-actions">${addButton}</footer>` : ''}
   </article>`;
 }
 
 function paintBoard() {
   const host = document.getElementById('board-cards');
   if (!ctx || !host) return;
-  host.innerHTML = ctx.pumps.map(pumpCardHTML).join('');
-  host.querySelectorAll('.board-add').forEach(button =>
+  host.innerHTML = ctx.pumps.map(pumpRowHTML).join('');
+  host.querySelectorAll('.board-row-assign').forEach(button =>
     button.addEventListener('click', () => openStaffPicker(button.dataset.pumpId)));
   paintSummary();
   publishMyDailyPumps();
@@ -169,10 +205,34 @@ function paintBoard() {
 function paintSummary() {
   const summary = document.getElementById('board-summary');
   if (!summary || !ctx) return;
-  const people = new Set((ctx.assignments || []).flatMap(row => row.staffUids || [])).size;
-  const covered = ctx.pumps.filter(pump => uidsOn(pump.id).length > 0).length;
-  const active = (ctx.sessions || []).filter(session => session.status === 'active').length;
-  summary.textContent = `${covered} of ${ctx.pumps.length} pumps have staff · ${people} people added · ${active} active now`;
+  // Count only staff that still belong to this station's roster. When the
+  // signed-in user cannot list station users (e.g. plain staff viewing the
+  // board read-only) fall back to the set of UIDs visible from assignments
+  // and active sessions so we never show "of 0".
+  const staffList = ctx.staff || [];
+  const validUids = new Set(staffList.map(p => p.id || p.uid));
+  const allKnown = new Set(validUids);
+  for (const row of ctx.assignments || []) {
+    (row.staffUids || []).forEach(uid => allKnown.add(uid));
+  }
+  for (const session of ctx.sessions || []) {
+    if (session.activeUid) allKnown.add(session.activeUid);
+  }
+
+  const peopleUids = new Set();
+  let covered = 0;
+  for (const pump of ctx.pumps) {
+    const uids = (uidsOn(pump.id) || []).filter(uid => allKnown.has(uid));
+    if (uids.length) covered += 1;
+    uids.forEach(uid => peopleUids.add(uid));
+  }
+  const active = (ctx.sessions || []).filter(s => s.status === 'active').length;
+  const knownCount = allKnown.size;
+  const staffCount = staffList.length || knownCount;
+  const staffPart = staffList.length
+    ? `${peopleUids.size} of ${staffCount} staff rostered`
+    : `${peopleUids.size} staff rostered`;
+  summary.textContent = `${covered} of ${ctx.pumps.length} pumps covered · ${staffPart}${ctx.date === getTodayDate() ? ` · ${active} active now` : ''}`;
 }
 
 function publishMyDailyPumps() {
@@ -382,13 +442,15 @@ export async function renderBoard(stationId) {
   const date = getBoardDate();
   try {
     const mayManage = can('assignment.manage', { stationId });
-    const [pumps, staff, assignments, sessions] = await Promise.all([
+    const isToday = date === getTodayDate();
+    const [pumps, staff, assignments, sessions, shifts] = await Promise.all([
       getPumps(stationId),
-      mayManage ? getStaffForStation(stationId).catch(() => []) : Promise.resolve([]),
+      getUsersAtStation(stationId).catch(() => []),
       getAssignments(stationId, date),
       getPumpSessions(stationId),
+      isToday ? getShifts(stationId, { from: date }).catch(() => []) : Promise.resolve([]),
     ]);
-    ctx = { stationId, date, pumps, staff, assignments, sessions, mayManage };
+    ctx = { stationId, date, pumps, staff, assignments, sessions, shifts, mayManage };
 
     content.innerHTML = `${boardHeaderHTML(date)}
       ${pumps.length
@@ -411,9 +473,9 @@ function boardHeaderHTML(date) {
   const isToday = date === getTodayDate();
   return `<div class="page-head board-head">
     <div>
-      <h2 class="page-title">Who’s working where?</h2>
+      <h2 class="page-title">Team Board</h2>
       <p class="section-hint">${ctx?.mayManage
-        ? 'Tap Add staff on a pump, then tap a name. Everyone sees changes right away.'
+        ? 'Tap “Add or remove staff” on a pump, then tap a name. Everyone sees changes right away.'
         : 'See who is working on every pump. Your manager makes any changes.'}</p>
     </div>
     <span class="live-badge" role="status"><span class="live-dot" aria-hidden="true"></span>Live</span>
@@ -469,6 +531,19 @@ function startBoardLive(stationId, date) {
       if (note) note.textContent = 'Pump status could not update. Tap Refresh to reconnect.';
     },
   });
+  if (date === getTodayDate()) {
+    shiftsUnsub = watchShifts(stationId, {
+      onUpdate: rows => {
+        if (!ctx || ctx.stationId !== stationId) return;
+        ctx.shifts = rows.filter(r => r.date === date);
+        paintBoard();
+      },
+      onError: () => {
+        const note = document.getElementById('board-note');
+        if (note) note.textContent = 'Shift totals paused. Tap Refresh to reconnect.';
+      },
+    });
+  }
   tickTimer = window.setInterval(() => { if (ctx) paintBoard(); }, 60_000);
 }
 

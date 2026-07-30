@@ -179,8 +179,7 @@ service cloud.firestore {
 
     function userFieldsOk() {
       return request.resource.data.keys().hasAll(['role', 'stationIds'])
-        && (request.resource.data.keys().hasAny(['email'])
-            || request.resource.data.keys().hasAny(['username']))
+        && request.resource.data.keys().hasAny(['email', 'username', 'phoneNumber'])
         && request.resource.data.keys().hasOnly([
              'email', 'firstName', 'lastName', 'fullName', 'username', 'phoneNumber',
              'employeeId', 'avatarUrl', 'role', 'stationIds', 'pumpIds',
@@ -195,7 +194,11 @@ service cloud.firestore {
                 && request.resource.data.pumpIds.size() <= 200))
         && (!request.resource.data.keys().hasAny(['fullName']) || request.resource.data.fullName is string)
         && (!request.resource.data.keys().hasAny(['username']) || request.resource.data.username is string)
-        && (!request.resource.data.keys().hasAny(['phoneNumber']) || request.resource.data.phoneNumber is string)
+        && (!request.resource.data.keys().hasAny(['email']) || request.resource.data.email is string)
+        // Phone is stored as E.164-ish digits (optional leading +, 7-15 digits).
+        && (!request.resource.data.keys().hasAny(['phoneNumber'])
+            || (request.resource.data.phoneNumber is string
+                && request.resource.data.phoneNumber.matches('^[+]?[0-9]{7,15}$')))
         && (!request.resource.data.keys().hasAny(['status'])
             || request.resource.data.status in ['invited', 'active', 'disabled'])
         && (!request.resource.data.keys().hasAny(['pin_reset_required'])
@@ -371,7 +374,11 @@ service cloud.firestore {
       // Super Admin lists everyone. Managers and Station Admins must scope
       // their query — either to the accounts they created, or to one of their
       // own stations (array-contains). An unscoped list returns a doc that
-      // fails this condition, so Firestore rejects the whole query.
+      // fails this condition, so Firestore rejects the whole query. Phone
+      // sign-in authenticates directly against the synthetic
+      // `phone:<digits>@pumplog.local` Auth email and never performs a
+      // pre-auth Firestore lookup, so no public read on phoneNumber is
+      // required.
       allow list: if isSuperAdmin()
         || (isStationAdmin() && resource.data.createdBy == request.auth.uid)
         || (isManager() && resource.data.createdBy == request.auth.uid)
@@ -476,6 +483,35 @@ service cloud.firestore {
           && assignmentId == request.resource.data.date + '_' + request.resource.data.pumpId;
 
         allow delete: if isSignedIn() && canManageStation(stationId);
+      }
+
+      // ── Fuel stock (inventory) ────────────────────────────────────
+      // `stock/current` holds per-product tank levels; `stockLog/{id}`
+      // records every delivery/dip/adjustment. Manager-only writes; any
+      // signed-in station member may read so the Dashboard can show the
+      // current level.
+      match /stock/{docId} {
+        allow read: if isSignedIn() && canAccessStation(stationId);
+        allow create, update, delete: if isSignedIn() && canManageStation(stationId)
+          && docId == 'current'
+          && request.resource.data.keys().hasOnly(['levels', 'updatedAt', 'updatedBy'])
+          && request.resource.data.levels is map;
+      }
+      match /stockLog/{logId} {
+        allow read: if isSignedIn() && canAccessStation(stationId);
+        allow create: if isSignedIn() && canManageStation(stationId)
+          && request.resource.data.keys().hasOnly([
+               'product', 'type', 'amount', 'previousLevel', 'newLevel',
+               'note', 'staffName', 'at', 'createdBy'
+             ])
+          && request.resource.data.product is string
+          && request.resource.data.type in ['delivery', 'dip', 'adjust', 'test']
+          && request.resource.data.amount is number
+          && request.resource.data.previousLevel is number
+          && request.resource.data.newLevel is number
+          && request.resource.data.newLevel >= 0
+          && request.resource.data.createdBy == request.auth.uid;
+        allow update, delete: if false;
       }
 
       // ── Rates ─────────────────────────────────────────────────────

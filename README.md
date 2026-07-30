@@ -39,19 +39,19 @@ Sign-in is deliberately simple for testing and development:
 4. The first signed-in Auth user with no profile automatically becomes `superadmin`.
 5. Create stations and additional users from **Config → Team**.
 
-## Pump assignment — the Roster board
+## Pump assignment — the Team Board
 
-Day-to-day pump assignment happens on the **Roster** tab, a Kanban board with
-one column per pump plus an "Available" column:
+Day-to-day pump assignment happens on the **Team Board** tab, a flat list with
+one row per pump showing the assigned staff, live status, elapsed time, and
+today's totals:
 
-- **Managers, Station Admins, and Super Admins** build the board. Drag a staff
-  card onto a pump, or tap the card and then tap a column (touch/keyboard
-  friendly), or use a column's **➕ Assign** dialog.
+- **Managers, Station Admins, and Super Admins** build the board. Tap
+  “Add or remove staff” on a pump, then tap a name (touch/keyboard friendly).
 - **Staff** see the same board read-only, so they know where they are working.
-- Each card shows live status: on shift with elapsed time, shift ended with
-  volume and sales, or waiting — plus last sign-in.
+- Each row shows live status (● Active / ○ Idle / ✕ Unassigned), the assigned
+  staff member, elapsed time when on shift, and today's volume/sales.
 - The board is per **date**. Use the arrows or the date picker to review or
-  pre-build another day, and **⧉ Copy previous day** to reuse a roster.
+  pre-build another day, and copy the previous day's roster to reuse it.
 
 Storage is one document per pump per day:
 

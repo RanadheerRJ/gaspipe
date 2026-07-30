@@ -108,7 +108,7 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
   const assignmentLine = isStationOverseer()
     ? `<span class="pump-assignment-line">${names.length
         ? `${rosterNames.length ? 'Working here today' : 'Usual staff'}: ${names.map(h).join(', ')}`
-        : 'Nobody added yet — use the Who’s where tab'}</span>`
+        : 'Nobody added yet — use the Team Board tab'}</span>`
     : '';
   const rate = rateMap[pump.product];
   const detail = session
@@ -322,14 +322,14 @@ export async function renderPumps(stationId) {
 
     if (myPumps.length === 0) {
       content.innerHTML = `<h2 class="page-title">Pumps</h2>${emptyState('🔒',
-        'No pumps are assigned to you today. Ask your manager to add you on the Who’s where page.')}`;
+        'No pumps are assigned to you today. Ask your manager to add you on the Team Board page.')}`;
       return;
     }
 
     const mayLog = !isStationOverseer() && can('shift.create', { stationId });
     const mode = pumpAccessMode();
     const hint = isStationOverseer()
-      ? 'Live status is shared across devices. Start or end a shift, or open Who’s where to plan the day.'
+      ? 'Live status is shared across devices. Start or end a shift, or open Team Board to plan the day.'
       : mode === 'daily'
         ? `You are on ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} today. Tap one to start your shift.`
         : mode === 'standing'

@@ -25,6 +25,7 @@ import {
   rangeStart, openModal, closeModal, timestampToDate,
 } from './components.js';
 import { avatarHTML } from './profile.js';
+import { getStock, openStockManagerModal, stockCardHTML } from './stock.js';
 
 // ── Time-of-day emoji ─────────────────────────────────────────────────
 function timeEmoji() {
@@ -203,20 +204,15 @@ function stationInfoCardHTML(station, rateMap, shifts, ownShifts, stationId, ran
         <h4 class="info-title">💰 Rates</h4>
         <div class="info-rates-list">${ratesBody}</div>
       </div>
-      <div class="info-block info-personal">
-        <h4 class="info-title">📊 My ${h(rangeLabel)}</h4>
-        <div class="info-personal-grid">
-          <div class="info-stat"><span class="info-stat-label">Entries</span><strong>${myCount}</strong></div>
-          <div class="info-stat"><span class="info-stat-label">Volume</span><strong>${formatVolume(myVolume)}</strong></div>
-          <div class="info-stat"><span class="info-stat-label">Sales</span><strong>${formatCurrency(mySales)}</strong></div>
-          <div class="info-stat"><span class="info-stat-label">Hours</span><strong>${myHours.toFixed(1)} h</strong></div>
-        </div>
-      </div>
-      <div class="info-block info-station">
-        <h4 class="info-title">⛽ Station</h4>
-        <div class="info-station-grid">
-          <div class="info-stat"><span class="info-stat-label">Active pumps</span><strong>${activeCount} / ${myPumps.length}</strong></div>
-          <div class="info-stat"><span class="info-stat-label">Total shifts</span><strong>${shifts.length}</strong></div>
+      <div class="info-block info-stats">
+        <h4 class="info-title">📊 My ${h(rangeLabel)} · Station</h4>
+        <div class="info-stats-strip">
+          <div class="info-stat-flat"><span class="info-stat-label">Entries</span><strong>${myCount}</strong></div>
+          <div class="info-stat-flat"><span class="info-stat-label">Volume</span><strong>${formatVolume(myVolume)}</strong></div>
+          <div class="info-stat-flat"><span class="info-stat-label">Sales</span><strong>${formatCurrency(mySales)}</strong></div>
+          <div class="info-stat-flat"><span class="info-stat-label">Hours</span><strong>${myHours.toFixed(1)} h</strong></div>
+          <div class="info-stat-flat"><span class="info-stat-label">Active pumps</span><strong>${activeCount}/${myPumps.length}</strong></div>
+          <div class="info-stat-flat"><span class="info-stat-label">Total shifts</span><strong>${shifts.length}</strong></div>
         </div>
       </div>
     </div>
@@ -345,10 +341,11 @@ export async function renderDashboard(stationId, range = 'today') {
       from = rangeStart(range);
     }
 
-    const [station, shifts, rateMap, rates, allPumps, sessions, assignments] = await Promise.all([
+    const [station, shifts, rateMap, rates, allPumps, sessions, assignments, stock] = await Promise.all([
       getStation(stationId), getShifts(stationId, { from }), getCurrentRateMap(stationId), getRates(stationId),
       getPumps(stationId), getPumpSessions(stationId),
       getAssignments(stationId, getTodayDate()).catch(() => []),
+      getStock(stationId).catch(() => ({ levels: {}, updatedAt: null })),
     ]);
     if (!station) { content.innerHTML = emptyState('⚠️', 'Station not found. It may have been deleted.'); return; }
 
@@ -371,9 +368,12 @@ export async function renderDashboard(stationId, range = 'today') {
     content.innerHTML = `${greetingHTML(station, sessions, accessibleStations)}
       ${filterBarHTML(range, customDate)}
       ${stationInfoCardHTML(station, rateMap, shifts, null, stationId, range, pumps, sessions)}
+      ${stockCardHTML(stock, allPumps, can('stationSecurity.update', { stationId }))}
       ${quickStartHTML(quick)}
       <div class="live-head"><h3 class="section-title">Live pump status</h3><span class="live-badge" role="status"><span class="live-dot" aria-hidden="true"></span>LIVE</span></div>
       <p class="feed-summary" id="feed-summary"></p><div id="feed-list">${feedListHTML(pumps, shifts, sessions, stationId)}</div><p class="feed-updated" id="feed-updated"></p>`;
+    const stockBtn = document.getElementById('open-stock-manager');
+    stockBtn?.addEventListener('click', () => openStockManagerModal({ stationId, pumps: allPumps, stock }));
     startLiveFeed(stationId, pumps, rateMap, shifts, sessions);
     startGreetingClock();
     wireFilterBar(range);
