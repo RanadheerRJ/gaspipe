@@ -24,14 +24,14 @@ import {
 import {
   getPumps, getCurrentRateMap, getPumpSessions, getStaffForStation, watchPumpSessions,
   getShifts, invalidateStation,
-  getAssignments, watchAssignments, pumpIdsForUser,
+  getAssignments, watchAssignments, pumpIdsForUser, getOperationsSettings,
 } from './store.js';
+import { recordAudit } from './audit.js';
 import {
   h, formatCurrency, formatVolume, formatDateTime, formatTimeAgo,
   getTodayDate, openModal, closeModal, emptyState, toastSuccess, toastError,
   confirmDialog, setBusy, showSkeleton,
 } from './components.js';
-import { selectTodayOnBoard } from './board.js';
 
 let currentStationId = null;
 let pumpContext = null;
@@ -108,7 +108,7 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
   const assignmentLine = isStationOverseer()
     ? `<span class="pump-assignment-line">${names.length
         ? `${rosterNames.length ? 'Working here today' : 'Usual staff'}: ${names.map(h).join(', ')}`
-        : 'Nobody added yet — use the Who’s where tab'}</span>`
+        : 'No active assignment'}</span>`
     : '';
   const rate = rateMap[pump.product];
   const detail = session
@@ -125,8 +125,8 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
       ${h(action.label)}
     </button>`) : '';
   const assignAction = ifCan('assignment.manage', { stationId }, `
-    <button type="button" class="btn btn-secondary pump-secondary-action" data-action="open-board" data-pump-id="${h(pump.id)}">
-      👥 Open today’s staff board
+    <button type="button" class="btn btn-secondary pump-secondary-action" data-action="assign" data-pump-id="${h(pump.id)}">
+      👤 Assign shift
     </button>`);
   const releaseAction = session ? ifCan('pumpSession.forceRelease', { stationId }, `
     <button type="button" class="btn btn-secondary pump-secondary-action danger-text" data-action="force-release" data-pump-id="${h(pump.id)}">
@@ -176,10 +176,7 @@ function paintPumpBoard() {
       const pump = pumps.find(p => p.id === item.dataset.pumpId);
       if (!pump) return;
       const session = sessionFor(pump.id, sessions);
-      if (item.dataset.action === 'open-board') {
-        selectTodayOnBoard();
-        document.querySelector('[data-page="board"]')?.click();
-      }
+      if (item.dataset.action === 'assign') openAssignmentForm(stationId, pump, rateMap[pump.product], staff);
       if (item.dataset.action === 'force-release') forceReleasePumpAtStation(stationId, pump, session, item);
     });
   });
@@ -314,22 +311,22 @@ export async function renderPumps(stationId) {
     const myPumps = pumps.filter(pump => assignedPumps.includes(pump) || activeMineIds.has(pump.id));
 
     if (pumps.length === 0) {
-      content.innerHTML = `<h2 class="page-title">Pumps</h2>${emptyState('⛽', mayConfigure
+      content.innerHTML = `<h2 class="page-title">Shifts</h2>${emptyState('⛽', mayConfigure
         ? 'No pumps yet. Add them in Settings → Pumps.'
         : 'No pumps configured yet. Ask your station admin to add them.')}`;
       return;
     }
 
     if (myPumps.length === 0) {
-      content.innerHTML = `<h2 class="page-title">Pumps</h2>${emptyState('🔒',
-        'No pumps are assigned to you today. Ask your manager to add you on the Who’s where page.')}`;
+      content.innerHTML = `<h2 class="page-title">Shifts</h2>${emptyState('🔒',
+        'No pumps are assigned to you today. Ask your manager to assign a shift.')}`;
       return;
     }
 
     const mayLog = !isStationOverseer() && can('shift.create', { stationId });
     const mode = pumpAccessMode();
     const hint = isStationOverseer()
-      ? 'Live status is shared across devices. Start or end a shift, or open Who’s where to plan the day.'
+      ? 'Assign an employee to a pump, then close each shift when work is finished.'
       : mode === 'daily'
         ? `You are on ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} today. Tap one to start your shift.`
         : mode === 'standing'
@@ -339,7 +336,7 @@ export async function renderPumps(stationId) {
     content.innerHTML = `
       <div class="page-head">
         <div>
-          <h2 class="page-title">Pumps</h2>
+          <h2 class="page-title">Shifts</h2>
           <p class="section-hint">${h(hint)}</p>
         </div>
         <span class="live-badge" role="status"><span class="live-dot" aria-hidden="true"></span>LIVE LOCKS</span>
@@ -376,6 +373,55 @@ export function openShiftForm(stationId, pump, rate, session = null) {
   }
 }
 
+// ── Simple manager assignment ───────────────────────────────────────────
+// Assignment and start are one transaction: a pump never has two active shifts.
+function openAssignmentForm(stationId, pump, rate, staff) {
+  if (!can('assignment.manage', { stationId })) return toastError(denyReason('assignment.manage', { stationId }));
+  if (!staff?.length) return toastError('Add an employee in Settings before assigning a shift.');
+  document.getElementById('modal-title').textContent = `Assign shift — ${pump.name}`;
+  document.getElementById('modal-body').innerHTML = `<form id="assignment-form" novalidate>
+    <p class="modal-intro">Choose an employee and opening meter reading. This starts their shift immediately.</p>
+    <div class="field"><label for="assignment-staff">Employee</label><select id="assignment-staff" required>
+      <option value="">Choose employee…</option>${staff.map(person => `<option value="${h(person.id || person.uid)}" data-name="${h(userDisplayName(person))}">${h(userDisplayName(person))}</option>`).join('')}
+    </select></div>
+    <div class="field"><label for="assignment-opening">Opening meter reading</label><input id="assignment-opening" type="number" min="0" step="0.01" inputmode="decimal" required /></div>
+    <p class="hint">${rate ? `Configured rate: ${formatCurrency(rate.rate)}/L.` : 'No rate is configured; add one in Settings before closing.'}</p>
+    <p id="assignment-error" class="form-error hidden" role="alert"></p>
+    <button class="btn btn-primary btn-full" type="submit">Assign & start shift</button>
+  </form>`;
+  openModal('generic-modal');
+  document.getElementById('assignment-form').addEventListener('submit', async event => {
+    event.preventDefault();
+    const button = event.currentTarget.querySelector('button');
+    const error = document.getElementById('assignment-error');
+    const fail = message => { error.textContent = message; error.classList.remove('hidden'); };
+    const select = document.getElementById('assignment-staff');
+    const uid = select.value;
+    const name = select.selectedOptions[0]?.dataset.name || '';
+    const openingRaw = document.getElementById('assignment-opening').value;
+    const opening = Number(openingRaw);
+    if (!uid) return fail('Choose an employee.');
+    if (openingRaw === '' || !Number.isFinite(opening) || opening < 0) return fail('Enter a valid opening meter reading.');
+    setBusy(button, true, 'Assigning…');
+    try {
+      const db = getDb();
+      const sessionRef = doc(db, 'stations', stationId, 'pumpSessions', pump.id);
+      const assignmentRef = doc(db, 'stations', stationId, 'assignments', `${getTodayDate()}_${pump.id}`);
+      await runTransaction(db, async transaction => {
+        const existing = await transaction.get(sessionRef);
+        if (existing.exists() && existing.data().status === 'active') {
+          const conflict = new Error('This pump already has an active shift.'); conflict.code = 'pump-active'; throw conflict;
+        }
+        transaction.set(sessionRef, { status: 'active', activeUid: uid, activeName: name, pumpName: pump.name || 'Pump', product: pump.product || '', clockInAt: serverTimestamp(), opening, date: getTodayDate(), shiftLabel: '24 Hour', updatedAt: serverTimestamp(), updatedBy: getCurrentUserData().uid });
+        transaction.set(assignmentRef, { date: getTodayDate(), pumpId: pump.id, pumpName: pump.name || 'Pump', product: pump.product || '', staffUids: [uid], staffNames: { [uid]: name }, createdAt: serverTimestamp(), createdBy: getCurrentUserData().uid, updatedAt: serverTimestamp(), updatedBy: getCurrentUserData().uid });
+      });
+      recordAudit(stationId, 'Shift Assigned', { type: 'pump', id: pump.id, name: pump.name, employeeId: uid, employeeName: name }, 'Manager assigned and started shift.').catch(() => {});
+      invalidateStation(stationId); closeModal('generic-modal'); toastSuccess(`${name} assigned to ${pump.name}`);
+      window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId } }));
+    } catch (err) { fail(err.code === 'pump-active' ? 'This pump already has an active shift.' : formatFirebaseError(err)); setBusy(button, false); }
+  });
+}
+
 // ── Clock-in form (now open to managers/admins too) ──────────────────────
 function openClockInForm(stationId, pump, rate) {
   if (!isStationOverseer() && (!can('pumpSession.start', { stationId, pumpId: pump.id }) || !canUsePump(pump.id))) {
@@ -406,8 +452,8 @@ function openClockInForm(stationId, pump, rate) {
       <div class="form-row">
         <div class="field"><label for="clock-in-date">Date</label>
           <input type="date" id="clock-in-date" value="${getTodayDate()}" max="${getTodayDate()}" ${isStationOverseer() ? '' : `min="${getTodayDate()}" readonly aria-readonly="true"`} required /></div>
-        <div class="field"><label for="clock-in-shift">Shift</label>
-          <select id="clock-in-shift" required><option value="1">Shift 1</option><option value="2">Shift 2</option><option value="3">Shift 3</option></select></div>
+        <input type="hidden" id="clock-in-shift" value="24 Hour" />
+        <div class="field"><label>Shift</label><input value="24 Hour" readonly aria-readonly="true" /><small class="hint">Your station uses one continuous shift.</small></div>
       </div>
       <div class="field"><label for="clock-in-opening">Opening reading</label>
         <input type="number" id="clock-in-opening" step="0.01" min="0" inputmode="decimal" placeholder="0.00" required /></div>
@@ -468,6 +514,7 @@ function openClockInForm(stationId, pump, rate) {
           updatedBy: me.uid,
         });
       });
+      recordAudit(stationId, 'Shift Started', { type: 'pump', id: pump.id, name: pump.name }, 'Opening reading recorded.').catch(() => {});
       invalidateStation(stationId);
       closeModal('generic-modal');
       toastSuccess(`Shift Started — ${pump.name}`);
@@ -487,7 +534,7 @@ function openClockInForm(stationId, pump, rate) {
 
 // ── Clock-out form (Part B: manager can close others' shifts)
 // ── Part C: adds Notes, Expenses, Cash to hand over
-function openClockOutForm(stationId, pump, rate, session) {
+async function openClockOutForm(stationId, pump, rate, session) {
   const me = getCurrentUserData();
   const isOverseerClosing = isStationOverseer() && session && session.activeUid !== me?.uid;
   const isSelfClosing = session && session.activeUid === me?.uid;
@@ -511,10 +558,13 @@ function openClockOutForm(stationId, pump, rate, session) {
   const opening = Number(session.opening);
   const actualStaffName = session.activeName || userDisplayName(me);
   const actualStaffUid = session.activeUid || me?.uid;
+  const operations = await getOperationsSettings(stationId).catch(() => ({}));
+  const expenseCategories = operations.expenseCategories || ['Tea', 'Cleaning', 'Maintenance', 'Oil', 'Miscellaneous'];
 
   document.getElementById('modal-title').textContent = `End shift — ${pump.name}${isOverseerClosing ? ` (for ${actualStaffName})` : ''}`;
   document.getElementById('modal-body').innerHTML = `
     <form id="clock-out-form" novalidate>
+      <datalist id="expense-category-list">${expenseCategories.map(value => `<option value="${h(value)}"></option>`).join('')}</datalist>
       <div class="session-reference" role="status">
         <strong>Started ${h(formatTimeAgo(session.clockInAt) || formatDateTime(session.clockInAt) || 'just now')}</strong>
         <span>Opening reading: ${Number.isFinite(opening) ? opening.toFixed(2) : '—'} ${isOverseerClosing ? `· Staff: ${h(actualStaffName)}` : ''}</span>
@@ -530,8 +580,10 @@ function openClockOutForm(stationId, pump, rate, session) {
       </div>
       <div class="computed-row"><span class="label">Volume</span><output class="value" id="clock-out-volume">0.0 L</output></div>
       <div class="computed-row"><span class="label">Sale amount</span><output class="value green" id="clock-out-sales">₹0.00</output></div>
+      <div class="form-row"><div class="field"><label for="testing-fuel">Testing fuel (L)</label><input id="testing-fuel" type="number" min="0" step="0.01" inputmode="decimal" value="0" /></div><div class="field"><label for="credits-total">Credits given</label><input id="credits-total" type="number" min="0" step="0.01" inputmode="decimal" value="0" /></div></div>
+      <div class="field"><label for="digital-payments-total">Digital payments</label><input id="digital-payments-total" type="number" min="0" step="0.01" inputmode="decimal" value="0" /><small class="hint">Record the total received by UPI, card, wallet, or another configured method.</small></div>
 
-      <!-- Part C: Notes & Expenses -->
+      <!-- Notes & Expenses -->
       <hr class="form-divider" />
       <div class="field">
         <label for="clock-out-notes">Notes <span class="optional">(optional)</span></label>
@@ -541,7 +593,7 @@ function openClockOutForm(stationId, pump, rate, session) {
         <label>Expenses <span class="optional">(optional)</span></label>
         <div id="expense-rows">
           <div class="expense-row" data-index="0">
-            <input type="text" class="expense-item" placeholder="Item" maxlength="60" />
+            <input type="text" class="expense-item" list="expense-category-list" placeholder="Category or custom item" maxlength="60" />
             <input type="number" class="expense-cost" step="0.01" min="0" placeholder="₹0.00" inputmode="decimal" />
             <button type="button" class="btn btn-secondary btn-small expense-remove" hidden>✕ Remove</button>
           </div>
@@ -581,7 +633,9 @@ function openClockOutForm(stationId, pump, rate, session) {
 
     // Expenses and cash due
     const expensesTotal = computeExpenses();
-    const cashDue = Math.max(0, sales - expensesTotal);
+    const creditsTotal = Math.max(0, read('credits-total') || 0);
+    const digitalPaymentsTotal = Math.max(0, read('digital-payments-total') || 0);
+    const cashDue = Math.max(0, sales - expensesTotal - creditsTotal - digitalPaymentsTotal);
     document.getElementById('clock-out-expenses-total').textContent = formatCurrency(expensesTotal);
     document.getElementById('clock-out-cash-due').textContent = formatCurrency(cashDue);
     const warning = document.getElementById('cash-warning');
@@ -600,7 +654,7 @@ function openClockOutForm(stationId, pump, rate, session) {
     row.className = 'expense-row';
     row.dataset.index = index;
     row.innerHTML = `
-      <input type="text" class="expense-item" placeholder="Item" maxlength="60" />
+      <input type="text" class="expense-item" list="expense-category-list" placeholder="Category or custom item" maxlength="60" />
       <input type="number" class="expense-cost" step="0.01" min="0" placeholder="₹0.00" inputmode="decimal" />
       <button type="button" class="btn btn-secondary btn-small expense-remove">✕ Remove</button>`;
     container.appendChild(row);
@@ -622,7 +676,7 @@ function openClockOutForm(stationId, pump, rate, session) {
   const removalBtns = document.querySelectorAll('.expense-remove');
   if (removalBtns.length === 1) removalBtns[0].hidden = true; // hide remove on initial lone row
 
-  ['clock-out-closing', 'clock-out-rate'].forEach(id => document.getElementById(id).addEventListener('input', compute));
+  ['clock-out-closing', 'clock-out-rate', 'testing-fuel', 'credits-total', 'digital-payments-total'].forEach(id => document.getElementById(id).addEventListener('input', compute));
 
   document.getElementById('clock-out-form').addEventListener('submit', async e => {
     e.preventDefault();
@@ -652,9 +706,12 @@ function openClockOutForm(stationId, pump, rate, session) {
     });
     const notes = readText('clock-out-notes');
     const expensesTotal = computeExpenses();
+    const testingFuel = Math.max(0, Number(document.getElementById('testing-fuel').value) || 0);
+    const creditsTotal = Math.max(0, Number(document.getElementById('credits-total').value) || 0);
+    const digitalPaymentsTotal = Math.max(0, Number(document.getElementById('digital-payments-total').value) || 0);
     const volume = Number.isFinite(opening) ? Math.max(0, closing - opening) : 0;
     const sales = volume * finalRate;
-    const cashDue = Math.max(0, sales - expensesTotal);
+    const cashDue = Math.max(0, sales - expensesTotal - creditsTotal - digitalPaymentsTotal);
 
     // Part D: if a manager/admin is closing on behalf of staff, auto-approve
     const shiftStatus = isOverseerClosing ? 'approved' : 'pending';
@@ -703,6 +760,9 @@ function openClockOutForm(stationId, pump, rate, session) {
           notes: notes || '',
           expenses: expenseItems,
           expensesTotal,
+          testingFuel,
+          creditsTotal,
+          digitalPaymentsTotal,
           cashDue,
           // Part D: approval status
           status: shiftStatus,
@@ -724,6 +784,7 @@ function openClockOutForm(stationId, pump, rate, session) {
           updatedBy: meNow.uid,
         });
       });
+      recordAudit(stationId, 'Shift Closed', { type: 'pump', id: pump.id, name: pump.name, employeeId: actualStaffUid }, isOverseerClosing ? 'Closed on behalf of employee.' : '').catch(() => {});
       invalidateStation(stationId);
       closeModal('generic-modal');
       toastSuccess(`Shift Ended — ${formatVolume(volume)} · ${formatCurrency(sales)}`);
@@ -743,4 +804,16 @@ function openClockOutForm(stationId, pump, rate, session) {
       setBusy(button, false);
     }
   });
+}
+
+/** Preload today's assignment grants before the first screen is painted. */
+export async function primeMyDailyPumps(stationId) {
+  const me = getCurrentUserData();
+  if (!stationId || !me || isStationOverseer()) return;
+  try {
+    const assignments = await getAssignments(stationId, getTodayDate());
+    setMyDailyPumps(pumpIdsForUser(assignments, me.uid), getTodayDate());
+  } catch {
+    setMyDailyPumps([], null);
+  }
 }

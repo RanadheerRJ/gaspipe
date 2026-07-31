@@ -371,6 +371,7 @@ export async function renderDashboard(stationId, range = 'today') {
     content.innerHTML = `${greetingHTML(station, sessions, accessibleStations)}
       ${filterBarHTML(range, customDate)}
       ${stationInfoCardHTML(station, rateMap, shifts, null, stationId, range, pumps, sessions)}
+      ${dashboardActionsHTML(stationId, sessions, shifts)}
       ${quickStartHTML(quick)}
       <div class="live-head"><h3 class="section-title">Live pump status</h3><span class="live-badge" role="status"><span class="live-dot" aria-hidden="true"></span>LIVE</span></div>
       <p class="feed-summary" id="feed-summary"></p><div id="feed-list">${feedListHTML(pumps, shifts, sessions, stationId)}</div><p class="feed-updated" id="feed-updated"></p>`;
@@ -378,9 +379,21 @@ export async function renderDashboard(stationId, range = 'today') {
     startGreetingClock();
     wireFilterBar(range);
     if (quick) wireQuickStart(quick);
+    wireDashboardActions();
   } catch (err) {
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
+}
+
+function dashboardActionsHTML(stationId, sessions, shifts) {
+  const active = (sessions || []).filter(row => row.status === 'active').length;
+  const closed = (shifts || []).filter(row => row.date === getTodayDate()).length;
+  if (isStationOverseer()) return `<section class="quick-start-card dashboard-actions"><div class="quick-start-copy"><span class="quick-start-icon">✓</span><div><h3>Today’s operations</h3><p>${active} active pumps · ${closed} pumps closed today</p></div></div><div class="quick-start-controls"><button class="btn btn-primary" data-dashboard-page="pumps">Assign shift</button><button class="btn btn-secondary" data-dashboard-page="reports">Generate daily report</button><button class="btn btn-secondary" data-dashboard-page="reports">View reports</button></div></section>`;
+  return `<section class="quick-start-card dashboard-actions"><div class="quick-start-copy"><span class="quick-start-icon">⛽</span><div><h3>My shift</h3><p>Start your assigned pump, then enter one closing reading when you finish.</p></div></div><div class="quick-start-controls"><button class="btn btn-primary" data-dashboard-page="pumps">My assigned pump</button><button class="btn btn-secondary" data-dashboard-page="reports">My reports</button></div></section>`;
+}
+
+function wireDashboardActions() {
+  document.querySelectorAll('[data-dashboard-page]').forEach(button => button.addEventListener('click', () => document.querySelector(`[data-page="${button.dataset.dashboardPage}"]`)?.click()));
 }
 
 function wireFilterBar(currentRange) {

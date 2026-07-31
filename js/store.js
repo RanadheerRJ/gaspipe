@@ -360,3 +360,23 @@ export async function getStaffForStation(stationId) {
     return onlyStaffHere(fallback);
   }
 }
+
+// ── Daily reports ────────────────────────────────────────────────────────
+export function getDailyReports(stationId, { from = null, max = 200 } = {}) {
+  if (!stationId) return Promise.resolve([]);
+  return cached(`station:${stationId}:dailyReports:${from || 'all'}:${max}`, async () => {
+    const constraints = [];
+    if (from) constraints.push(where('date', '>=', from));
+    constraints.push(orderBy('date', 'desc'), limit(max));
+    const snap = await getDocs(query(collection(getDb(), 'stations', stationId, 'dailyReports'), ...constraints));
+    return snapToArray(snap);
+  });
+}
+
+export function getOperationsSettings(stationId) {
+  if (!stationId) return Promise.resolve({});
+  return cached(`station:${stationId}:operationsSettings`, async () => {
+    const snap = await getDoc(doc(getDb(), 'stations', stationId, 'settings', 'operations'));
+    return snap.exists() ? snap.data() : {};
+  });
+}

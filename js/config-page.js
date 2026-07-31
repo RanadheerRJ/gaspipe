@@ -1,7 +1,7 @@
 /* PumpLog — Config page (Profile, Station Security, Rates, Pumps, Stations, Team) */
 
 import {
-  getDb, collection, doc, addDoc, updateDoc, deleteDoc, getDocs, query, limit,
+  getDb, collection, doc, addDoc, updateDoc, deleteDoc, setDoc, getDocs, query, limit,
   serverTimestamp, writeBatch,
 } from './firebase.js';
 import {
@@ -11,7 +11,7 @@ import {
 import {
   getAllStations, getStationsByIds, getRates, getPumps, getPumpSessions,
   getManageableUsers,
-  invalidateStation, invalidateStations, invalidateUsers,
+  invalidateStation, invalidateStations, invalidateUsers, getOperationsSettings,
 } from './store.js';
 import {
   h, formatCurrency, formatDate, formatDateTime, getTodayDate,
@@ -27,6 +27,7 @@ import {
   createUserAccount, updateUserAccount, removeUserAccount,
 } from './staff-auth.js';
 import { openProfileModal, avatarHTML } from './profile.js';
+import { recordAudit } from './audit.js';
 
 let currentStationId = null;
 let stationsCache = [];
@@ -56,13 +57,14 @@ export async function renderConfig(stationId) {
 
   try {
     // Load every section in parallel instead of sequentially.
-    const [rates, pumps, sessions, stations, users, security] = await Promise.all([
+    const [rates, pumps, sessions, stations, users, security, operations] = await Promise.all([
       stationId ? getRates(stationId) : [],
       stationId ? getPumps(stationId) : [],
       stationId ? getPumpSessions(stationId) : [],
       isSuperAdmin() ? getAllStations() : getStationsByIds(me.stationIds || []),
       getManageableUsers(me.stationIds || []),
       stationId ? getSecuritySettings(stationId) : { ...DEFAULT_SECURITY },
+      stationId ? getOperationsSettings(stationId) : {},
     ]);
     stationsCache = stations;
     teamCache = users;
@@ -75,6 +77,7 @@ export async function renderConfig(stationId) {
       ifCan('stationSecurity.update', { stationId }, renderStationSecuritySection(stationId, security)),
       ifCan('rate.update', { stationId }, renderRatesSection(stationId, rates)),
       ifCan('pump.update', { stationId }, renderPumpsSection(stationId, pumps, sessions)),
+      ifCan('stationSecurity.update', { stationId }, renderOperationsSection(stationId, operations)),
       ifCan('station.create', {}, renderStationsSection(stations)),
       ifCan('station.reset', { stationId }, renderStationDataSection(selectedStation)),
       ifCan('team.view', {}, renderTeamSection(users, me)),
@@ -83,6 +86,7 @@ export async function renderConfig(stationId) {
 
     content.innerHTML = `<h2 class="page-title">Settings</h2>${sections}`;
     wireHandlers(rates, pumps, sessions, stations, users);
+    wireOperationsSettings(stationId, operations);
   } catch (err) {
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
@@ -203,6 +207,30 @@ function wireStationSecurity(stationId) {
       toastError(formatFirebaseError(err));
       setBusy(button, false);
     }
+  });
+}
+
+// ── Operational configuration ───────────────────────────────────────────
+function renderOperationsSection(stationId, settings = {}) {
+  if (!stationId) return '';
+  const lines = values => (values || []).map(item => typeof item === 'string' ? item : item.name).filter(Boolean).join('\n');
+  return section('Operations', '', `<p class="section-hint">Add one category or payment method per line. These choices are available on shift close; no code change is needed.</p>
+    <div class="field"><label for="expense-categories">Expense categories</label><textarea id="expense-categories" rows="5" maxlength="1000" placeholder="Tea&#10;Cleaning&#10;Maintenance">${h(lines(settings.expenseCategories) || 'Tea\nCleaning\nMaintenance\nOil\nMiscellaneous')}</textarea></div>
+    <div class="field"><label for="payment-methods">Payment methods</label><textarea id="payment-methods" rows="6" maxlength="1000" placeholder="Cash&#10;UPI&#10;PhonePe">${h(lines(settings.paymentMethods) || 'Cash\nUPI\nPhonePe\nPaytm\nCredit Card')}</textarea></div>
+    <div class="field"><label class="toggle-row"><span class="toggle-text">Allow multiple pump assignments<small>Off by default: one employee can have one active pump.</small></span><input id="allow-multiple-assignments" class="toggle-input" type="checkbox" role="switch" ${settings.allowMultipleAssignments ? 'checked' : ''}></label></div>
+    <button id="save-operations-settings" class="btn btn-primary btn-full">Save operational settings</button>`);
+}
+function wireOperationsSettings(stationId) {
+  onClick('save-operations-settings', async event => {
+    const list = id => [...new Set((byId(id)?.value || '').split('\n').map(x => x.trim()).filter(Boolean))].slice(0, 30);
+    const expenseCategories = list('expense-categories'); const paymentMethods = list('payment-methods');
+    if (!expenseCategories.length || !paymentMethods.length) return toastError('Add at least one expense category and payment method.');
+    setBusy(event.currentTarget, true, 'Saving…');
+    try {
+      await setDoc(doc(getDb(), 'stations', stationId, 'settings', 'operations'), { expenseCategories, paymentMethods, allowMultipleAssignments: byId('allow-multiple-assignments').checked, updatedAt: serverTimestamp(), updatedBy: getCurrentUserData().uid }, { merge: true });
+      recordAudit(stationId, 'Settings Changed', { type: 'operationsSettings', id: 'operations' }).catch(() => {});
+      invalidateStation(stationId); toastSuccess('Operational settings saved');
+    } catch (err) { toastError(formatFirebaseError(err)); } finally { setBusy(event.currentTarget, false); }
   });
 }
 
@@ -409,6 +437,7 @@ const SECTION_META = {
   Stations: { icon: '🏪', description: 'Create, rename, or remove stations.' },
   'Station data': { icon: '♻️', description: 'Clear shift history and stuck pump locks for this station.' },
   Team: { icon: '👥', description: 'Create and manage people and their station access.' },
+  Operations: { icon: '🧾', description: 'Expense categories, payment methods, and assignment behavior.' },
   Security: { icon: '🔒', description: 'How Firebase protects PumpLog accounts and data.' },
 };
 

@@ -28,10 +28,8 @@ import {
   resetAppLockForSignOut, updateAppLockPolicy,
 } from './app-lock.js';
 import { initDashboard, renderDashboard, stopLiveFeed } from './dashboard.js';
-import { initPumps, renderPumps, stopPumpsLive } from './pumps.js';
-import { initBoard, renderBoard, stopBoardLive, primeMyDailyPumps } from './board.js';
+import { initPumps, renderPumps, stopPumpsLive, primeMyDailyPumps } from './pumps.js';
 import { initConfig, renderConfig } from './config-page.js';
-import { initHistory, renderHistory } from './history.js';
 import { initReports, renderReports } from './reports.js';
 import {
   signInWithEmailPin, recordLogout, getMyPinStatus,
@@ -132,7 +130,6 @@ onAuthChange(async (user, userData, authError) => {
     resetAuthSubmit();
     stopLiveFeed();
     stopPumpsLive();
-    stopBoardLive();
     currentStationId = null;
     userStations = [];
     currentPage = 'dashboard';
@@ -197,9 +194,7 @@ async function enterApp(user, policy) {
 
   initDashboard();
   initPumps();
-  initBoard();
   initConfig();
-  initHistory();
   initReports();
 
   setupUI();
@@ -289,12 +284,10 @@ async function renderCurrentPage() {
 
   if (currentPage === 'config' && !can('config.view')) currentPage = 'dashboard';
   if (currentPage === 'reports' && !can('report.view', { stationId: currentStationId })) currentPage = 'dashboard';
-  if (currentPage === 'board' && !can('assignment.view', { stationId: currentStationId })) currentPage = 'dashboard';
 
   // Keep live listeners attached only to the screen currently using them.
   if (currentPage !== 'dashboard') stopLiveFeed();
   if (currentPage !== 'pumps') stopPumpsLive();
-  if (currentPage !== 'board') stopBoardLive();
 
   document.querySelectorAll('.tab').forEach(tab => {
     const active = tab.dataset.page === currentPage;
@@ -303,15 +296,13 @@ async function renderCurrentPage() {
     else tab.removeAttribute('aria-current');
   });
 
-  // The range chips only affect Dashboard and History.
-  $('quick-chips').hidden = !(currentPage === 'dashboard' || currentPage === 'history');
+  // Date filtering belongs to the dashboard only.
+  $('quick-chips').hidden = currentPage !== 'dashboard';
 
   try {
     switch (currentPage) {
       case 'pumps':   await renderPumps(currentStationId); break;
-      case 'board':   await renderBoard(currentStationId); break;
       case 'config':  await renderConfig(currentStationId); break;
-      case 'history': await renderHistory(currentStationId, currentRange); break;
       case 'reports': await renderReports(currentStationId); break;
       default:        await renderDashboard(currentStationId, currentRange);
     }
@@ -327,13 +318,6 @@ function applyRoleVisibility() {
   applyPermission(
     document.querySelector('[data-page="reports"]'),
     'report.view',
-    { stationId: currentStationId },
-  );
-  // Every station member sees the same daily board; edit controls have their
-  // own assignment.manage gate inside the page.
-  applyPermission(
-    document.querySelector('[data-page="board"]'),
-    'assignment.view',
     { stationId: currentStationId },
   );
 }

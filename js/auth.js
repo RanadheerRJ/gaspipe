@@ -382,6 +382,12 @@ export function can(action, ctx = {}) {
       return stationOk && (superAdmin || stationAdmin || manager || isStaff());
     case 'report.viewOthers':
       return (superAdmin || stationAdmin || manager) && stationOk;
+    case 'report.generate':
+    case 'report.submit':
+    case 'report.approve':
+      return (superAdmin || stationAdmin || manager) && stationOk;
+    case 'report.unlock':
+      return (superAdmin || stationAdmin) && stationOk;
     case 'station.reset':
     case 'stationSecurity.update':
       return (superAdmin || stationAdmin || manager) && stationOk;

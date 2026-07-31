@@ -147,8 +147,10 @@ service cloud.firestore {
     function writesActiveSession(stationId, pumpId) {
       return sessionFieldsOk()
         && request.resource.data.status == 'active'
-        && request.resource.data.activeUid == request.auth.uid
-        && canUsePump(stationId, pumpId);
+        // Staff can only start their own assigned pump. Managers may delegate
+        // a start to a station employee; the transaction still enforces one lock.
+        && (request.resource.data.activeUid == request.auth.uid || canManageStation(stationId))
+        && (canUsePump(stationId, pumpId) || canManageStation(stationId));
     }
 
     function writesIdleSession() {
@@ -528,6 +530,32 @@ service cloud.firestore {
         allow delete: if isSignedIn() && canManageStation(stationId);
       }
 
+      // ── Immutable audit trail ─────────────────────────────────────
+      match /auditLogs/{auditId} {
+        allow read: if isSignedIn() && canManageStation(stationId);
+        allow create: if isSignedIn() && canAccessStation(stationId)
+          && request.resource.data.keys().hasAll(['timestamp', 'userId', 'role', 'stationId', 'action', 'affectedObject'])
+          && request.resource.data.userId == request.auth.uid
+          && request.resource.data.stationId == stationId;
+        allow update, delete: if false;
+      }
+
+      // ── Daily reports ──────────────────────────────────────────────
+      match /dailyReports/{reportId} {
+        allow read: if isSignedIn() && canManageStation(stationId);
+        allow create: if isSignedIn() && canManageStation(stationId)
+          && request.resource.data.date == reportId
+          && request.resource.data.status == 'Draft';
+        allow update: if isSignedIn() && canManageStation(stationId)
+          && resource.data.date == reportId
+          && (
+            (resource.data.status == 'Draft' && request.resource.data.status in ['Draft', 'Submitted'])
+            || (resource.data.status == 'Submitted' && request.resource.data.status == 'Approved')
+            || (isStationAdmin() && request.resource.data.status in ['Draft', 'Submitted', 'Approved', 'Locked'])
+          );
+        allow delete: if false;
+      }
+
       // ── Shifts ────────────────────────────────────────────────────
       match /shifts/{shiftId} {
         // Managers (Super/Station Admin) read every record at the station.
@@ -572,6 +600,9 @@ service cloud.firestore {
           && (!request.resource.data.keys().hasAny(['expenses']) || request.resource.data.expenses is list)
           && (!request.resource.data.keys().hasAny(['expensesTotal']) || (request.resource.data.expensesTotal is number && request.resource.data.expensesTotal >= 0))
           && (!request.resource.data.keys().hasAny(['cashDue']) || (request.resource.data.cashDue is number && request.resource.data.cashDue >= 0))
+          && (!request.resource.data.keys().hasAny(['testingFuel']) || (request.resource.data.testingFuel is number && request.resource.data.testingFuel >= 0))
+          && (!request.resource.data.keys().hasAny(['creditsTotal']) || (request.resource.data.creditsTotal is number && request.resource.data.creditsTotal >= 0))
+          && (!request.resource.data.keys().hasAny(['digitalPaymentsTotal']) || (request.resource.data.digitalPaymentsTotal is number && request.resource.data.digitalPaymentsTotal >= 0))
           && (!request.resource.data.keys().hasAny(['status']) || request.resource.data.status in ['pending', 'approved', 'rejected'])
           // A new shift is valid only as the same atomic operation that
           // closes this user's active session. This prevents direct writes
