@@ -23,6 +23,7 @@ import {
   getDocs,
   setDoc,
   updateDoc,
+  deleteDoc,
   query,
   where,
   limit,
@@ -33,6 +34,16 @@ import { DEFAULT_SECURITY } from './station-settings.js';
 
 export const normalizeUsername = value => String(value || '').trim().toLowerCase();
 const normalizeEmail = value => String(value || '').trim().toLowerCase();
+export const normalizePhone = value => String(value || '').replace(/[^0-9]/g, '');
+export function phoneLoginEmail(phone) {
+  const digits = normalizePhone(phone);
+  if (!/^\d{7,15}$/.test(digits)) {
+    const err = new Error('Enter a valid phone number including country code.');
+    err.code = 'auth/invalid-phone-number';
+    throw err;
+  }
+  return `phone.${digits}@login.pumplog.app`;
+}
 
 function pinAuthPassword(pin) {
   const value = String(pin || '').trim();
@@ -80,6 +91,11 @@ export async function signInWithEmailPin({ email, pin, remember = true }) {
   }
   await recordLogin().catch(() => {});
   return result;
+}
+
+/** Phone + PIN uses an internal Firebase email alias; the alias is never shown in the UI. */
+export async function signInWithPhonePin({ phone, pin, remember = true }) {
+  return signInWithEmailPin({ email: phoneLoginEmail(phone), pin, remember });
 }
 
 export async function signInWithUsernamePin() {
@@ -166,7 +182,9 @@ export async function checkUsername(username) {
 }
 
 export async function createUserAccount(payload = {}) {
-  const email = normalizeEmail(payload.email);
+  const phoneNumber = compact(payload.phoneNumber);
+  const usesPhoneLogin = payload.loginMethod === 'phone' || (!payload.email && payload.role !== 'superadmin');
+  const email = usesPhoneLogin ? phoneLoginEmail(phoneNumber) : normalizeEmail(payload.email);
   const cloudPin = payload.temporaryCloudPin || payload.pin;
   const currentAdmin = getAuthInstance().currentUser;
   if (!currentAdmin) {
@@ -193,6 +211,7 @@ export async function createUserAccount(payload = {}) {
 
   const profile = {
     email,
+    loginMethod: usesPhoneLogin ? 'phone' : 'email',
     username,
     firstName,
     lastName,
@@ -266,10 +285,11 @@ export async function deactivateUserAccount(staffId) {
 }
 
 export async function removeUserAccount(staffId) {
-  // Client SDK cannot delete another Firebase Auth credential. Keep the
-  // profile disabled so Firestore rules deny app data and the user cannot
-  // self-bootstrap a fresh profile with the same Auth account.
-  return deactivateUserAccount(staffId);
+  // Completed shifts/reports retain their immutable, denormalized employee
+  // fields. Removing this profile immediately removes app access. The Firebase
+  // Auth credential itself requires Admin SDK / a Cloud Function to delete.
+  await deleteDoc(doc(getDb(), 'users', staffId));
+  return { ok: true };
 }
 
 // ── Legacy onboarding removed in free mode ──────────────────────────────

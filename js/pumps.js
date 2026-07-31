@@ -13,7 +13,7 @@
  */
 
 import {
-  getDb, collection, doc, runTransaction, serverTimestamp,
+  getDb, collection, doc, runTransaction, writeBatch, serverTimestamp,
 } from './firebase.js';
 import {
   getCurrentUserData, isStationOverseer,
@@ -333,6 +333,7 @@ export async function renderPumps(stationId) {
           ? `Showing the ${myPumps.length} pump${myPumps.length === 1 ? '' : 's'} assigned to you.`
           : mayLog ? 'Choose a pump to start or end your shift. Live locks update on every device.' : 'You have read-only access.';
 
+    const quickAssign = isStationOverseer() ? quickAssignHTML(staff, pumps, stationId) : '';
     content.innerHTML = `
       <div class="page-head">
         <div>
@@ -342,6 +343,7 @@ export async function renderPumps(stationId) {
         <span class="live-badge" role="status"><span class="live-dot" aria-hidden="true"></span>LIVE LOCKS</span>
       </div>
       <p id="pump-live-note" class="section-hint" aria-live="polite"></p>
+      ${quickAssign}
       <ul id="pump-board" class="pump-grid"></ul>
     `;
 
@@ -350,11 +352,53 @@ export async function renderPumps(stationId) {
       assignments, date: today,
     };
     paintPumpBoard();
+    wireQuickAssign(stationId, pumps, staff);
     startSessionWatch(stationId);
     startAssignmentWatch(stationId, today);
   } catch (err) {
     content.innerHTML = emptyState('⚠️', formatFirebaseError(err));
   }
+}
+
+// ── Assignment-only shortcuts ───────────────────────────────────────────
+function quickAssignHTML(staff, pumps) {
+  if (!staff?.length || !pumps?.length) return '';
+  const people = staff.map(person => `<option value="${h(person.id || person.uid)}" data-name="${h(userDisplayName(person))}">${h(userDisplayName(person))}</option>`).join('');
+  const checks = pumps.map(pump => `<label class="checkbox-item"><input type="checkbox" name="quick-pump" value="${h(pump.id)}" data-name="${h(pump.name || 'Pump')}" /> <span>${h(pump.name || 'Pump')}</span></label>`).join('');
+  return `<section class="quick-start-card" id="quick-assign-card"><div class="quick-start-copy"><span class="quick-start-icon">👥</span><div><h3>Quick assign pumps</h3><p>Assign one employee to two or four pumps. This only assigns; it does not start a shift.</p></div></div>
+    <div class="quick-start-controls"><div class="form-row"><div class="field"><label for="quick-assign-person">Employee</label><select id="quick-assign-person"><option value="">Choose employee…</option>${people}</select></div><div class="field"><label>Assignment size</label><div class="button-row"><button type="button" class="btn btn-secondary btn-small" data-quick-limit="2">2 pumps : 1 person</button><button type="button" class="btn btn-secondary btn-small" data-quick-limit="4">4 pumps : 1 person</button></div></div></div><div id="quick-pump-options" class="checkbox-list">${checks}</div><p id="quick-assign-error" class="form-error hidden" role="alert"></p><button id="quick-assign-save" type="button" class="btn btn-primary">Save assignments</button></div></section>`;
+}
+function wireQuickAssign(stationId, pumps, staff) {
+  const card = document.getElementById('quick-assign-card'); if (!card) return;
+  let selectedLimit = 0;
+  const error = document.getElementById('quick-assign-error');
+  const fail = message => { error.textContent = message; error.classList.remove('hidden'); };
+  card.querySelectorAll('[data-quick-limit]').forEach(button => button.addEventListener('click', () => {
+    selectedLimit = Number(button.dataset.quickLimit); error.classList.add('hidden');
+    card.querySelectorAll('[data-quick-limit]').forEach(item => item.classList.toggle('btn-primary', item === button));
+    card.querySelectorAll('[data-quick-limit]').forEach(item => item.classList.toggle('btn-secondary', item !== button));
+    const checked = [...card.querySelectorAll('input[name="quick-pump"]:checked')];
+    if (checked.length > selectedLimit) checked.slice(selectedLimit).forEach(input => { input.checked = false; });
+  }));
+  card.querySelectorAll('input[name="quick-pump"]').forEach(input => input.addEventListener('change', () => {
+    if (!selectedLimit) { input.checked = false; return fail('Choose “2 pumps” or “4 pumps” first.'); }
+    const checked = [...card.querySelectorAll('input[name="quick-pump"]:checked')];
+    if (checked.length > selectedLimit) { input.checked = false; fail(`Choose exactly ${selectedLimit} pumps.`); }
+  }));
+  document.getElementById('quick-assign-save')?.addEventListener('click', async event => {
+    const select = document.getElementById('quick-assign-person'); const uid = select.value; const name = select.selectedOptions[0]?.dataset.name || '';
+    const checked = [...card.querySelectorAll('input[name="quick-pump"]:checked')];
+    if (!selectedLimit) return fail('Choose a 2-pump or 4-pump assignment.');
+    if (!uid) return fail('Choose an employee.');
+    if (checked.length !== selectedLimit) return fail(`Choose exactly ${selectedLimit} pumps.`);
+    setBusy(event.currentTarget, true, 'Saving…');
+    try {
+      const batch = writeBatch(getDb()); const me = getCurrentUserData();
+      checked.forEach(input => { const pump = pumps.find(item => item.id === input.value); batch.set(doc(getDb(), 'stations', stationId, 'assignments', `${getTodayDate()}_${pump.id}`), { date: getTodayDate(), pumpId: pump.id, pumpName: pump.name || 'Pump', product: pump.product || '', staffUids: [uid], staffNames: { [uid]: name }, createdAt: serverTimestamp(), createdBy: me.uid, updatedAt: serverTimestamp(), updatedBy: me.uid }, { merge: true }); });
+      await batch.commit(); recordAudit(stationId, 'Assignment Changed', { type: 'pumps', ids: checked.map(input => input.value), employeeId: uid, employeeName: name }, `Quick assignment: ${selectedLimit} pumps.`).catch(() => {});
+      invalidateStation(stationId); toastSuccess(`${name} assigned to ${selectedLimit} pumps`); window.dispatchEvent(new CustomEvent('pumplog:dataChanged', { detail: { stationId } }));
+    } catch (err) { fail(formatFirebaseError(err)); } finally { setBusy(event.currentTarget, false); }
+  });
 }
 
 // Kept as the shared entry point for Dashboard's pump detail action.

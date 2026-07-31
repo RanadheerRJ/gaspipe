@@ -188,7 +188,7 @@ service cloud.firestore {
              'employeeId', 'avatarUrl', 'role', 'stationIds', 'pumpIds',
              'status', 'createdBy', 'createdByAdmin', 'createdAt', 'updatedAt', 'updatedBy',
              'lastLogin', 'lastLogout', 'pinUpdatedAt', 'pin_reset_required', 'password_reset_required',
-             'pwaLoginAllowed', 'isAdmin'
+             'pwaLoginAllowed', 'isAdmin', 'loginMethod'
            ])
         && request.resource.data.stationIds is list
         && request.resource.data.stationIds.size() <= 50

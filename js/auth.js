@@ -160,7 +160,11 @@ async function createBootstrapProfile(user, db, userRef) {
     batch.set(bootstrapRef, { uid: user.uid, email: user.email, createdAt: serverTimestamp() });
     await batch.commit();
   } else {
-    await setDoc(userRef, data);
+    // Accounts are provisioned by an administrator. A removed profile must
+    // not silently recreate itself and regain a blank staff account.
+    const denied = new Error('This account no longer has access. Contact your station administrator.');
+    denied.code = 'auth/user-disabled';
+    throw denied;
   }
 
   return { ...data, uid: user.uid };

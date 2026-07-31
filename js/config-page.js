@@ -404,7 +404,7 @@ function teamItemHTML(u, me) {
     { action: 'user.update', ctx: targetCtx, cls: 'edit-user', id: u.id, icon: ICONS.edit, text: 'Edit', label: `Edit ${u.fullName || u.email}` },
     u.status === 'disabled'
       ? { action: 'user.update', ctx: targetCtx, cls: 'activate-user', id: u.id, icon: '▶️', text: 'Activate', label: `Activate ${u.fullName || u.email}` }
-      : { action: 'user.delete', ctx: targetCtx, cls: 'remove-user', id: u.id, icon: ICONS.delete, text: 'Remove access', label: `Remove access for ${u.fullName || u.email}` },
+      : { action: 'user.delete', ctx: targetCtx, cls: 'remove-user', id: u.id, icon: ICONS.delete, text: 'Delete user', label: `Delete ${u.fullName || u.email}` },
   ];
   const actionButtons = actions.map(a => ifCan(a.action, a.ctx, `
     <button class="btn btn-secondary btn-small item-action-btn ${a.cls}" data-id="${h(a.id)}" aria-label="${h(a.label)}">${a.icon} <span>${h(a.text || a.label)}</span></button>`)).join('');
@@ -413,7 +413,7 @@ function teamItemHTML(u, me) {
     ${avatarHTML(u, 'small')}
     <div class="item-info">
       <div class="item-title">${h(u.fullName || u.email || u.username || 'Unnamed user')}${isMe ? ' <span class="tag tag-you">You</span>' : ''} ${statusTag(u)}${u.pwaLoginAllowed === false ? ' <span class="tag tag-off">PWA off</span>' : ''}</div>
-      <div class="item-meta">${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''}${u.email ? ` · ${h(u.email)}` : ''}${u.employeeId ? ` · ID ${h(u.employeeId)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}</div>
+      <div class="item-meta">${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''}${u.loginMethod === 'phone' ? (u.phoneNumber ? ` · ${h(u.phoneNumber)}` : '') : (u.email ? ` · ${h(u.email)}` : '')}${u.employeeId ? ` · ID ${h(u.employeeId)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}</div>
     </div>
     ${actionButtons ? `<div class="item-actions">${actionButtons}</div>` : ''}
   </div>`;
@@ -989,12 +989,14 @@ async function showUserForm(user) {
         <input type="text" id="user-last-name" maxlength="50" autocomplete="off" required /></div>
     </div>
     <div class="form-row">
-      <div class="field"><label for="user-email">Email</label>
-        <input type="email" id="user-email" placeholder="name@example.com" autocomplete="off" autocapitalize="off" spellcheck="false" required /></div>
-      <div class="field"><label for="user-temp-pin">Cloud PIN</label>
-        <input type="text" id="user-temp-pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="off" required />
-        <small id="pin-policy-hint" class="hint"></small></div>
+      <div class="field"><label for="user-phone">Phone number</label>
+        <input type="tel" id="user-phone" placeholder="Country code + number" autocomplete="tel" inputmode="tel" /></div>
+      <div class="field"><label for="user-email">Developer email <span class="optional">(Super Admin only)</span></label>
+        <input type="email" id="user-email" placeholder="developer@example.com" autocomplete="off" autocapitalize="off" spellcheck="false" /></div>
     </div>
+    <div class="field"><label for="user-temp-pin">PIN</label>
+      <input type="text" id="user-temp-pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="off" required />
+      <small id="pin-policy-hint" class="hint">Station members sign in with phone number + PIN. Developers use email + PIN.</small></div>
     <div class="settings-group user-options">
       <label class="toggle-row"><span class="toggle-text">Active<small>Inactive accounts cannot sign in.</small></span><input type="checkbox" id="user-active" class="toggle-input" role="switch" checked /></label>
       <label class="toggle-row"><span class="toggle-text">Allow app sign-in on a phone</span><input type="checkbox" id="user-allow-pwa" class="toggle-input" role="switch" checked /></label>
@@ -1190,9 +1192,11 @@ async function showUserForm(user) {
         rerender();
       } else {
         const email = byId('user-email').value.trim().toLowerCase();
+        const phoneNumber = byId('user-phone').value.trim();
         const temporaryCloudPin = byId('user-temp-pin').value;
 
-        if (!isValidEmail(email)) return failInline('❌ Validation failed — enter a valid email address.');
+        if (role === 'superadmin' && !isValidEmail(email)) return failInline('❌ Enter a valid developer email address.');
+        if (role !== 'superadmin' && !/^[-+() 0-9]{7,22}$/.test(phoneNumber)) return failInline('❌ Enter a valid phone number including country code.');
         const policy = await policyForSelection();
         const pinError = validateCloudPinPolicy(temporaryCloudPin, policy);
         if (pinError) return failInline(pinError);
@@ -1200,7 +1204,9 @@ async function showUserForm(user) {
         const result = await createUserAccount({
           firstName,
           lastName,
-          email,
+          email: role === 'superadmin' ? email : '',
+          phoneNumber,
+          loginMethod: role === 'superadmin' ? 'email' : 'phone',
           role,
           stationIds: role === 'superadmin' ? [] : stationIds,
           pumpIds,
@@ -1227,10 +1233,10 @@ function showUserCreated(result, credentials) {
   byId('modal-body').innerHTML = `<div class="staff-created-success">
     <div class="success-check" aria-hidden="true">✓</div>
     <h3>Share these credentials privately</h3>
-    <p class="muted-note">${h(result.fullName)} signs in with email + Cloud PIN. This is the only time the Cloud PIN is shown.</p>
+    <p class="muted-note">${h(result.fullName)} signs in with ${result.loginMethod === 'phone' ? 'phone number + PIN' : 'developer email + PIN'}. This is the only time the PIN is shown.</p>
     <dl class="staff-created-details credentials-details">
       <dt>Name</dt><dd>${h(result.fullName)}</dd>
-      <dt>Email</dt><dd>${h(result.email)}</dd>
+      <dt>${result.loginMethod === 'phone' ? 'Phone' : 'Email'}</dt><dd>${h(result.loginMethod === 'phone' ? result.phoneNumber : result.email)}</dd>
       <dt>Role</dt><dd>${h(ROLES[result.role] || result.role)}</dd>
       <dt>Cloud PIN</dt><dd><output>${h(credentials.temporaryCloudPin)}</output></dd>
     </dl>
@@ -1244,8 +1250,8 @@ function showUserCreated(result, credentials) {
   byId('copy-user-credentials')?.addEventListener('click', async event => {
     const text = [
       `PumpLog account for ${result.fullName}`,
-      `Sign in: ${result.email}`,
-      `Cloud PIN: ${credentials.temporaryCloudPin}`,
+      `Sign in: ${result.loginMethod === 'phone' ? result.phoneNumber : result.email}`,
+      `PIN: ${credentials.temporaryCloudPin}`,
     ].join('\n');
     try {
       await navigator.clipboard.writeText(text);
@@ -1298,9 +1304,9 @@ async function removeUser(user, button = null) {
   }
   const name = user.fullName || user.email || user.username || 'this user';
   const ok = await confirmDialog({
-    title: `${ICONS.warning} Remove app access?`,
-    message: `${name} will not be able to use PumpLog. Their account will be kept inactive so past shifts stay complete, and you can reactivate it later.`,
-    confirmLabel: `${ICONS.delete} Remove access`,
+    title: `${ICONS.warning} Delete user?`,
+    message: `${name}'s team profile and station access will be permanently deleted. Completed shift and report history is retained with its recorded employee name.`,
+    confirmLabel: `${ICONS.delete} Delete user`,
     danger: true,
   });
   if (!ok) return;
@@ -1309,7 +1315,7 @@ async function removeUser(user, button = null) {
   try {
     await removeUserAccount(user.id);
     invalidateUsers();
-    toastSuccess('User Access Removed');
+    toastSuccess('User Deleted');
     rerender();
   } catch (err) {
     toastError(formatFirebaseError(err));

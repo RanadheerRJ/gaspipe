@@ -32,7 +32,7 @@ import { initPumps, renderPumps, stopPumpsLive, primeMyDailyPumps } from './pump
 import { initConfig, renderConfig } from './config-page.js';
 import { initReports, renderReports } from './reports.js';
 import {
-  signInWithEmailPin, recordLogout, getMyPinStatus,
+  signInWithEmailPin, signInWithPhonePin, recordLogout, getMyPinStatus,
 } from './staff-auth.js';
 import {
   openProfileModal, openForcedCloudPinChange,
@@ -50,6 +50,7 @@ let currentRange = 'today';
 let authMode = 'signin';
 let authMethod = 'email-pin';
 let authSubmitting = false;
+let developerLogin = false;
 let uiReady = false;
 let renderToken = 0;
 
@@ -234,7 +235,7 @@ function initFreeModeLogin() {
   const stationField = $('auth-station-field');
   if (stationField) stationField.classList.add('hidden');
   const subtitle = $('auth-subtitle');
-  if (subtitle) subtitle.textContent = 'Sign in with your email and Cloud PIN.';
+  if (subtitle) subtitle.textContent = 'Sign in with your phone number and PIN.';
   renderAuthFields();
 }
 
@@ -448,9 +449,12 @@ function renderMethodTabs() {
 
 function signinFieldsHTML() {
   const remember = '<label class="remember-row"><input type="checkbox" id="auth-remember" checked /> <span>Remember me on this device</span></label>';
-  return `<div class="field"><label for="auth-email">Email</label>
+  if (developerLogin) return `<div class="field"><label for="auth-email">Developer email</label>
       <input type="email" id="auth-email" autocomplete="email" autocapitalize="off" spellcheck="false" required /></div>
-    ${pinFieldHTML({ id: 'auth-pin', label: 'Cloud PIN' })}${remember}`;
+    ${pinFieldHTML({ id: 'auth-pin', label: 'Developer PIN' })}${remember}`;
+  return `<div class="field"><label for="auth-phone">Phone number</label>
+      <input type="tel" id="auth-phone" autocomplete="tel" inputmode="tel" placeholder="Country code + number" required /></div>
+    ${pinFieldHTML({ id: 'auth-pin', label: 'PIN' })}${remember}`;
 }
 
 function renderAuthFields() {
@@ -467,15 +471,16 @@ function renderAuthFields() {
     } else {
       fields.innerHTML = signinFieldsHTML();
     }
-    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="forgot">Forgot Cloud PIN?</button>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="forgot">Forgot PIN?</button><button type="button" class="link-btn" id="toggle-developer-login">${developerLogin ? 'Station team login' : 'Developer login'}</button>`;
   } else {
-    fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🔐</span><p>Ask your admin to create a new testing account if you forget your Cloud PIN. Signed-in users can change their own Cloud PIN from Profile.</p></div>
+    fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🔐</span><p>Ask your station administrator to reset your PIN. Developers use the Developer login option; station teams use phone number + PIN.</p></div>
       <div class="auth-info-card"><span aria-hidden="true">📱</span><p>Forgot your <strong>App Lock</strong> PIN? Use “Forgot App Lock PIN?” on the lock screen and answer your security questions.</p></div>`;
     links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Back to sign in</button>`;
   }
   wireAuthFields();
   document.querySelectorAll('[data-auth-mode]').forEach(button =>
     button.addEventListener('click', () => setAuthMode(button.dataset.authMode)));
+  document.getElementById('toggle-developer-login')?.addEventListener('click', () => { developerLogin = !developerLogin; renderAuthFields(); });
   resetAuthSubmit();
   $('auth-submit').hidden = authMode === 'forgot' || (authMode === 'signin' && methods.length === 0);
 }
@@ -487,7 +492,7 @@ function setAuthMode(mode) {
     signin: 'Sign in', forgot: 'Forgot your Cloud PIN',
   };
   const subtitles = {
-    signin: 'Sign in with email + Cloud PIN.',
+    signin: 'Sign in with your phone number and PIN.',
     forgot: 'How account recovery works.',
   };
   $('auth-title').textContent = titles[authMode] || 'Sign in';
@@ -518,12 +523,14 @@ function setupAuthForm() {
 async function handleSignIn(fail) {
   const remember = $('auth-remember')?.checked !== false;
   const email = $('auth-email')?.value.trim().toLowerCase() || '';
+  const phone = $('auth-phone')?.value.trim() || '';
   const pin = $('auth-pin')?.value || '';
-  if (!email || !pin) { resetAuthSubmit(); return fail('❌ Enter your email and Cloud PIN.'); }
+  if (!(developerLogin ? email : phone) || !pin) { resetAuthSubmit(); return fail(developerLogin ? '❌ Enter your developer email and PIN.' : '❌ Enter your phone number and PIN.'); }
 
   await setAuthPersistence(remember);
   showAuthMessage('Signing you in…', 'info');
-  await signInWithEmailPin({ email, pin, remember });
+  if (developerLogin) await signInWithEmailPin({ email, pin, remember });
+  else await signInWithPhonePin({ phone, pin, remember });
 }
 
 
