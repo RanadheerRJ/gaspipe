@@ -375,9 +375,11 @@ export function openShiftForm(stationId, pump, rate, session = null) {
 
 // ── Simple manager assignment ───────────────────────────────────────────
 // Assignment and start are one transaction: a pump never has two active shifts.
-function openAssignmentForm(stationId, pump, rate, staff) {
+async function openAssignmentForm(stationId, pump, rate, staff) {
   if (!can('assignment.manage', { stationId })) return toastError(denyReason('assignment.manage', { stationId }));
   if (!staff?.length) return toastError('Add an employee in Settings before assigning a shift.');
+  const operations = await getOperationsSettings(stationId).catch(() => ({}));
+  const defaultShiftName = operations.shiftNames?.find(Boolean) || '24 Hour';
   document.getElementById('modal-title').textContent = `Assign shift — ${pump.name}`;
   document.getElementById('modal-body').innerHTML = `<form id="assignment-form" novalidate>
     <p class="modal-intro">Choose an employee and opening meter reading. This starts their shift immediately.</p>
@@ -402,6 +404,9 @@ function openAssignmentForm(stationId, pump, rate, staff) {
     const opening = Number(openingRaw);
     if (!uid) return fail('Choose an employee.');
     if (openingRaw === '' || !Number.isFinite(opening) || opening < 0) return fail('Enter a valid opening meter reading.');
+    if (!operations.allowMultipleAssignments && (pumpContext?.sessions || []).some(row => row.status === 'active' && row.activeUid === uid)) {
+      return fail('This employee already has an active pump. Enable multiple assignments in Settings if your station allows it.');
+    }
     setBusy(button, true, 'Assigning…');
     try {
       const db = getDb();
@@ -412,7 +417,7 @@ function openAssignmentForm(stationId, pump, rate, staff) {
         if (existing.exists() && existing.data().status === 'active') {
           const conflict = new Error('This pump already has an active shift.'); conflict.code = 'pump-active'; throw conflict;
         }
-        transaction.set(sessionRef, { status: 'active', activeUid: uid, activeName: name, pumpName: pump.name || 'Pump', product: pump.product || '', clockInAt: serverTimestamp(), opening, date: getTodayDate(), shiftLabel: '24 Hour', updatedAt: serverTimestamp(), updatedBy: getCurrentUserData().uid });
+        transaction.set(sessionRef, { status: 'active', activeUid: uid, activeName: name, pumpName: pump.name || 'Pump', product: pump.product || '', clockInAt: serverTimestamp(), opening, date: getTodayDate(), shiftLabel: defaultShiftName, updatedAt: serverTimestamp(), updatedBy: getCurrentUserData().uid });
         transaction.set(assignmentRef, { date: getTodayDate(), pumpId: pump.id, pumpName: pump.name || 'Pump', product: pump.product || '', staffUids: [uid], staffNames: { [uid]: name }, createdAt: serverTimestamp(), createdBy: getCurrentUserData().uid, updatedAt: serverTimestamp(), updatedBy: getCurrentUserData().uid });
       });
       recordAudit(stationId, 'Shift Assigned', { type: 'pump', id: pump.id, name: pump.name, employeeId: uid, employeeName: name }, 'Manager assigned and started shift.').catch(() => {});
@@ -423,7 +428,7 @@ function openAssignmentForm(stationId, pump, rate, staff) {
 }
 
 // ── Clock-in form (now open to managers/admins too) ──────────────────────
-function openClockInForm(stationId, pump, rate) {
+async function openClockInForm(stationId, pump, rate) {
   if (!isStationOverseer() && (!can('pumpSession.start', { stationId, pumpId: pump.id }) || !canUsePump(pump.id))) {
     toastError(canUsePump(pump.id) ? denyReason('shift.create', { stationId }) : 'This pump is not assigned to you.');
     return;
@@ -431,6 +436,11 @@ function openClockInForm(stationId, pump, rate) {
 
   const rateLocked = !can('rate.update', { stationId });
   const missingRate = rateLocked && !rate;
+  const operations = await getOperationsSettings(stationId).catch(() => ({}));
+  const shiftNames = operations.shiftNames?.filter(Boolean) || ['24 Hour'];
+  const shiftField = shiftNames.length === 1
+    ? `<input type="hidden" id="clock-in-shift" value="${h(shiftNames[0])}" /><div class="field"><label>Shift</label><input value="${h(shiftNames[0])}" readonly aria-readonly="true" /><small class="hint">Your station uses one continuous shift.</small></div>`
+    : `<div class="field"><label for="clock-in-shift">Shift</label><select id="clock-in-shift">${shiftNames.map(name => `<option value="${h(name)}">${h(name)}</option>`).join('')}</select></div>`;
 
   // E2: Prefill initialReading for the pump's genuine first shift (no prior history)
   const prefillOpening = async () => {
@@ -452,8 +462,7 @@ function openClockInForm(stationId, pump, rate) {
       <div class="form-row">
         <div class="field"><label for="clock-in-date">Date</label>
           <input type="date" id="clock-in-date" value="${getTodayDate()}" max="${getTodayDate()}" ${isStationOverseer() ? '' : `min="${getTodayDate()}" readonly aria-readonly="true"`} required /></div>
-        <input type="hidden" id="clock-in-shift" value="24 Hour" />
-        <div class="field"><label>Shift</label><input value="24 Hour" readonly aria-readonly="true" /><small class="hint">Your station uses one continuous shift.</small></div>
+${shiftField}
       </div>
       <div class="field"><label for="clock-in-opening">Opening reading</label>
         <input type="number" id="clock-in-opening" step="0.01" min="0" inputmode="decimal" placeholder="0.00" required /></div>
@@ -560,6 +569,7 @@ async function openClockOutForm(stationId, pump, rate, session) {
   const actualStaffUid = session.activeUid || me?.uid;
   const operations = await getOperationsSettings(stationId).catch(() => ({}));
   const expenseCategories = operations.expenseCategories || ['Tea', 'Cleaning', 'Maintenance', 'Oil', 'Miscellaneous'];
+  const paymentMethods = operations.paymentMethods || ['Cash', 'UPI', 'PhonePe', 'Paytm', 'Credit Card'];
 
   document.getElementById('modal-title').textContent = `End shift — ${pump.name}${isOverseerClosing ? ` (for ${actualStaffName})` : ''}`;
   document.getElementById('modal-body').innerHTML = `
@@ -581,7 +591,7 @@ async function openClockOutForm(stationId, pump, rate, session) {
       <div class="computed-row"><span class="label">Volume</span><output class="value" id="clock-out-volume">0.0 L</output></div>
       <div class="computed-row"><span class="label">Sale amount</span><output class="value green" id="clock-out-sales">₹0.00</output></div>
       <div class="form-row"><div class="field"><label for="testing-fuel">Testing fuel (L)</label><input id="testing-fuel" type="number" min="0" step="0.01" inputmode="decimal" value="0" /></div><div class="field"><label for="credits-total">Credits given</label><input id="credits-total" type="number" min="0" step="0.01" inputmode="decimal" value="0" /></div></div>
-      <div class="field"><label for="digital-payments-total">Digital payments</label><input id="digital-payments-total" type="number" min="0" step="0.01" inputmode="decimal" value="0" /><small class="hint">Record the total received by UPI, card, wallet, or another configured method.</small></div>
+      <div class="form-row"><div class="field"><label for="payment-method">Payment method</label><select id="payment-method">${paymentMethods.map(method => `<option value="${h(method)}">${h(method)}</option>`).join('')}</select></div><div class="field"><label for="digital-payments-total">Amount received</label><input id="digital-payments-total" type="number" min="0" step="0.01" inputmode="decimal" value="0" /></div></div><small class="hint">Use a configured method, or choose the station’s custom method. Cash is excluded from digital totals.</small>
 
       <!-- Notes & Expenses -->
       <hr class="form-divider" />
@@ -708,7 +718,10 @@ async function openClockOutForm(stationId, pump, rate, session) {
     const expensesTotal = computeExpenses();
     const testingFuel = Math.max(0, Number(document.getElementById('testing-fuel').value) || 0);
     const creditsTotal = Math.max(0, Number(document.getElementById('credits-total').value) || 0);
-    const digitalPaymentsTotal = Math.max(0, Number(document.getElementById('digital-payments-total').value) || 0);
+    const paymentMethod = document.getElementById('payment-method').value;
+    const paymentAmount = Math.max(0, Number(document.getElementById('digital-payments-total').value) || 0);
+    const digitalPayments = paymentMethod.toLowerCase() === 'cash' ? [] : (paymentAmount ? [{ method: paymentMethod, amount: paymentAmount }] : []);
+    const digitalPaymentsTotal = paymentMethod.toLowerCase() === 'cash' ? 0 : paymentAmount;
     const volume = Number.isFinite(opening) ? Math.max(0, closing - opening) : 0;
     const sales = volume * finalRate;
     const cashDue = Math.max(0, sales - expensesTotal - creditsTotal - digitalPaymentsTotal);
@@ -762,6 +775,7 @@ async function openClockOutForm(stationId, pump, rate, session) {
           expensesTotal,
           testingFuel,
           creditsTotal,
+          digitalPayments,
           digitalPaymentsTotal,
           cashDue,
           // Part D: approval status

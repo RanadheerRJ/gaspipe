@@ -217,17 +217,18 @@ function renderOperationsSection(stationId, settings = {}) {
   return section('Operations', '', `<p class="section-hint">Add one category or payment method per line. These choices are available on shift close; no code change is needed.</p>
     <div class="field"><label for="expense-categories">Expense categories</label><textarea id="expense-categories" rows="5" maxlength="1000" placeholder="Tea&#10;Cleaning&#10;Maintenance">${h(lines(settings.expenseCategories) || 'Tea\nCleaning\nMaintenance\nOil\nMiscellaneous')}</textarea></div>
     <div class="field"><label for="payment-methods">Payment methods</label><textarea id="payment-methods" rows="6" maxlength="1000" placeholder="Cash&#10;UPI&#10;PhonePe">${h(lines(settings.paymentMethods) || 'Cash\nUPI\nPhonePe\nPaytm\nCredit Card')}</textarea></div>
+    <div class="field"><label for="shift-names">Shift names</label><textarea id="shift-names" rows="3" maxlength="300" placeholder="24 Hour">${h(lines(settings.shiftNames) || '24 Hour')}</textarea><small class="hint">One name means a continuous shift and is selected automatically. Add Morning, Evening, and Night to show a choice.</small></div>
     <div class="field"><label class="toggle-row"><span class="toggle-text">Allow multiple pump assignments<small>Off by default: one employee can have one active pump.</small></span><input id="allow-multiple-assignments" class="toggle-input" type="checkbox" role="switch" ${settings.allowMultipleAssignments ? 'checked' : ''}></label></div>
     <button id="save-operations-settings" class="btn btn-primary btn-full">Save operational settings</button>`);
 }
 function wireOperationsSettings(stationId) {
   onClick('save-operations-settings', async event => {
     const list = id => [...new Set((byId(id)?.value || '').split('\n').map(x => x.trim()).filter(Boolean))].slice(0, 30);
-    const expenseCategories = list('expense-categories'); const paymentMethods = list('payment-methods');
-    if (!expenseCategories.length || !paymentMethods.length) return toastError('Add at least one expense category and payment method.');
+    const expenseCategories = list('expense-categories'); const paymentMethods = list('payment-methods'); const shiftNames = list('shift-names');
+    if (!expenseCategories.length || !paymentMethods.length || !shiftNames.length) return toastError('Add at least one expense category and payment method.');
     setBusy(event.currentTarget, true, 'Saving…');
     try {
-      await setDoc(doc(getDb(), 'stations', stationId, 'settings', 'operations'), { expenseCategories, paymentMethods, allowMultipleAssignments: byId('allow-multiple-assignments').checked, updatedAt: serverTimestamp(), updatedBy: getCurrentUserData().uid }, { merge: true });
+      await setDoc(doc(getDb(), 'stations', stationId, 'settings', 'operations'), { expenseCategories, paymentMethods, shiftNames, allowMultipleAssignments: byId('allow-multiple-assignments').checked, updatedAt: serverTimestamp(), updatedBy: getCurrentUserData().uid }, { merge: true });
       recordAudit(stationId, 'Settings Changed', { type: 'operationsSettings', id: 'operations' }).catch(() => {});
       invalidateStation(stationId); toastSuccess('Operational settings saved');
     } catch (err) { toastError(formatFirebaseError(err)); } finally { setBusy(event.currentTarget, false); }
