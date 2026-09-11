@@ -47,7 +47,7 @@ function employeeId(shift) {
 
 function employeeName(shift, people = new Map()) {
   const person = people.get(employeeId(shift));
-  return person?.fullName || person?.displayName || person?.email || person?.username
+  return person?.fullName || person?.username || person?.displayName
     || shift.staffName || shift.staffEmail || shift.createdBy || 'Unknown staff member';
 }
 
@@ -89,9 +89,9 @@ function reportSummary(rows) {
 }
 
 function reportEmployeeLabel(rows) {
-  if (reportState.employee === 'all') return isStaff() ? (getCurrentUserData()?.email || 'My report') : 'All employees';
+  if (reportState.employee === 'all') return isStaff() ? (getCurrentUserData()?.fullName || getCurrentUserData()?.username || 'My report') : 'All employees';
   const found = reportState.employees.find(e => e.uid === reportState.employee);
-  return found?.name || rows[0] && employeeName(rows[0], reportState.people) || getCurrentUserData()?.fullName || getCurrentUserData()?.email || 'Employee report';
+  return found?.name || rows[0] && employeeName(rows[0], reportState.people) || getCurrentUserData()?.fullName || getCurrentUserData()?.username || 'Employee report';
 }
 
 function employeeOptions() {

@@ -69,8 +69,8 @@ npx firebase-tools deploy --only firestore:rules
 ## First admin
 
 1. Enable Firebase Authentication → Email/Password.
-2. Create the first Auth user in Firebase Console.
-3. Sign in with email + Cloud PIN.
+2. Create the first Auth user in Firebase Console with email `<username>@pumplog.app` (e.g. `admin@pumplog.app`) and the PIN as password.
+3. Sign in with username + Cloud PIN.
 4. PumpLog creates the first profile as `superadmin`.
 
 ## No billing required

@@ -22,9 +22,11 @@ The app uses only:
 
 Sign-in is deliberately simple for testing and development:
 
-- Users sign in with **email + Cloud PIN**.
+- Users sign in with **username + Cloud PIN** — no email addresses.
+- Usernames are 4–16 characters: lowercase letters, numbers, dots or underscores (e.g. `ramesh01`).
+- Internally each username maps to a hidden synthetic Firebase Authentication credential (`<username>@pumplog.app`). Users never see or type that value.
 - The Cloud PIN is handled as the Firebase Authentication credential.
-- User profile data in Firestore stays simple: email, role, station assignments, pump assignments, and optional display fields.
+- User profile data in Firestore stays simple: username, role, station assignments, pump assignments, and optional display fields.
 - A signed-in user can update their own Cloud PIN from **Profile → Cloud PIN**. That is the only credential update path in free mode.
 
 > Note: Admin-side credential resets and invite/join codes require a trusted backend/Admin SDK, so they are disabled in this free mode. If someone forgets a Cloud PIN during testing, create a new account from Config → Team or reset the Firebase Auth password manually in the Firebase Console.
@@ -33,9 +35,10 @@ Sign-in is deliberately simple for testing and development:
 
 1. Enable Firebase Authentication → Email/Password provider.
 2. Create the first Firebase Auth user in the Firebase Console.
-   - For a simple manual bootstrap, set the Auth password to the numeric PIN you want to use, preferably 6–8 digits.
+   - Email: `<username>@pumplog.app` (e.g. `admin@pumplog.app`). This synthetic address is never shown in the app.
+   - Password: the numeric PIN you want to use, preferably 6–8 digits.
    - The app also supports accounts created by PumpLog itself, which internally prefixes the PIN to satisfy Firebase Auth password rules.
-3. Sign in at the app with that email + PIN.
+3. Sign in at the app with that username + PIN.
 4. The first signed-in Auth user with no profile automatically becomes `superadmin`.
 5. Create stations and additional users from **Config → Team**.
 

@@ -369,7 +369,7 @@ export function engageAppLock(onUnlock, userLabel = '') {
 export async function engageAppLockFor(user, userData, policy = null) {
   currentPolicy = policy || currentPolicy || await getEffectiveSecurity(userData);
   activeUid = user.uid;
-  const name = userData.fullName || userData.email || userData.username || '';
+  const name = userData.fullName || userData.username || '';
   return new Promise(resolve => engageAppLock(resolve, name));
 }
 

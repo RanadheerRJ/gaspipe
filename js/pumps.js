@@ -87,7 +87,7 @@ function pumpCardHTML(pump, rateMap, sessions, stationId, staff = []) {
     ? staff.filter(user => (user.pumpIds || []).includes(pump.id))
     : [];
   const assignmentLine = isPumpManager()
-    ? `<span class="pump-assignment-line">${assigned.length ? `Assigned to ${assigned.map(user => h(user.email || 'staff')).join(', ')}` : 'No staff assigned to this pump'}</span>`
+    ? `<span class="pump-assignment-line">${assigned.length ? `Assigned to ${assigned.map(user => h(user.fullName || (user.username ? `@${user.username}` : 'staff'))).join(', ')}` : 'No staff assigned to this pump'}</span>`
     : '';
   const rate = rateMap[pump.product];
   const detail = session
@@ -243,10 +243,10 @@ async function openPumpAssignmentForm(stationId, pump, staff) {
   const activeUser = staff.find(user => user.id === activeSession?.activeUid);
   const assignedIds = new Set(staff.filter(user => (user.pumpIds || []).includes(pump.id)).map(user => user.id));
   const warning = activeSession
-    ? `<p class="assignment-warning" role="status">⚠️ ${h(activeUser?.email || activeSession.activeName || 'A staff member')} is currently active on this pump. Removing their assignment will not end the shift; the lock remains until clock-out or manager force-release.</p>`
+    ? `<p class="assignment-warning" role="status">⚠️ ${h(activeUser?.fullName || activeUser?.username || activeSession.activeName || 'A staff member')} is currently active on this pump. Removing their assignment will not end the shift; the lock remains until clock-out or manager force-release.</p>`
     : '';
   const options = staff.length
-    ? `<div class="checkbox-list">${staff.map(user => `<div class="checkbox-item"><input type="checkbox" id="assign-pump-${h(user.id)}" value="${h(user.id)}" ${assignedIds.has(user.id) ? 'checked' : ''} /><label for="assign-pump-${h(user.id)}">${h(user.email || 'Staff member')}</label></div>`).join('')}</div>`
+    ? `<div class="checkbox-list">${staff.map(user => `<div class="checkbox-item"><input type="checkbox" id="assign-pump-${h(user.id)}" value="${h(user.id)}" ${assignedIds.has(user.id) ? 'checked' : ''} /><label for="assign-pump-${h(user.id)}">${h(user.fullName || (user.username ? `@${user.username}` : 'Staff member'))}</label></div>`).join('')}</div>`
     : '<p class="muted-note">No staff accounts are assigned to this station yet. Add staff from Config → Team first.</p>';
   document.getElementById('modal-title').textContent = `Assign ${pump.name}`;
   document.getElementById('modal-body').innerHTML = `<form id="pump-assignment-form" novalidate>
@@ -349,7 +349,7 @@ function openClockInForm(stationId, pump, rate) {
         transaction.set(sessionRef, {
           status: 'active',
           activeUid: me.uid,
-          activeName: me.email || me.displayName || 'Staff member',
+          activeName: me.fullName || me.username || me.displayName || 'Staff member',
           pumpName: pump.name || 'Pump',
           product: pump.product || '',
           clockInAt: serverTimestamp(),
@@ -474,7 +474,7 @@ function openClockOutForm(stationId, pump, rate, session) {
           createdBy: meNow.uid,
           staffId: meNow.uid,
           staffUid: meNow.uid,
-          staffName: meNow.fullName || meNow.email || meNow.displayName || 'Staff member',
+          staffName: meNow.fullName || meNow.username || meNow.displayName || 'Staff member',
           clockInAt: current.clockInAt || null,
           clockOutAt: serverTimestamp(),
           hoursWorked,

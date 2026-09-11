@@ -4,8 +4,9 @@
  * controls the local App Lock and Cloud PIN policy for accounts assigned
  * to that station.
  *
- * Spark-plan/free mode keeps sign-in simple: email + Cloud PIN through
- * Firebase Authentication, with no Cloud Functions or paid backend API.
+ * Spark-plan/free mode keeps sign-in simple: username + Cloud PIN through
+ * Firebase Authentication (each username maps to a hidden synthetic email),
+ * with no Cloud Functions or paid backend API.
  */
 
 import { getDb, doc, getDoc, setDoc, serverTimestamp, onSnapshot } from './firebase.js';
@@ -14,9 +15,9 @@ import { getCurrentUserData } from './auth.js';
 export const SETTINGS_VERSION = 1;
 
 export const DEFAULT_SECURITY = Object.freeze({
-  // Free mode supports one sign-in method: email + Cloud PIN.
+  // Free mode supports one sign-in method: username + Cloud PIN.
   enableEmailLogin: true,
-  enableUsernameLogin: false,
+  enableUsernameLogin: true,
   enablePasswordLogin: false,
   enablePinLogin: true,
   // Local App Lock (device-specific, never synced)
@@ -176,7 +177,7 @@ export function watchSecuritySettings(stationId, onUpdate) {
 
 // ── Login method matrix ─────────────────────────────────────────────────
 export const LOGIN_METHODS = Object.freeze([
-  { id: 'email-pin', identifier: 'email', secret: 'pin', label: 'Email + Cloud PIN', icon: '📧' },
+  { id: 'username-pin', identifier: 'username', secret: 'pin', label: 'Username + Cloud PIN', icon: '👤' },
 ]);
 
 export function enabledLoginMethods(settings) {
@@ -233,5 +234,4 @@ export function validateAppLockPin(pin) {
   return null;
 }
 
-export const isValidEmail = value => /^[^\s@]+@[^\s@]+\.[^\s@]{2,}$/.test(String(value || '').trim());
 export const isValidUsername = value => /^[a-z0-9_.]{4,16}$/.test(String(value || '').trim().toLowerCase());
