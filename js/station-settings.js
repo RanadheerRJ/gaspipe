@@ -16,9 +16,7 @@ export const SETTINGS_VERSION = 1;
 
 export const DEFAULT_SECURITY = Object.freeze({
   // Free mode supports one sign-in method: username + Cloud PIN.
-  enableEmailLogin: true,
   enableUsernameLogin: true,
-  enablePasswordLogin: false,
   enablePinLogin: true,
   // Local App Lock (device-specific, never synced)
   appLockEnabled: false,
@@ -54,9 +52,11 @@ const clampInt = (value, min, max, fallback) => {
 /** Fill gaps, clamp ranges — safe against old documents and partial writes. */
 export function normalizeSecurity(raw = {}) {
   const merged = { ...DEFAULT_SECURITY, ...(raw || {}) };
-  merged.enableEmailLogin = merged.enableEmailLogin !== false;
-  merged.enableUsernameLogin = merged.enableUsernameLogin === true;
-  merged.enablePasswordLogin = merged.enablePasswordLogin === true;
+  // Legacy email/password flags removed — username + PIN is the only method.
+  // Keep reading old docs: force email/password off, username/PIN on.
+  merged.enableEmailLogin = false;
+  merged.enablePasswordLogin = false;
+  merged.enableUsernameLogin = true;
   merged.enablePinLogin = merged.enablePinLogin !== false;
   merged.appLockEnabled = merged.appLockEnabled === true;
   merged.appLockOnRefresh = merged.appLockOnRefresh !== false;
@@ -114,9 +114,7 @@ export function mergeSecurity(list) {
   const strongestComplexity = (values, order) =>
     values.reduce((best, v) => (order.indexOf(v) > order.indexOf(best) ? v : best), order[0]);
   const merged = {
-    enableEmailLogin: items.some(s => s.enableEmailLogin),
-    enableUsernameLogin: items.some(s => s.enableUsernameLogin),
-    enablePasswordLogin: items.some(s => s.enablePasswordLogin),
+    enableUsernameLogin: true,
     enablePinLogin: items.some(s => s.enablePinLogin),
     appLockEnabled: items.some(s => s.appLockEnabled),
     appLockOnRefresh: items.some(s => s.appLockEnabled && s.appLockOnRefresh),
@@ -182,9 +180,8 @@ export const LOGIN_METHODS = Object.freeze([
 
 export function enabledLoginMethods(settings) {
   const s = normalizeSecurity(settings);
-  return LOGIN_METHODS.filter(m =>
-    (m.identifier === 'email' ? s.enableEmailLogin : s.enableUsernameLogin) &&
-    (m.secret === 'password' ? s.enablePasswordLogin : s.enablePinLogin));
+  // Only username + PIN is supported — no email/password methods.
+  return s.enablePinLogin ? [...LOGIN_METHODS] : [];
 }
 
 // ── Policy validators (return a friendly error string or null) ──────────

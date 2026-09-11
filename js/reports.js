@@ -48,7 +48,7 @@ function employeeId(shift) {
 function employeeName(shift, people = new Map()) {
   const person = people.get(employeeId(shift));
   return person?.fullName || person?.username || person?.displayName
-    || shift.staffName || shift.staffEmail || shift.createdBy || 'Unknown staff member';
+    || shift.staffName || shift.createdBy || 'Unknown staff member';
 }
 
 function employeesFrom(shifts, people = new Map()) {

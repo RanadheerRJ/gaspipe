@@ -171,9 +171,7 @@ function wireStationSecurity(stationId) {
       return el.value;
     };
     const patch = normalizeSecurity({
-      enableEmailLogin: true,
       enableUsernameLogin: true,
-      enablePasswordLogin: false,
       enablePinLogin: read('enablePinLogin'),
       appLockEnabled: read('appLockEnabled'),
       appLockOnRefresh: read('appLockOnRefresh'),

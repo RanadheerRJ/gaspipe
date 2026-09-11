@@ -81,10 +81,14 @@ export async function resolveLoginIdentifier(username) {
 export async function signInWithUsernamePin({ username, pin, remember = true }) {
   await setAuthPersistence(remember);
   const auth = getAuthInstance();
-  const id = String(username || '').trim();
-  // Legacy escape hatch: a full email address still signs in verbatim, so any
-  // pre-username email accounts keep working after the migration.
-  const loginEmail = id.includes('@') ? id.toLowerCase() : usernameToEmail(id);
+  const cleanUsername = normalizeUsername(username);
+  const formatError = validateUsernameFormat(cleanUsername);
+  if (formatError) {
+    const err = new Error(formatError);
+    err.code = 'auth/invalid-credential';
+    throw err;
+  }
+  const loginEmail = usernameToEmail(cleanUsername);
   const password = pinAuthPassword(pin);
   let result;
   try {
@@ -96,6 +100,35 @@ export async function signInWithUsernamePin({ username, pin, remember = true }) 
     if (!['auth/invalid-credential', 'auth/wrong-password'].includes(err?.code)) throw err;
     result = await signInWithEmailAndPassword(auth, loginEmail, String(pin || '').trim());
   }
+  await recordLogin().catch(() => {});
+  return result;
+}
+
+export async function registerWithUsernamePin({ username, pin, remember = true }) {
+  const cleanUsername = normalizeUsername(username);
+  const formatError = validateUsernameFormat(cleanUsername);
+  if (formatError) {
+    const err = new Error(formatError);
+    err.code = 'auth/invalid-credential';
+    throw err;
+  }
+  const pinValue = String(pin || '').trim();
+  if (!/^\d{4,8}$/.test(pinValue)) {
+    const err = new Error('Cloud PIN must be 4–8 digits.');
+    err.code = 'auth/weak-password';
+    throw err;
+  }
+  const clash = await getDocs(query(collection(getDb(), 'users'), where('username', '==', cleanUsername), limit(1)));
+  if (!clash.empty) {
+    const err = new Error('Username already registered.');
+    err.code = 'auth/email-already-in-use';
+    throw err;
+  }
+  await setAuthPersistence(remember);
+  const auth = getAuthInstance();
+  const email = usernameToEmail(cleanUsername);
+  const password = pinAuthPassword(pinValue);
+  const result = await createUserWithEmailAndPassword(auth, email, password);
   await recordLogin().catch(() => {});
   return result;
 }
@@ -222,7 +255,6 @@ export async function createUserAccount(payload = {}) {
 
   const profile = {
     email,
-    username,
     username,
     firstName,
     lastName,

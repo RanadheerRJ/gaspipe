@@ -232,7 +232,7 @@ export function watchShifts(stationId, { onUpdate, onError, max = 200 } = {}) {
 // ── Users ───────────────────────────────────────────────────────────────
 export function getAllUsers() {
   return cached('users:all', async () => {
-    // Sort client-side so legacy email users and username identities both appear.
+    // Sort client-side for consistent display.
     const snap = await getDocs(collection(getDb(), 'users'));
     return snapToArray(snap).sort((a, b) =>
       (a.fullName || a.username || '').localeCompare(b.fullName || b.username || '')

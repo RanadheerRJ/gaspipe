@@ -33,7 +33,7 @@ import { initConfig, renderConfig } from './config-page.js';
 import { initHistory, renderHistory } from './history.js';
 import { initReports, renderReports } from './reports.js';
 import {
-  signInWithUsernamePin, recordLogout, getMyPinStatus,
+  signInWithUsernamePin, registerWithUsernamePin, recordLogout, getMyPinStatus,
 } from './staff-auth.js';
 import {
   openProfileModal, openForcedCloudPinChange,
@@ -374,6 +374,7 @@ function clearAuthMessage() {
 
 const authSubmitLabel = () => ({
   signin: 'Sign in',
+  signup: 'Create account',
 }[authMode] || 'Sign in');
 
 function resetAuthSubmit() {
@@ -392,7 +393,7 @@ function setAuthSubmitting(busy) {
   btn.disabled = busy;
   if (busy) {
     btn.setAttribute('aria-busy', 'true');
-    btn.textContent = 'Signing in…';
+    btn.textContent = authMode === 'signup' ? 'Creating account…' : 'Signing in…';
   } else {
     btn.removeAttribute('aria-busy');
     btn.textContent = authSubmitLabel();
@@ -447,6 +448,15 @@ function signinFieldsHTML() {
     ${pinFieldHTML({ id: 'auth-pin', label: 'Cloud PIN' })}${remember}`;
 }
 
+function signupFieldsHTML() {
+  const remember = '<label class="remember-row"><input type="checkbox" id="auth-remember" checked /> <span>Remember me on this device</span></label>';
+  return `<div class="field"><label for="auth-username">Username</label>
+      <input type="text" id="auth-username" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="16" required />
+      <small class="hint">4–16 chars: lowercase letters, numbers, dots or underscores.</small></div>
+    ${pinFieldHTML({ id: 'auth-pin', label: 'Cloud PIN', autocomplete: 'new-password' })}
+    ${pinFieldHTML({ id: 'auth-pin-confirm', label: 'Confirm Cloud PIN', autocomplete: 'new-password' })}${remember}`;
+}
+
 function renderAuthFields() {
   const fields = $('auth-fields');
   const links = $('auth-links');
@@ -461,7 +471,11 @@ function renderAuthFields() {
     } else {
       fields.innerHTML = signinFieldsHTML();
     }
-    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="forgot">Forgot Cloud PIN?</button>`;
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signup">Don’t have an account? Create one</button>
+      <button type="button" class="link-btn" data-auth-mode="forgot">Forgot Cloud PIN?</button>`;
+  } else if (authMode === 'signup') {
+    fields.innerHTML = signupFieldsHTML();
+    links.innerHTML = `<button type="button" class="link-btn" data-auth-mode="signin">Already have an account? Sign in</button>`;
   } else {
     fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🔐</span><p>Ask your admin to create a new testing account if you forget your Cloud PIN. Signed-in users can change their own Cloud PIN from Profile.</p></div>
       <div class="auth-info-card"><span aria-hidden="true">📱</span><p>Forgot your <strong>App Lock</strong> PIN? Use “Forgot App Lock PIN?” on the lock screen and answer your security questions.</p></div>`;
@@ -471,17 +485,22 @@ function renderAuthFields() {
   document.querySelectorAll('[data-auth-mode]').forEach(button =>
     button.addEventListener('click', () => setAuthMode(button.dataset.authMode)));
   resetAuthSubmit();
-  $('auth-submit').hidden = authMode === 'forgot' || (authMode === 'signin' && methods.length === 0);
+  $('auth-submit').hidden = authMode === 'forgot' || ((authMode === 'signin' || authMode === 'signup') && methods.length === 0);
 }
 
 
 function setAuthMode(mode) {
-  authMode = mode === 'forgot' ? 'forgot' : 'signin';
+  if (mode === 'signup') authMode = 'signup';
+  else if (mode === 'forgot') authMode = 'forgot';
+  else authMode = 'signin';
   const titles = {
-    signin: 'Sign in', forgot: 'Forgot your Cloud PIN',
+    signin: 'Sign in',
+    signup: 'Create account',
+    forgot: 'Forgot your Cloud PIN',
   };
   const subtitles = {
     signin: 'Sign in with username + Cloud PIN.',
+    signup: 'Create a new account with username + Cloud PIN.',
     forgot: 'How account recovery works.',
   };
   $('auth-title').textContent = titles[authMode] || 'Sign in';
@@ -496,11 +515,11 @@ function setupAuthForm() {
   $('auth-form').addEventListener('submit', async e => {
     e.preventDefault();
     if (authSubmitting) return;
-    if (authMode !== 'signin') return;
     const fail = message => showAuthMessage(message, 'error');
     try {
       setAuthSubmitting(true);
-      await handleSignIn(fail);
+      if (authMode === 'signup') await handleSignUp(fail);
+      else if (authMode === 'signin') await handleSignIn(fail);
     } catch (err) {
       showAuthMessage(formatFirebaseError(err), 'error');
       resetAuthSubmit();
@@ -518,6 +537,19 @@ async function handleSignIn(fail) {
   await setAuthPersistence(remember);
   showAuthMessage('Signing you in…', 'info');
   await signInWithUsernamePin({ username, pin, remember });
+}
+
+async function handleSignUp(fail) {
+  const remember = $('auth-remember')?.checked !== false;
+  const username = $('auth-username')?.value.trim().toLowerCase() || '';
+  const pin = $('auth-pin')?.value || '';
+  const confirm = $('auth-pin-confirm')?.value || '';
+  if (!username || !pin || !confirm) { resetAuthSubmit(); return fail('❌ Fill in username, Cloud PIN and confirmation.'); }
+  if (pin !== confirm) { resetAuthSubmit(); return fail('❌ Cloud PINs do not match.'); }
+
+  await setAuthPersistence(remember);
+  showAuthMessage('Creating your account…', 'info');
+  await registerWithUsernamePin({ username, pin, remember });
 }
 
 
