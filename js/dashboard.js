@@ -91,7 +91,7 @@ function headerHTML(station, sessions, accessibleStations) {
       <time id="dashboard-clock" datetime="${new Date().toISOString()}">${h(new Date().toLocaleTimeString('en-IN', { hour: '2-digit', minute: '2-digit', second: '2-digit' }))}</time></div>
     <div class="dashboard-user-block"><div class="dashboard-user-icon" aria-hidden="true">👤</div><div>
       <span class="eyebrow">My active shift</span><strong id="dashboard-active-hours">${h(activeText)}</strong>
-      <span class="dashboard-user-meta">${h(me.displayName || me.email || 'Signed-in user')} · ${h(ROLES[me.role] || me.role || 'Staff')}</span>
+      <span class="dashboard-user-meta">${h(me.fullName || (me.username ? `@${me.username}` : '') || me.displayName || 'Signed-in user')} · ${h(ROLES[me.role] || me.role || 'Staff')}</span>
       <span class="dashboard-user-meta">${h(assignedText)}</span>
     </div></div>
   </section>`;

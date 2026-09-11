@@ -57,6 +57,27 @@ const FIREBASE_CONFIG = {
   measurementId: 'G-G8SNH63CKY',
 };
 
+// ── Username identity ─────────────────────────────────────────────────
+// Free mode signs in with username + PIN. Firebase Authentication still
+// needs an email-shaped credential, so every username maps to a hidden
+// synthetic address on this domain. Users never see or type that value —
+// the login form, Team UI, and Profile only ever show the username.
+const USERNAME_AUTH_DOMAIN = 'pumplog.app';
+
+const normalizeUsername = value => String(value || '').trim().toLowerCase();
+
+function usernameToEmail(username) {
+  return `${normalizeUsername(username)}@${USERNAME_AUTH_DOMAIN}`;
+}
+
+function emailToUsername(email) {
+  const raw = String(email || '').trim().toLowerCase();
+  const suffix = `@${USERNAME_AUTH_DOMAIN}`;
+  if (raw.endsWith(suffix)) return raw.slice(0, -suffix.length);
+  // Legacy email-based account (pre-username migration): best-effort label.
+  return raw.split('@')[0] || '';
+}
+
 let mainApp = null;
 let mainAuth = null;
 let mainDb = null;
@@ -113,6 +134,10 @@ async function destroyAdminApp() {
 
 export {
   FIREBASE_CONFIG,
+  USERNAME_AUTH_DOMAIN,
+  normalizeUsername,
+  usernameToEmail,
+  emailToUsername,
   initMainApp,
   getDb,
   getAuthInstance,

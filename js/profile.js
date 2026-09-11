@@ -1,7 +1,7 @@
 /* PumpLog — Profile page & account security center
  *
  * Profile
- *   ├── Account          name · username · email · phone · employee ID · role
+ *   ├── Account          name · username · phone · employee ID · role
  *   └── Security
  *         ├── Cloud PIN        change — handled by Firebase Authentication
  *         ├── App Lock PIN     this device only — never synced
@@ -75,7 +75,7 @@ export function initialsFor(userData) {
   const first = (userData?.firstName || userData?.fullName || '').trim();
   const last = (userData?.lastName || '').trim();
   if (first) return `${first[0]}${last ? last[0] : (first.split(' ')[1]?.[0] || '')}`.toUpperCase();
-  return (userData?.username || userData?.email || 'P')[0].toUpperCase();
+  return (userData?.username || 'P')[0].toUpperCase();
 }
 
 export function avatarHTML(userData, size = 'large') {
@@ -114,14 +114,14 @@ export async function openProfileModal({ stations = [], onSignOut } = {}) {
     <div class="profile-hero">
       ${avatarHTML(userData, 'large')}
       <div class="profile-hero-text">
-        <strong>${h(userData.fullName || [userData.firstName, userData.lastName].filter(Boolean).join(' ') || userData.email || 'PumpLog user')}</strong>
+        <strong>${h(userData.fullName || [userData.firstName, userData.lastName].filter(Boolean).join(' ') || userData.username || 'PumpLog user')}</strong>
         <span class="role-badge">${ROLE_BADGE[userData.role] || '⚪'} ${h(ROLES[userData.role] || userData.role || 'Staff')}</span>
         ${(userData.status === 'disabled') ? '<span class="tag tag-disabled">Inactive</span>' : ''}
       </div>
     </div>
 
     <dl class="profile-settings-list profile-detail-grid">
-      <dt>Email</dt><dd>${h(userData.email || '—')}</dd>
+      <dt>Username</dt><dd>${h(userData.username ? `@${userData.username}` : '—')}</dd>
       <dt>Stations</dt><dd>${h(stationText)}</dd>
       <dt>Pumps</dt><dd>${h(pumpText)}</dd>
       <dt>App version</dt><dd>${APP_VERSION_LABEL}</dd>
@@ -133,7 +133,7 @@ export async function openProfileModal({ stations = [], onSignOut } = {}) {
       <div class="security-row">
         <div class="security-row-text">
           <strong>Cloud PIN</strong>
-          <small>Used with your email to sign in through Firebase Authentication.</small>
+          <small>Used with your username to sign in through Firebase Authentication.</small>
         </div>
         <button type="button" id="profile-change-pin" class="btn btn-secondary btn-small">${ICONS.pin} Change</button>
       </div>
@@ -263,11 +263,11 @@ export function openForcedCloudPinChange(status) {
       const currentPin = byId('forced-current-pin').value;
       const newPin = byId('forced-new-pin').value;
       const confirm = byId('forced-confirm-pin').value;
-      if (!currentPin) return fieldFail('forced-pin-error', '❌ Enter your current Cloud PIN.');
+      if (!currentPin) return fieldFail('fror', '❌ Enter your current Cloud PIN.');
       const invalid = validateCloudPinPolicy(newPin, policy);
       if (invalid) return fieldFail('forced-pin-error', invalid);
       if (newPin === currentPin) return fieldFail('forced-pin-error', '❌ Choose a Cloud PIN different from the current one.');
-      if (newPin !== confirm) return fieldFail('forced-pin-error', '❌ New Cloud PINs do not match.');
+      if (newPin !== confirm) return fieldFail('forced-pin-error', '❌ New Cloud PINs do not matchdo not match.');
       setBusy(button, true, 'Saving…');
       try {
         await changeCloudPin({ currentPin, newPin });

@@ -232,11 +232,10 @@ export function watchShifts(stationId, { onUpdate, onError, max = 200 } = {}) {
 // ── Users ───────────────────────────────────────────────────────────────
 export function getAllUsers() {
   return cached('users:all', async () => {
-    // Username/PIN staff profiles intentionally have no email field. Sort
-    // client-side so legacy email users and new identities both appear.
+    // Sort client-side so legacy email users and username identities both appear.
     const snap = await getDocs(collection(getDb(), 'users'));
     return snapToArray(snap).sort((a, b) =>
-      (a.fullName || a.email || a.username || '').localeCompare(b.fullName || b.email || b.username || '')
+      (a.fullName || a.username || '').localeCompare(b.fullName || b.username || '')
     );
   });
 }
@@ -247,7 +246,7 @@ export function getUsersCreatedBy(uid) {
     const snap = await getDocs(
       query(collection(getDb(), 'users'), where('createdBy', '==', uid))
     );
-    return snapToArray(snap).sort((a, b) => (a.email || '').localeCompare(b.email || ''));
+    return snapToArray(snap).sort((a, b) => (a.fullName || a.username || '').localeCompare(b.fullName || b.username || ''));
   });
 }
 
@@ -260,5 +259,5 @@ export async function getStaffForStation(stationId) {
     : await getUsersCreatedBy(me.uid);
   return users
     .filter(user => user.role === 'staff' && (user.stationIds || []).includes(stationId))
-    .sort((a, b) => (a.email || '').localeCompare(b.email || ''));
+    .sort((a, b) => (a.fullName || a.username || '').localeCompare(b.fullName || b.username || ''));
 }

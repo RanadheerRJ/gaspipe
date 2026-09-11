@@ -1,9 +1,11 @@
 /* PumpLog — client-only Firebase Auth helpers
  *
  * Free Spark-plan mode: there are no callable Cloud Functions and no paid
- * backend API. The user's Cloud PIN is used as their Firebase Authentication
- * password through a deterministic app prefix, so the browser only talks to
- * Firebase Auth and Firestore.
+ * backend API. Users sign in with a simple username + Cloud PIN. Firebase
+ * Authentication still needs an email-shaped credential, so each username
+ * maps to a hidden synthetic address (see usernameToEmail in firebase.js)
+ * and the PIN becomes the Auth password through a deterministic app prefix.
+ * The browser only talks to Firebase Auth and Firestore.
  */
 
 import {
@@ -12,6 +14,8 @@ import {
   setAuthPersistence,
   getAdminApp,
   destroyAdminApp,
+  normalizeUsername,
+  usernameToEmail,
   signInWithEmailAndPassword,
   createUserWithEmailAndPassword,
   signOut,
@@ -29,10 +33,17 @@ import {
   collection,
   serverTimestamp,
 } from './firebase.js';
-import { DEFAULT_SECURITY } from './station-settings.js';
+import { DEFAULT_SECURITY, isValidUsername } from './station-settings.js';
 
-export const normalizeUsername = value => String(value || '').trim().toLowerCase();
-const normalizeEmail = value => String(value || '').trim().toLowerCase();
+export { normalizeUsername };
+
+/** Friendly-actionable username check; returns an error string or null. */
+export function validateUsernameFormat(username) {
+  if (!isValidUsername(username)) {
+    return '❌ Username must be 4–16 characters: lowercase letters, numbers, dots or underscores.';
+  }
+  return null;
+}
 
 function pinAuthPassword(pin) {
   const value = String(pin || '').trim();
@@ -57,35 +68,36 @@ export async function listPublicStations() {
   return { stations: [] };
 }
 
-export async function resolveLoginIdentifier() {
-  const err = new Error('Username sign-in is disabled in free mode. Use email + Cloud PIN.');
-  err.code = 'auth/operation-not-allowed';
-  throw err;
+export async function resolveLoginIdentifier(username) {
+  const formatError = validateUsernameFormat(username);
+  if (formatError) {
+    const err = new Error(formatError);
+    err.code = 'auth/invalid-credential';
+    throw err;
+  }
+  return { username: normalizeUsername(username) };
 }
 
-export async function signInWithEmailPin({ email, pin, remember = true }) {
+export async function signInWithUsernamePin({ username, pin, remember = true }) {
   await setAuthPersistence(remember);
   const auth = getAuthInstance();
-  const normalizedEmail = normalizeEmail(email);
+  const id = String(username || '').trim();
+  // Legacy escape hatch: a full email address still signs in verbatim, so any
+  // pre-username email accounts keep working after the migration.
+  const loginEmail = id.includes('@') ? id.toLowerCase() : usernameToEmail(id);
   const password = pinAuthPassword(pin);
   let result;
   try {
-    result = await signInWithEmailAndPassword(auth, normalizedEmail, password);
+    result = await signInWithEmailAndPassword(auth, loginEmail, password);
   } catch (err) {
     // First bootstrap users may have been created manually in Firebase Console
     // with the PIN itself as the password. Support that during testing; new
     // app-created users use the prefixed password above.
     if (!['auth/invalid-credential', 'auth/wrong-password'].includes(err?.code)) throw err;
-    result = await signInWithEmailAndPassword(auth, normalizedEmail, String(pin || '').trim());
+    result = await signInWithEmailAndPassword(auth, loginEmail, String(pin || '').trim());
   }
   await recordLogin().catch(() => {});
   return result;
-}
-
-export async function signInWithUsernamePin() {
-  const err = new Error('Username sign-in is disabled in free mode. Use email + Cloud PIN.');
-  err.code = 'auth/operation-not-allowed';
-  throw err;
 }
 
 // ── PIN lifecycle ───────────────────────────────────────────────────────
@@ -166,7 +178,13 @@ export async function checkUsername(username) {
 }
 
 export async function createUserAccount(payload = {}) {
-  const email = normalizeEmail(payload.email);
+  const username = normalizeUsername(payload.username);
+  const formatError = validateUsernameFormat(username);
+  if (formatError) {
+    const err = new Error(formatError);
+    err.code = 'auth/invalid-credential';
+    throw err;
+  }
   const cloudPin = payload.temporaryCloudPin || payload.pin;
   const currentAdmin = getAuthInstance().currentUser;
   if (!currentAdmin) {
@@ -174,6 +192,18 @@ export async function createUserAccount(payload = {}) {
     err.code = 'permission-denied';
     throw err;
   }
+
+  // Usernames must be unique. Check Firestore for a friendly error up front;
+  // the synthetic Auth email below enforces it again as a backstop.
+  const clash = await getDocs(query(collection(getDb(), 'users'), where('username', '==', username), limit(1)));
+  if (!clash.empty) {
+    const err = new Error('Username already registered.');
+    err.code = 'auth/email-already-in-use';
+    throw err;
+  }
+
+  // Hidden synthetic credential — never shown in the UI, never typed by users.
+  const email = usernameToEmail(username);
 
   const secondary = getAdminApp();
   let created;
@@ -187,12 +217,12 @@ export async function createUserAccount(payload = {}) {
   const uid = created.user.uid;
   const firstName = compact(payload.firstName);
   const lastName = compact(payload.lastName);
-  const fullName = compact(payload.fullName) || [firstName, lastName].filter(Boolean).join(' ') || email;
-  const username = normalizeUsername(payload.username) || email.split('@')[0].replace(/[^a-z0-9_.]/g, '.').slice(0, 16);
+  const fullName = compact(payload.fullName) || [firstName, lastName].filter(Boolean).join(' ') || username;
   const active = payload.active !== false && payload.status !== 'disabled';
 
   const profile = {
     email,
+    username,
     username,
     firstName,
     lastName,
@@ -245,7 +275,7 @@ export async function updateUserAccount(staffId, patch = {}) {
 }
 
 export async function adminSetPassword() {
-  const err = new Error('Password resets are disabled in free mode. Users sign in with email + Cloud PIN only.');
+  const err = new Error('Password resets are disabled in free mode. Users sign in with username + Cloud PIN only.');
   err.code = 'auth/operation-not-allowed';
   throw err;
 }
@@ -274,7 +304,7 @@ export async function removeUserAccount(staffId) {
 
 // ── Legacy onboarding removed in free mode ──────────────────────────────
 function unsupportedInvite() {
-  const err = new Error('Invite/join-code onboarding is disabled in free mode. Create users from Config → Team with email + Cloud PIN.');
+  const err = new Error('Invite/join-code onboarding is disabled in free mode. Create users from Config → Team with username + Cloud PIN.');
   err.code = 'auth/operation-not-allowed';
   throw err;
 }

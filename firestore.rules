@@ -312,8 +312,9 @@ service cloud.firestore {
 
       // ── Station security settings ─────────────────────────────────
       // Feature flags and policy numbers only — never secrets. Free mode uses
-      // email + Cloud PIN through Firebase Auth; only station managers may
-      // change App Lock / Cloud PIN policy settings.
+      // username + Cloud PIN through Firebase Auth (each username maps to a
+      // hidden synthetic email); only station managers may change App Lock /
+      // Cloud PIN policy settings.
       match /settings/{docId} {
         allow read: if true;
         allow create, update, delete: if isSignedIn() && canManageStation(stationId);

@@ -104,6 +104,7 @@ async function createBootstrapProfile(user, db, userRef) {
   // published. A missing pumpIds means "unrestricted — all pumps".
   const data = {
     email: user.email,
+    username: emailToUsername(user.email),
     role: isFirst ? 'superadmin' : 'staff',
     stationIds: [],
     status: 'active',
@@ -132,12 +133,12 @@ export function formatFirebaseError(err) {
   const raw = String(err?.message || '');
 
   const map = {
-    'auth/email-already-in-use': 'Email already registered.',
-    'auth/invalid-email': 'Please enter a valid email address.',
+    'auth/email-already-in-use': 'Username already registered.',
+    'auth/invalid-email': 'Please enter a valid username.',
     'auth/missing-password': 'Please enter your Cloud PIN.',
     'auth/weak-password': 'Cloud PIN does not meet the policy requirements.',
-    'auth/invalid-credential': 'Email or Cloud PIN is incorrect.',
-    'auth/wrong-password': 'Email or Cloud PIN is incorrect.',
+    'auth/invalid-credential': 'Username or Cloud PIN is incorrect.',
+    'auth/wrong-password': 'Username or Cloud PIN is incorrect.',
     'auth/user-not-found': 'That account is not registered.',
     'auth/user-disabled': 'This account has been disabled. Contact your admin.',
     'auth/too-many-requests': 'Too many attempts. Wait a few minutes and try again.',

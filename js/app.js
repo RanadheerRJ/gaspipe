@@ -33,7 +33,7 @@ import { initConfig, renderConfig } from './config-page.js';
 import { initHistory, renderHistory } from './history.js';
 import { initReports, renderReports } from './reports.js';
 import {
-  signInWithEmailPin, recordLogout, getMyPinStatus,
+  signInWithUsernamePin, recordLogout, getMyPinStatus,
 } from './staff-auth.js';
 import {
   openProfileModal, openForcedCloudPinChange,
@@ -49,7 +49,7 @@ let userStations = [];
 let currentPage = 'dashboard';
 let currentRange = 'today';
 let authMode = 'signin';
-let authMethod = 'email-pin';
+let authMethod = 'username-pin';
 let authSubmitting = false;
 let uiReady = false;
 let renderToken = 0;
@@ -225,11 +225,11 @@ function initFreeModeLogin() {
   loginStations = [];
   loginStationId = '';
   loginPolicy = { ...DEFAULT_SECURITY };
-  authMethod = 'email-pin';
+  authMethod = 'username-pin';
   const stationField = $('auth-station-field');
   if (stationField) stationField.classList.add('hidden');
   const subtitle = $('auth-subtitle');
-  if (subtitle) subtitle.textContent = 'Sign in with your email and Cloud PIN.';
+  if (subtitle) subtitle.textContent = 'Sign in with your username and Cloud PIN.';
   renderAuthFields();
 }
 
@@ -351,7 +351,7 @@ async function refreshData(source) {
 // ═══════════════════════════════════════════════════════════════════════
 
 // Station picker/sign-in policy loading is intentionally disabled in free
-// mode. The login screen stays simple and uses email + Cloud PIN only.
+// mode. The login screen stays simple and uses username + Cloud PIN only.
 function watchLoginSettings() {
   loginSettingsUnsub?.();
   loginSettingsUnsub = null;
@@ -442,8 +442,8 @@ function renderMethodTabs() {
 
 function signinFieldsHTML() {
   const remember = '<label class="remember-row"><input type="checkbox" id="auth-remember" checked /> <span>Remember me on this device</span></label>';
-  return `<div class="field"><label for="auth-email">Email</label>
-      <input type="email" id="auth-email" autocomplete="email" autocapitalize="off" spellcheck="false" required /></div>
+  return `<div class="field"><label for="auth-username">Username</label>
+      <input type="text" id="auth-username" autocomplete="username" autocapitalize="off" spellcheck="false" maxlength="16" required /></div>
     ${pinFieldHTML({ id: 'auth-pin', label: 'Cloud PIN' })}${remember}`;
 }
 
@@ -457,7 +457,7 @@ function renderAuthFields() {
   if (authMode === 'signin') {
     if (methods.length === 0) {
       fields.innerHTML = `<div class="auth-info-card"><span aria-hidden="true">🚫</span>
-        <p>Email + Cloud PIN sign-in is disabled for this station. Contact your admin.</p></div>`;
+        <p>Username + Cloud PIN sign-in is disabled for this station. Contact your admin.</p></div>`;
     } else {
       fields.innerHTML = signinFieldsHTML();
     }
@@ -481,7 +481,7 @@ function setAuthMode(mode) {
     signin: 'Sign in', forgot: 'Forgot your Cloud PIN',
   };
   const subtitles = {
-    signin: 'Sign in with email + Cloud PIN.',
+    signin: 'Sign in with username + Cloud PIN.',
     forgot: 'How account recovery works.',
   };
   $('auth-title').textContent = titles[authMode] || 'Sign in';
@@ -511,13 +511,13 @@ function setupAuthForm() {
 
 async function handleSignIn(fail) {
   const remember = $('auth-remember')?.checked !== false;
-  const email = $('auth-email')?.value.trim().toLowerCase() || '';
+  const username = $('auth-username')?.value.trim().toLowerCase() || '';
   const pin = $('auth-pin')?.value || '';
-  if (!email || !pin) { resetAuthSubmit(); return fail('❌ Enter your email and Cloud PIN.'); }
+  if (!username || !pin) { resetAuthSubmit(); return fail('❌ Enter your username and Cloud PIN.'); }
 
   await setAuthPersistence(remember);
   showAuthMessage('Signing you in…', 'info');
-  await signInWithEmailPin({ email, pin, remember });
+  await signInWithUsernamePin({ username, pin, remember });
 }
 
 

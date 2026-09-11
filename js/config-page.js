@@ -20,11 +20,12 @@ import {
 import {
   DEFAULT_SECURITY, normalizeSecurity, getSecuritySettings, saveSecuritySettings,
   mergeSecurity, validateCloudPinPolicy,
-  PIN_COMPLEXITY_OPTIONS, isValidEmail,
+  PIN_COMPLEXITY_OPTIONS,
 } from './station-settings.js';
 import {
   createUserAccount, updateUserAccount,
   deactivateUserAccount, removeUserAccount,
+  checkUsername, validateUsernameFormat,
 } from './staff-auth.js';
 import { openProfileModal, avatarHTML } from './profile.js';
 
@@ -93,7 +94,7 @@ function renderProfileSection(me, stations, pumps) {
     ? (me.pumpIds?.length ? `${me.pumpIds.length} assigned pump${me.pumpIds.length === 1 ? '' : 's'}` : 'All pumps at assigned stations')
     : `${(pumps || []).length || 'All'} pumps visible at this station`;
   return section('Profile', '', `<div class="profile-card-grid">
-    <div class="profile-card-identity">${avatarHTML(me, 'medium')}<div><strong>${h(me.fullName || me.email || 'PumpLog user')}</strong><small>${h(me.email || me.username ? `@${me.username || ''}` : '')}</small></div></div>
+    <div class="profile-card-identity">${avatarHTML(me, 'medium')}<div><strong>${h(me.fullName || me.username || 'PumpLog user')}</strong><small>${h(me.username ? `@${me.username}` : '')}</small></div></div>
     <dl class="profile-settings-list"><dt>Role</dt><dd><span class="role-badge">${ROLE_BADGE[me.role] || '⚪'} ${h(ROLES[me.role] || me.role || 'Staff')}</span></dd>
       <dt>Assigned stations</dt><dd>${h(stationText)}</dd><dt>Pump access</dt><dd>${h(pumpText)}</dd></dl>
     <div class="profile-account-actions"><button type="button" id="config-open-profile" class="btn btn-primary btn-full">${ICONS.user} Profile &amp; security</button></div>
@@ -134,8 +135,8 @@ function renderStationSecuritySection(stationId, security) {
     ${mayEdit ? '' : `<p class="section-hint">Read-only — only a Super Admin or this station's Station Admin can change these.</p>`}
     <div class="settings-group">
       <h4 class="settings-group-title">🔑 Sign-in method</h4>
-      <p class="section-hint">Free mode keeps sign-in simple: email + Cloud PIN using Firebase Authentication. No Cloud Functions or pay-as-you-go APIs are used.</p>
-      ${toggle('enablePinLogin', 'Enable Cloud PIN Login', 'Allow email + Cloud PIN sign-in for this station.', s.enablePinLogin)}
+      <p class="section-hint">Free mode keeps sign-in simple: username + Cloud PIN using Firebase Authentication. No Cloud Functions or pay-as-you-go APIs are used.</p>
+      ${toggle('enablePinLogin', 'Enable Cloud PIN Login', 'Allow username + Cloud PIN sign-in for this station.', s.enablePinLogin)}
     </div>
     <div class="settings-group">
       <h4 class="settings-group-title">📱 App Lock (device-level)</h4>
@@ -170,8 +171,8 @@ function wireStationSecurity(stationId) {
       return el.value;
     };
     const patch = normalizeSecurity({
-      enableEmailLogin: read('enableEmailLogin'),
-      enableUsernameLogin: false,
+      enableEmailLogin: true,
+      enableUsernameLogin: true,
       enablePasswordLogin: false,
       enablePinLogin: read('enablePinLogin'),
       appLockEnabled: read('appLockEnabled'),
@@ -185,8 +186,8 @@ function wireStationSecurity(stationId) {
       pinComplexity: read('pinComplexity'),
       pinRotationDays: read('pinRotationDays'),
     });
-    if (!patch.enableEmailLogin || !patch.enablePinLogin) {
-      toastError('Validation failed — email + Cloud PIN sign-in must stay enabled in free mode.');
+    if (!patch.enableUsernameLogin || !patch.enablePinLogin) {
+      toastError('Validation failed — username + Cloud PIN sign-in must stay enabled in free mode.');
       return;
     }
     const station = stationsCache.find(s => s.id === stationId);
@@ -309,14 +310,14 @@ function renderTeamSection(users, me) {
     <div class="field search-field">
       <label for="team-search" class="sr-only">Search team</label>
       <div class="input-affix search-affix">
-        <input type="search" id="team-search" placeholder="Search by name, username, or email" value="${h(teamSearch)}" />
+        <input type="search" id="team-search" placeholder="Search by name, username, or employee ID" value="${h(teamSearch)}" />
         <span class="affix-btn affix-static" aria-hidden="true">${ICONS.search}</span>
       </div>
     </div>` : '';
 
   const term = teamSearch.trim().toLowerCase();
   const visible = term
-    ? users.filter(u => [u.fullName, u.email, u.username, u.employeeId].some(v => (v || '').toLowerCase().includes(term)))
+    ? users.filter(u => [u.fullName, u.username, u.employeeId].some(v => (v || '').toLowerCase().includes(term)))
     : users;
 
   const listBody = users.length === 0
@@ -328,12 +329,11 @@ function renderTeamSection(users, me) {
   return section('Team', addBtn, `<p class="section-hint">${h(hint)}</p>${searchBar}<div id="team-list">${listBody}</div>`);
 }
 
-function repaintTeamList(me) {
-  const host = byId('team-list');
+function repaintTeamst = byId('team-list');
   if (!host) return;
   const term = teamSearch.trim().toLowerCase();
   const visible = term
-    ? teamCache.filter(u => [u.fullName, u.email, u.username, u.employeeId].some(v => (v || '').toLowerCase().includes(term)))
+    ? teamCache.filter(u => [u.fullName, u.username, u.employeeId].some(v => (v || '').toLowerCase().includes(term)))
     : teamCache;
   host.innerHTML = visible.length
     ? visible.map(user => teamItemHTML(user, me)).join('')
@@ -358,15 +358,15 @@ function teamItemHTML(u, me) {
 
   const actions = [];
   if (mayEdit) {
-    actions.push({ cls: 'edit-user', id: u.id, icon: ICONS.edit, label: `Edit ${u.fullName || u.email}` });
+    actions.push({ cls: 'edit-user', id: u.id, icon: ICONS.edit, label: `Edit ${u.fullName || u.username}` });
     actions.push(u.status === 'disabled'
-      ? { cls: 'activate-user', id: u.id, icon: '▶️', label: `Activate ${u.fullName || u.email}` }
-      : { cls: 'deactivate-user', id: u.id, icon: '⏸️', label: `Deactivate ${u.fullName || u.email}` });
+      ? { cls: 'activate-user', id: u.id, icon: '▶️', label: `Activate ${u.fullName || u.username}` }
+      : { cls: 'deactivate-user', id: u.id, icon: '⏸️', label: `Deactivate ${u.fullName || u.username}` });
   } else if (!isMe) {
     actions.push({ cls: '', id: u.id, icon: ICONS.edit, label: 'Edit unavailable', disabled: true, title: denyReason('user.update', { target: u }) });
   }
   if (mayDelete) {
-    actions.push({ cls: 'remove-user', id: u.id, icon: ICONS.delete, label: `Remove ${u.fullName || u.email}` });
+    actions.push({ cls: 'remove-user', id: u.id, icon: ICONS.delete, label: `Remove ${u.fullName || u.username}` });
   } else if (!isMe) {
     actions.push({ cls: '', id: u.id, icon: ICONS.delete, label: 'Remove unavailable', disabled: true, title: denyReason('user.delete', { target: u }) });
   }
@@ -374,8 +374,8 @@ function teamItemHTML(u, me) {
   return `<div class="config-item team-item">
     ${avatarHTML(u, 'small')}
     <div class="item-info">
-      <div class="item-title">${h(u.fullName || u.email || u.username || 'Unnamed user')}${isMe ? ' <span class="tag tag-you">You</span>' : ''} ${statusTag(u)}${u.pwaLoginAllowed === false ? ' <span class="tag tag-off">PWA off</span>' : ''}</div>
-      <div class="item-meta">${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''}${u.email ? ` · ${h(u.email)}` : ''}${u.employeeId ? ` · ID ${h(u.employeeId)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}</div>
+      <div class="item-title">${h(u.fullName || (u.username ? `@${u.username}` : '') || 'Unnamed user')}${isMe ? ' <span class="tag tag-you">You</span>' : ''} ${statusTag(u)}${u.pwaLoginAllowed === false ? ' <span class="tag tag-off">PWA off</span>' : ''}</div>
+      <div class="item-meta">${ROLE_BADGE[u.role] || '⚪'} ${h(ROLES[u.role] || u.role)}${u.username ? ` · @${h(u.username)}` : ''}${u.employeeId ? ` · ID ${h(u.employeeId)}` : ''} · ${h(stationText)}${pumpText ? ` · ${h(pumpText)}` : ''}</div>
     </div>
     <div class="item-actions">${actions.map(a => `
       <button class="icon-btn ${a.cls}" data-id="${h(a.id)}" aria-label="${h(a.label)}" title="${h(a.title || a.label)}" ${a.disabled ? 'disabled' : ''}>${a.icon}</button>`).join('')}</div>
@@ -888,14 +888,9 @@ async function showUserForm(user) {
       <div class="field"><label for="user-last-name">Last name</label>
         <input type="text" id="user-last-name" maxlength="50" autocomplete="off" value="${h(user.lastName || (user.fullName || '').split(' ').slice(1).join(' ') || '')}" required /></div>
     </div>
-    <div class="form-row">
-      <div class="field"><label>Username</label>
-        <input type="text" value="${h(user.username || '—')}" disabled />
-        <small class="hint">Usernames cannot change after creation.</small></div>
-      <div class="field"><label>Email</label>
-        <input type="text" value="${h(user.email || '—')}" disabled />
-        <small class="hint">Emails are managed by Firebase Authentication.</small></div>
-    </div>
+    <div class="field"><label>Username</label>
+      <input type="text" value="${h(user.username ? `@${user.username}` : '—')}" disabled />
+      <small class="hint">Usernames cannot change after creation. The Cloud PIN is managed by the user from Profile.</small></div>
     <div class="form-row">
       <div class="field"><label for="user-phone">Phone <span class="optional">(optional)</span></label>
         <input type="tel" id="user-phone" autocomplete="off" inputmode="tel" value="${h(user.phoneNumber || '')}" /></div>
@@ -912,8 +907,9 @@ async function showUserForm(user) {
         <input type="text" id="user-last-name" maxlength="50" autocomplete="off" required /></div>
     </div>
     <div class="form-row">
-      <div class="field"><label for="user-email">Email</label>
-        <input type="email" id="user-email" placeholder="name@example.com" autocomplete="off" autocapitalize="off" spellcheck="false" required /></div>
+      <div class="field"><label for="user-username">Username</label>
+        <input type="text" id="user-username" placeholder="e.g. ramesh01" autocomplete="off" autocapitalize="off" spellcheck="false" maxlength="16" required />
+        <small class="hint">4–16 characters: lowercase letters, numbers, dots or underscores.</small></div>
       <div class="field"><label for="user-temp-pin">Cloud PIN</label>
         <input type="text" id="user-temp-pin" inputmode="numeric" pattern="[0-9]{4,8}" maxlength="8" autocomplete="off" required />
         <small id="pin-policy-hint" class="hint"></small></div>
@@ -930,7 +926,7 @@ async function showUserForm(user) {
       <label class="toggle-row"><span class="toggle-text">Allow PWA login</span><input type="checkbox" id="user-allow-pwa" class="toggle-input" role="switch" ${user.pwaLoginAllowed === false ? '' : 'checked'} /></label>
     </div>` : '';
 
-  showFormModal(isEdit ? `Edit — ${user.fullName || user.email || user.username}` : 'Add team member', `
+  showFormModal(isEdit ? `Edit — ${user.fullName || user.username}` : 'Add team member', `
     <form id="user-form" novalidate>
       ${identityFields}
       <div class="field">
@@ -1116,10 +1112,13 @@ async function showUserForm(user) {
         toastSuccess('User Updated');
         rerender();
       } else {
-        const email = byId('user-email').value.trim().toLowerCase();
+        const username = byId('user-username').value.trim().toLowerCase();
         const temporaryCloudPin = byId('user-temp-pin').value;
 
-        if (!isValidEmail(email)) return failInline('❌ Validation failed — enter a valid email address.');
+        const usernameError = validateUsernameFormat(username);
+        if (usernameError) return failInline(usernameError);
+        const { available } = await checkUsername(username).catch(() => ({ available: true }));
+        if (!available) return failInline('❌ Username already registered.');
         const policy = await policyForSelection();
         const pinError = validateCloudPinPolicy(temporaryCloudPin, policy);
         if (pinError) return failInline(pinError);
@@ -1127,7 +1126,7 @@ async function showUserForm(user) {
         const result = await createUserAccount({
           firstName,
           lastName,
-          email,
+          username,
           role,
           stationIds: role === 'superadmin' ? [] : stationIds,
           pumpIds,
@@ -1154,10 +1153,10 @@ function showUserCreated(result, credentials) {
   byId('modal-body').innerHTML = `<div class="staff-created-success">
     <div class="success-check" aria-hidden="true">✓</div>
     <h3>Share these credentials privately</h3>
-    <p class="muted-note">${h(result.fullName)} signs in with email + Cloud PIN. This is the only time the Cloud PIN is shown.</p>
+    <p class="muted-note">${h(result.fullName)} signs in with username + Cloud PIN. This is the only time the Cloud PIN is shown.</p>
     <dl class="staff-created-details credentials-details">
       <dt>Name</dt><dd>${h(result.fullName)}</dd>
-      <dt>Email</dt><dd>${h(result.email)}</dd>
+      <dt>Username</dt><dd><output>@${h(result.username)}</output></dd>
       <dt>Role</dt><dd>${h(ROLES[result.role] || result.role)}</dd>
       <dt>Cloud PIN</dt><dd><output>${h(credentials.temporaryCloudPin)}</output></dd>
     </dl>
@@ -1171,7 +1170,7 @@ function showUserCreated(result, credentials) {
   byId('copy-user-credentials')?.addEventListener('click', async event => {
     const text = [
       `PumpLog account for ${result.fullName}`,
-      `Sign in: ${result.email}`,
+      `Username: ${result.username}`,
       `Cloud PIN: ${credentials.temporaryCloudPin}`,
     ].join('\n');
     try {
@@ -1200,7 +1199,7 @@ async function deactivateUser(user) {
     toastError(denyReason('user.delete', { target: user }));
     return;
   }
-  const name = user.fullName || user.email || user.username || 'This user';
+  const name = user.fullName || user.username || 'This user';
   const ok = await confirmDialog({
     title: `${ICONS.warning} Deactivate Account`,
     message: `${name} will immediately lose access to PumpLog. History and assignments stay for audit. You can reactivate the account later.`,
@@ -1238,7 +1237,7 @@ async function removeUser(user) {
     toastError(denyReason('user.delete', { target: user }));
     return;
   }
-  const name = user.fullName || user.email || user.username || 'this user';
+  const name = user.fullName || user.username || 'this user';
   const ok = await confirmDelete(`${name} will permanently lose access. Their profile, secure identity, and sign-in credential will be deleted. Past shift records stay for audit.`);
   if (!ok) return;
 
@@ -1254,7 +1253,7 @@ async function removeUser(user) {
 
 // ── Station Admin invite ────────────────────────────────────────────────
 async function createStationAdminInvite() {
-  toastError('Invite codes are disabled in free mode. Create users from Config → Team with email + Cloud PIN.');
+  toastError('Invite codes are disabled in free mode. Create users from Config → Team with username + Cloud PIN.');
 }
 
 
@@ -1269,4 +1268,19 @@ function showFieldError(el, message) {
   if (!el) return;
   el.textContent = message;
   el.classList.remove('hidden');
+}
+.remove('hidden');
+}
+}
+.remove('hidden');
+}
+enModal('generic-modal');
+}
+
+function showFieldError(el, message) {
+  if (!el) return;
+  el.textContent = message;
+  el.classList.remove('hidden');
+}
+.remove('hidden');
 }
