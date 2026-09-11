@@ -1,0 +1,87 @@
+# Deploys PumpLog Firestore security rules only.
+# Spark/free mode intentionally does not deploy Cloud Functions, so Firebase
+# billing / pay-as-you-go is not required for this app workflow.
+
+name: Deploy Firebase rules
+
+on:
+  push:
+    branches:
+      - main
+      - master
+      - dev
+      - 'arena/**'
+  workflow_dispatch:
+
+permissions:
+  contents: read
+
+concurrency:
+  group: firebase-rules-deploy
+  cancel-in-progress: false
+
+jobs:
+  deploy:
+    name: Deploy Firestore rules
+    runs-on: ubuntu-latest
+    steps:
+      - name: Check for the service-account secret
+        id: secret_check
+        env:
+          SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: |
+          if [ -z "$SA_JSON" ]; then
+            echo "configured=false" >> "$GITHUB_OUTPUT"
+          else
+            echo "configured=true" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Secret not configured — nothing to do
+        if: steps.secret_check.outputs.configured != 'true'
+        run: |
+          echo "::notice title=Setup needed::Add the FIREBASE_SERVICE_ACCOUNT repository secret to enable automatic Firestore rules deploys."
+
+      - name: Check out the repository
+        if: steps.secret_check.outputs.configured == 'true'
+        uses: actions/checkout@v4
+
+      - name: Write service-account credentials
+        if: steps.secret_check.outputs.configured == 'true'
+        env:
+          SA_JSON: ${{ secrets.FIREBASE_SERVICE_ACCOUNT }}
+        run: printf '%s' "$SA_JSON" > "${{ runner.temp }}/firebase-sa.json"
+
+      - name: Validate service-account credentials
+        if: steps.secret_check.outputs.configured == 'true'
+        env:
+          SA_PATH: ${{ runner.temp }}/firebase-sa.json
+        run: |
+          node -e '
+            const fs = require("fs");
+            let sa;
+            try { sa = JSON.parse(fs.readFileSync(process.env.SA_PATH, "utf8")); }
+            catch (err) {
+              console.error("::error title=Invalid FIREBASE_SERVICE_ACCOUNT::The secret is not valid JSON. Re-download the key and paste the entire file. (" + err.message + ")");
+              process.exit(1);
+            }
+            const missing = ["type", "project_id", "private_key", "client_email", "token_uri"].filter(k => !sa[k]);
+            if (missing.length) {
+              console.error("::error title=Incomplete FIREBASE_SERVICE_ACCOUNT::Missing field(s): " + missing.join(", "));
+              process.exit(1);
+            }
+            if (sa.project_id !== "gass-13462") {
+              console.error("::error title=Wrong project::The key belongs to " + sa.project_id + " but this repo deploys to gass-13462.");
+              process.exit(1);
+            }
+            console.log("Credentials OK — project: " + sa.project_id);
+          '
+
+      - name: Deploy Firestore rules
+        if: steps.secret_check.outputs.configured == 'true'
+        env:
+          GOOGLE_APPLICATION_CREDENTIALS: ${{ runner.temp }}/firebase-sa.json
+        run: npx --yes firebase-tools@15 deploy --only "firestore:rules" --non-interactive
+
+      - name: Remove credentials
+        if: always()
+        run: rm -f "${{ runner.temp }}/firebase-sa.json"
