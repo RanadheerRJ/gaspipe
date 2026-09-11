@@ -115,9 +115,9 @@ service cloud.firestore {
     }
 
     function userFieldsOk() {
-      return request.resource.data.keys().hasAll(['role', 'stationIds'])
-        && (request.resource.data.keys().hasAny(['email'])
-            || request.resource.data.keys().hasAny(['username']))
+      return request.resource.data.keys().hasAll(['role', 'stationIds', 'username'])
+        && request.resource.data.username is string
+        && request.resource.data.username.matches('^[a-z0-9_.]{4,16}$')
         && request.resource.data.keys().hasOnly([
              'email', 'firstName', 'lastName', 'fullName', 'username', 'phoneNumber',
              'employeeId', 'avatarUrl', 'role', 'stationIds', 'pumpIds',
@@ -147,10 +147,13 @@ service cloud.firestore {
     }
 
     // Fields a self-signup may set on its own profile.
+    // Username-only: the synthetic email on the Auth token must match username@pumplog.app
     function isOwnNewProfile(uid) {
       return isSignedIn()
         && request.auth.uid == uid
-        && request.resource.data.email == request.auth.token.email
+        && request.resource.data.username is string
+        && (request.resource.data.username + '@pumplog.app' == request.auth.token.email
+            || (request.resource.data.keys().hasAny(['email']) && request.resource.data.email == request.auth.token.email))
         && request.resource.data.stationIds.size() == 0
         && (!request.resource.data.keys().hasAny(['pumpIds'])
             || request.resource.data.pumpIds.size() == 0)
@@ -187,8 +190,7 @@ service cloud.firestore {
         && resource.data.role == 'staff'
         && resource.data.createdBy == request.auth.uid
         && request.resource.data.role == 'staff'
-        && ((!resource.data.keys().hasAny(['email']) && !request.resource.data.keys().hasAny(['email']))
-            || request.resource.data.email == resource.data.email)
+        && request.resource.data.username == resource.data.username
         && request.resource.data.createdBy == resource.data.createdBy
         && request.resource.data.stationIds.hasOnly(myStations())
         && userFieldsOk();
