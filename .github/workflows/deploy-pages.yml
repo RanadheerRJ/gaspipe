@@ -1,1 +1,52 @@
 
+# LIVE: Builds a fresh version.json (UTC deploy timestamp + short commit SHA)
+# and publishes the static PumpLog site to GitHub Pages on every push to main.
+#
+# This is the LIVE copy at .github/workflows/deploy-pages.yml — the reference
+# copy lives at ci/deploy-pages.yml. Keep them in sync when you edit either.
+#
+# REQUIRED ONE-TIME SETUP: Settings → Pages → Build and deployment → Source
+# must be "GitHub Actions" (not "Deploy from a branch"). See DEPLOYMENT.md.
+
+name: Deploy to GitHub Pages
+
+on:
+  push:
+    branches:
+      - main
+  workflow_dispatch:
+
+permissions:
+  contents: read
+  pages: write
+  id-token: write
+
+concurrency:
+  group: pages
+  cancel-in-progress: true
+
+jobs:
+  build:
+    name: Build site + version.json
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - run: |
+          SHORT_SHA=$(git rev-parse --short HEAD)
+          DEPLOYED_AT=$(date -u +"%Y-%m-%dT%H:%M:%SZ")
+          printf '{\n  "deployedAt": "%s",\n  "commit": "%s"\n}\n' "$DEPLOYED_AT" "$SHORT_SHA" > version.json
+          cat version.json
+      - run: |
+          mkdir -p _site
+          cp -r index.html manifest.json sw.js version.json css js icons _site/
+      - uses: actions/configure-pages@v5
+      - uses: actions/upload-pages-artifact@v3
+        with: { path: '_site' }
+  deploy:
+    needs: build
+    runs-on: ubuntu-latest
+    environment:
+      name: github-pages
+      url: ${{ steps.deployment.outputs.page_url }}
+    steps:
+      - uses: actions/deploy-pages@v4
